@@ -1,0 +1,45 @@
+# Lab runtime outputs — NEVER commit
+results/
+logs/
+db/
+state/
+
+# Derived files
+*.csv
+*.jsonl
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Reports (machine-specific paths — gitignored except README)
+*.md
+!README.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+!.env.example
+
+# Windows
+Thumbs.db
+desktop.ini
+*.lnk
+$RECYCLE.BIN/
+
+# Editor artifacts
+.vscode/
+.idea/
+*.suo
+*.user
