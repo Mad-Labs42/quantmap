@@ -26,6 +26,10 @@ Adds a portable `n_gpu_layers` sweep campaign to QuantMap. The campaign establis
 | GGML_ASSERT | Lower-confidence OOM signal | Too broad — only matched when co-occurring with allocation context |
 | gpu_vram_total_mb | Same pynvml device handle as telemetry | Ensures single-GPU capture, not sum of all GPUs |
 | Values sort validation | Validate ascending in `--validate`; auto-sort with warning at runtime | Monotonicity assumption for early termination requires ascending order |
+| Sweet-spot recommendation | Replaced by `min_context_length`-based recommendation | No arbitrary percentage thresholds; user states their actual requirement |
+| vram_headroom_pct_min | Removed | Replaced by explicit context-length requirement |
+| Est. Max Context | KV cache formula from model architecture params | Directly actionable: tells users what context depth each layer count supports |
+| Diminishing returns | Marginal gain annotation at 15% of peak, display-only | Observation on data curve, not a recommendation; 15% is a display heuristic |
 
 ---
 
@@ -53,8 +57,9 @@ Fields:
 - `variable: "n_gpu_layers"` — matches the baseline.yaml config key
 - `values: [10, 20, 30, 40, 50, 60, 70, 80, 90, 999]` — DEEP THOUGHT defaults (step 10, plus 999 for "all layers")
 - `oom_boundary_sweep: true` — opts the runner into OOM-aware handling and ascending-sort validation
-- `vram_headroom_pct_min: 20` — sweet-spot recommendation threshold (configs using ≤80% VRAM)
-- No `type:` field — nothing in the runner or report reads it; omitting avoids a dead schema field
+- `min_context_length: null` — optional; when set (e.g. `8192`), report adds a targeted recommendation for the fastest config able to sustain that context depth; when null/absent, no single recommendation is made
+- No `type:` field — nothing reads it; omitting avoids a dead schema field
+- No `vram_headroom_pct_min` field — removed; no arbitrary percentage thresholds
 
 Commented VRAM tier block (guidance only — not parsed):
 ```yaml
@@ -197,6 +202,13 @@ for i, config in enumerate(configs):
 
 **Crash recovery after partial `skipped_oom` batch:** All remaining configs are written to the DB as `skipped_oom` *before* `break` executes. If the runner crashes between the DB write and `_clear_progress()`, a resume will see those configs already in the DB with a non-`pending`/non-`running` status and skip them. The `consecutive_ooms` counter is not persisted — it is re-derived from the campaign loop. On resume, if all remaining configs are already `skipped_oom`, the loop body is never entered for them and the campaign completes cleanly.
 
+### `--dry-run` output for OOM-boundary campaigns
+When `oom_boundary_sweep` is True, the dry-run summary includes a dedicated line after the standard config/cycle/request counts:
+```
+OOM boundary detection: enabled (early termination after 2 consecutive OOMs)
+```
+Purpose: the user confirms OOM-aware behavior is active before committing to a multi-hour run.
+
 ---
 
 ## Section 5: Analysis and Report
@@ -215,29 +227,67 @@ Returns `{config_id: {"peak_mb": float, "avg_mb": float, "total_mb": float | Non
 
 **Important:** OOM and skipped configs produce zero telemetry rows. Their `config_id`s are absent from the returned dict. All callers must use `.get(config_id)` and handle `None` — never `dict[config_id]` directly. The report renders `—` for absent entries.
 
+### KV cache estimation
+Used to compute **Est. Max Context** for each config. Formula:
+
+```
+est_max_context_tokens = vram_free_bytes / kv_cache_bytes_per_token
+```
+
+Where:
+- `vram_free_bytes = (total_mb - peak_mb) * 1024 * 1024`
+- `kv_cache_bytes_per_token = n_kv_layers_on_gpu * 2 * n_kv_heads * head_dim * bytes_per_element`
+  - `n_kv_layers_on_gpu` = number of transformer layers on GPU (= min(n_gpu_layers, total_layers))
+  - `n_kv_heads` = number of KV heads (GQA: n_heads / gqa_factor)
+  - `head_dim` = d_model / n_heads
+  - `bytes_per_element` = 2 for f16 (default), 1 for q8_0, 0.5 for q4_0 (from `kv_cache_type_k` in baseline config)
+
+**Source of architecture parameters:** baseline.yaml `model:` section. Currently it records `total_params_b`, `architecture`, `experts_total`, etc. — but does NOT record `n_layers`, `n_kv_heads`, or `d_model`. If these fields are absent, Est. Max Context is shown as "N/A" throughout the report, with a note: "Context estimation unavailable — add n_layers, n_kv_heads, d_model to baseline.yaml model section."
+
+**This feature therefore requires a one-time addition** of those three fields to `baseline.yaml` before the NGL sweep report can show estimates. The implementation must not crash or skip the column silently — it must show "N/A" with an explanatory note.
+
 ### Report NGL sweep section
 Condition: `campaign.get("variable") == "n_gpu_layers"` (checked in `generate_report()`).
 
 Title: **"GPU Layer Sweep — Throughput vs. VRAM"**
 
-One table covering every value in the sweep, rows sorted by NGL ascending:
+Table columns (sorted by NGL ascending):
 
-| NGL | VRAM Used | VRAM % | TG Median | TG P10 | Score | Notes |
-|-----|-----------|--------|-----------|--------|-------|-------|
-| 10  | 4,821 MB  | 20%    | 5.43      | 5.12   | 0.312 | —     |
-| …   | …         | …      | …         | …      | …     | —     |
-| 80  | 22,100 MB | 92%    | 10.97     | 10.41  | 0.911 | ★ score winner |
-| 90  | —         | —      | —         | —      | —     | OOM: CUDA error: out of memory attempting to allocate 1.2 GB |
-| 999 | —         | —      | —         | —      | —     | skipped (boundary confirmed) |
+| NGL | TG (t/s) | TG P10 | VRAM Used | VRAM Free | Est. Max Context | Score | Notes |
+|-----|----------|--------|-----------|-----------|-----------------|-------|-------|
+| 10  | 5.43     | 5.12   | 4,821 MB  | 19,555 MB | 163K tokens     | 0.312 | —     |
+| …   | …        | …      | …         | …         | …               | …     | —     |
+| 60  | 9.10     | 8.87   | 16,400 MB | 8,576 MB  | 16K tokens      | 0.741 | ← diminishing returns beyond this point |
+| 80  | 10.97    | 10.41  | 22,100 MB | 2,276 MB  | 3.8K tokens     | 0.911 | ★ score winner |
+| 90  | —        | —      | —         | —         | —               | —     | OOM: CUDA error: out of memory |
+| 999 | —        | —      | —         | —         | —               | —     | skipped (boundary confirmed) |
 
-VRAM % = `peak_mb / total_mb * 100`. If `total_mb` is NULL, VRAM % shows "N/A".
+**VRAM Free** = `total_mb - peak_mb`. Shows "N/A" if `total_mb` is NULL.
 
-**Sweet-spot recommendation** (below table): highest-scoring config with VRAM usage ≤ `(100 - vram_headroom_pct_min)%`. `vram_headroom_pct_min` is read from `campaign.get("vram_headroom_pct_min", 20)` — default 20 if absent so the section never crashes on campaigns that omit the field. Example output:
-> "Sweet spot: NGL=70 — 83% VRAM (4.1 GB headroom), TG median 10.51 t/s. NGL=80 is 4% faster but leaves only 8% VRAM headroom — vulnerable to context growth or concurrent use."
+**Est. Max Context** = computed from KV cache formula above. Shows "N/A" if model architecture params absent or VRAM free is N/A.
 
-If no OOM occurred: "No OOM boundary reached — all layer counts are viable on this GPU."
+**Diminishing returns annotation:** Compute marginal throughput gain per layer step for each consecutive pair of viable (non-OOM) configs:
+```
+marginal_gain(i) = (tg_i - tg_{i-1}) / (ngl_i - ngl_{i-1})
+```
+Find `peak_marginal = max(marginal_gain)`. Annotate the first row where `marginal_gain` drops below `0.15 * peak_marginal` with "← diminishing returns beyond this point". This annotation is display-only — it never affects scoring, elimination, or recommendations. If fewer than 3 viable configs exist, skip the annotation (not enough data for a meaningful trend).
 
-If VRAM total is unavailable throughout (all NULL), skip the sweet-spot recommendation and note "VRAM total unavailable (pynvml not running at campaign start) — headroom analysis skipped."
+### Below-table text
+**If `min_context_length` is set** (e.g. `min_context_length: 8192`):
+
+Find the viable configs (non-OOM, non-skipped) with `est_max_context >= min_context_length`, sorted by TG median descending. Take the first (fastest):
+> "For your stated minimum of 8K context: NGL=60 (TG median 9.1 t/s, est. max context 16K, 6.7 GB VRAM free). This is the fastest config that meets your context requirement."
+
+If no config meets the requirement:
+> "No config in this sweep can sustain 8K context — consider a smaller quantization or fewer layers on GPU."
+
+If Est. Max Context is N/A (model params absent), skip this recommendation entirely and note:
+> "Context-based recommendation unavailable — add n_layers, n_kv_heads, d_model to baseline.yaml model section."
+
+**If `min_context_length` is null or absent:**
+> "No context requirement specified. Set min_context_length in your campaign YAML to get a targeted recommendation, or choose from the table above based on your workload."
+
+**Score winner** (always present, independent of context recommendation): rendered by the existing report infrastructure, unchanged.
 
 ### Scoring exclusion
 OOM and skipped configs have `status != 'complete'`. The existing `WHERE status = 'complete'` filter in `score_campaign()` excludes them automatically. **No changes to score.py.**
