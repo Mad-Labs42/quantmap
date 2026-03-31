@@ -590,10 +590,12 @@ def _build_markdown(
                 (winner, campaign_id),
             ).fetchone()
 
-        server_bin = os.getenv("QUANTMAP_SERVER_BIN",
-                               r"D:\.store\tools\llama.cpp\build-B\bin\llama-server.exe")
-        model_path = os.getenv("QUANTMAP_MODEL_PATH",
-                               r"D:\.store\models\MiniMax-M2.5\UD-Q3_K_XL\MiniMax-M2.5-UD-Q3_K_XL-00001-of-00004.gguf")
+        server_bin = os.getenv("QUANTMAP_SERVER_BIN")
+        if server_bin is None:
+            server_bin = "<QUANTMAP_SERVER_BIN not set — copy .env.example to .env>"
+        model_path = os.getenv("QUANTMAP_MODEL_PATH")
+        if model_path is None:
+            model_path = "<QUANTMAP_MODEL_PATH not set — copy .env.example to .env>"
         build_commit = snap.get("build_commit", runtime.get("build_commit", "afa6bfe4f"))
 
         sections.append("```batch")
