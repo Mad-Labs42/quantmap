@@ -327,7 +327,9 @@ QuantMap is in active development. If you want to contribute, open an issue firs
 
 ## License
 
-[TBD — choose before public release]
+This project is licensed under the [Business Source License 1.1](LICENSE).
+
+You are free to use QuantMap for personal, non-commercial purposes. Commercial use requires written permission from the author. See the [LICENSE](LICENSE) file for full terms.
 
 ---
 
