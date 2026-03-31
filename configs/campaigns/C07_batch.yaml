@@ -1,0 +1,14 @@
+campaign_id: "C07_batch"
+description: "Sweep --batch-size across 512, 1024, 2048, 4096"
+variable: "batch_size"
+values: [512, 1024, 2048, 4096]
+type: "primary_sweep"
+rationale: >
+  batch-size controls the maximum logical batch for prompt processing.
+  2048 is the locked baseline. Prior testing showed no regression vs higher
+  values, but this campaign validates the full range including 512.
+notes:
+  - "2048 (baseline) is in-campaign anchor"
+  - "batch-size >= ubatch-size required; batch=512 needs ubatch=256 or less"
+  - "For batch=512, ubatch is automatically clamped to min(ubatch, batch)"
+batch_constraint: "batch_size >= ubatch_size"

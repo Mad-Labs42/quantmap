@@ -1,0 +1,14 @@
+campaign_id: "C04_context_size"
+description: "Sweep context size: 8192, 16384, 32768"
+variable: "context_size"
+values: [8192, 16384, 32768]
+type: "primary_sweep"
+rationale: >
+  Context size directly affects KV cache size and therefore VRAM and RAM usage.
+  Smaller context frees memory and may improve TG by reducing cache pressure.
+  32768 is the operating baseline (saves ~7.9GB vs the 196k trained context).
+  This campaign validates whether further reduction provides measurable TG gain.
+notes:
+  - "32768 (baseline) is included as in-campaign anchor"
+  - "8192 may be limiting for real Mimiry conversations — capability tradeoff"
+  - "TG improvement from smaller context is a known llama.cpp pattern"

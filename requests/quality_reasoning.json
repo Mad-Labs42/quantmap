@@ -1,0 +1,13 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "A train leaves Chicago at 9am traveling at 80mph toward New York. Another train leaves New York at 11am traveling at 100mph toward Chicago. The cities are 790 miles apart. At what time do they meet and how far from Chicago? Show your full reasoning step by step."
+    }
+  ],
+  "max_tokens": 512,
+  "temperature": 0.1,
+  "stream": true,
+  "seed": 42,
+  "stream_options": { "include_usage": true }
+}

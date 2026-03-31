@@ -1,0 +1,14 @@
+campaign_id: "C06_ubatch"
+description: "Sweep --ubatch-size across 256, 512, 1024, 2048"
+variable: "ubatch_size"
+values: [256, 512, 1024, 2048]
+type: "primary_sweep"
+rationale: >
+  ubatch controls the micro-batch size for CPU+GPU hybrid prefill batching.
+  512 is the locked baseline from prior experiments. This campaign validates
+  the full range and confirms whether 512 is optimal or if other values
+  improve TTFT or TG.
+notes:
+  - "512 (baseline) is in-campaign anchor"
+  - "Larger ubatch may improve PP throughput at cost of TTFT latency"
+  - "Smaller ubatch reduces PP throughput but may improve first-token latency"

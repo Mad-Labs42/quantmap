@@ -1,0 +1,17 @@
+campaign_id: "C11_cpu_affinity"
+description: "Sweep CPU affinity policy: OS scheduler (all cores) vs P-cores only"
+variable: "cpu_affinity"
+values: ["all_cores", "p_cores_only"]
+type: "extended_sweep"
+rationale: >
+  Prior manual testing showed P-core-only pinning at -28% regression vs OS scheduler.
+  This campaign validates that finding with proper statistical rigor.
+  i9-12900K has 8 P-cores (16 threads with HT) + 8 E-cores (8 threads, no HT).
+  P-cores: logical CPUs 0-15. E-cores: logical CPUs 16-23.
+cpu_affinity_details:
+  all_cores: null       # No affinity mask — OS scheduler manages all 24 threads
+  p_cores_only: "0-15"  # Logical CPUs 0-15 (P-cores + hyperthreads only)
+notes:
+  - "all_cores (baseline) is expected to win based on prior -28% result"
+  - "Lab validates this finding with 5 cycles × 6 requests (vs prior 1-run manual test)"
+  - "CPU affinity set on server process via Windows Job Object or SetProcessAffinityMask"

@@ -1,0 +1,15 @@
+campaign_id: "C10_mmap"
+description: "Sweep --mmap: default (true) vs disabled (false)"
+variable: "mmap"
+values: [true, false]
+type: "extended_sweep"
+rationale: >
+  mmap controls whether model shards are memory-mapped (OS page cache) or
+  fully loaded into process memory. With mmap=true (default), the OS can
+  page out unused regions; with mmap=false, all weights are locked in RAM.
+  For a 94GB model on 128GB RAM, mmap behavior significantly affects
+  startup time and potentially TG consistency.
+notes:
+  - "mmap=false effectively acts like mlock for the model file"
+  - "mmap=true is the default and baseline; mmap=false may improve TG consistency"
+  - "With 128GB RAM and 94GB model, mmap=false should be viable"

@@ -1,0 +1,14 @@
+campaign_id: "C02_n_parallel"
+description: "Sweep --parallel (KV cache slots) across 1, 2, 4"
+variable: "n_parallel"
+values: [1, 2, 4]
+type: "primary_sweep"
+rationale: >
+  n_parallel sets the number of KV cache slots. For a single-user deployment,
+  n_parallel > 1 adds memory overhead without concurrent request benefit.
+  However, it may affect internal scheduling and prefill behavior.
+  Lab validates whether extra slots help, hurt, or are neutral for single-user TG.
+notes:
+  - "Single-user deployment: n_parallel > 1 adds KV slots but no concurrent users"
+  - "May affect internal memory allocation patterns for 94GB MoE model"
+  - "Test even if outcome expected to be neutral — no assumptions"

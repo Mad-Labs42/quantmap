@@ -1,0 +1,15 @@
+campaign_id: "C13_defrag_thold"
+description: "Sweep --defrag-thold: disabled (-1), low (0.01), default (0.1), high (0.5), aggressive (1.0)"
+variable: "defrag_thold"
+values: [-1.0, 0.01, 0.1, 0.5, 1.0]
+type: "extended_sweep"
+rationale: >
+  defrag-thold controls the KV cache defragmentation threshold. When the KV
+  cache becomes fragmented (from variable-length conversations), defragmentation
+  consolidates slots. For Mimiry (multi-turn conversations), this directly
+  affects TTFT stability over a session. -1 disables defragmentation entirely.
+notes:
+  - "0.1 (baseline) is in-campaign anchor"
+  - "-1.0 disables defrag — may cause TTFT to degrade in warm requests"
+  - "1.0 defragments aggressively — may add latency spikes but improve P90"
+  - "Effect is most visible in warm TTFT P90, not warm TG median"

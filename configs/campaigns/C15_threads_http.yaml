@@ -1,0 +1,14 @@
+campaign_id: "C15_threads_http"
+description: "Sweep --threads-http: 1 (default), 2, 4"
+variable: "threads_http"
+values: [1, 2, 4]
+type: "extended_sweep"
+rationale: >
+  threads-http controls the number of threads dedicated to HTTP request handling
+  (separate from inference threads). For single-user deployment, 1 thread is
+  normally sufficient. This campaign validates whether additional HTTP threads
+  reduce TTFT latency (by handling connection overhead on dedicated threads).
+notes:
+  - "1 (baseline) is in-campaign anchor"
+  - "Expected to be neutral for single-user; lab confirms"
+  - "Higher values consume additional CPU threads from inference pool"
