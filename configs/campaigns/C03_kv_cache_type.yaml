@@ -1,0 +1,16 @@
+campaign_id: "C03_kv_cache_type"
+description: "Sweep KV cache quantization: f16, q8_0, q4_0"
+variable: "kv_cache_type_k"
+values: ["f16", "q8_0", "q4_0"]
+type: "primary_sweep"
+# kv_cache_type_v mirrors kv_cache_type_k in this campaign
+kv_mirror_v: true
+rationale: >
+  KV cache quantization reduces VRAM usage at potential quality/speed cost.
+  At context_size=32768, KV cache is ~1-2GB in f16. Quantizing to q8_0 or q4_0
+  saves VRAM and may improve TG by reducing memory bandwidth.
+  Quality impact is not measured (performance lab) but TG impact is.
+notes:
+  - "Both K and V cache types are set identically in this sweep"
+  - "VRAM savings may allow other tensors to move to GPU in future campaigns"
+  - "q4_0 may cause quality degradation — irrelevant to TG measurement"

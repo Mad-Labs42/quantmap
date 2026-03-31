@@ -1,0 +1,15 @@
+campaign_id: "C12_mlock"
+description: "Sweep --mlock: false (default) vs true (lock model weights in RAM)"
+variable: "mlock"
+values: [false, true]
+type: "extended_sweep"
+rationale: >
+  mlock=true prevents the OS from paging any model weight pages to disk.
+  On Windows, this maps to VirtualLock behavior. With 94GB model and 128GB RAM,
+  mlock=true should be viable and may improve TG consistency by eliminating
+  any OS memory pressure page faults during inference.
+notes:
+  - "false (baseline) is first in sweep"
+  - "mlock=true may require elevated privileges (llama.cpp handles this)"
+  - "Check server log for mlock warnings if it fails silently"
+  - "Combined with mmap=false (C10 winner) may be tested in Finalist"

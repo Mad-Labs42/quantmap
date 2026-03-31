@@ -1,0 +1,21 @@
+campaign_id: "C09_tensor_placement"
+description: "Sweep -ot (override-tensor) pattern granularity within exps=CPU assumption"
+variable: "override_tensor"
+values:
+  - "exps=CPU"                                     # Baseline (locked assumption)
+  - "blk.0-20.ffn_.*=CPU,exps=CPU"                # First 20 blocks CPU-heavy
+  - "blk.21-40.ffn_.*=CPU,exps=CPU"               # Middle blocks CPU-heavy
+  - "blk.0-10.ffn_.*=CPU,exps=CPU"                # First 10 blocks only
+  - "blk.0-30.ffn_.*=CPU,exps=CPU"                # First 30 blocks
+type: "extended_sweep"
+rationale: >
+  The locked assumption is -ot exps=CPU (all expert FFN to CPU RAM).
+  This campaign tests whether more granular tensor placement patterns — routing
+  specific layer ranges to CPU while leaving others on GPU — improve TG.
+  On a single RTX 3090, 94GB of expert weights must be in CPU RAM regardless
+  of -ngl. This tests the routing code path granularity, not fundamental placement.
+notes:
+  - "exps=CPU (baseline) is first in the sweep as anchor"
+  - "If a future second GPU is added, this entire campaign must be re-run"
+  - "Pattern strings are passed verbatim to -ot flag"
+  - "Invalid patterns will cause server startup failure — runner handles this"

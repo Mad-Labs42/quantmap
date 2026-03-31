@@ -1,0 +1,15 @@
+campaign_id: "C14_cont_batching"
+description: "Sweep --no-cont-batching: enabled (default) vs disabled"
+variable: "cont_batching"
+values: [true, false]
+type: "extended_sweep"
+rationale: >
+  Continuous batching allows new requests to be processed while existing
+  generation is in progress. For single-user Mimiry deployment, this is
+  theoretically irrelevant. However, it affects internal scheduling and
+  memory allocation. Lab validates whether toggling it has any measurable
+  effect on single-user TG.
+notes:
+  - "true (baseline) is first in sweep — continuous batching enabled"
+  - "For single user, expected to be neutral; lab confirms this"
+  - "false passes --no-cont-batching to llama-server"

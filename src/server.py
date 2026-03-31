@@ -48,26 +48,31 @@ from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
 
+from src.config import DEFAULT_HOST, LAB_ROOT, PRODUCTION_PORT  # noqa: E402
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants resolved from environment (.env -> DevStore paths)
+# llama.cpp backend constants
 # ---------------------------------------------------------------------------
-DEFAULT_HOST = "127.0.0.1"
+# These constants are llama.cpp-specific and belong here (not in config.py).
+# config.py owns infrastructure constants that are backend-agnostic.
+# Future migration path: move this block to backends/llamacpp.py.
 
-# The llama-server binary (Build B -- FROZEN at commit afa6bfe4f)
-SERVER_BIN = Path(
+# llama-server binary — Build B FROZEN at commit afa6bfe4f
+# (GGML_CUDA_FORCE_MMQ=ON baked in at compile time; do not upgrade during campaigns)
+SERVER_BIN: Path = Path(
     os.getenv(
         "QUANTMAP_SERVER_BIN",
         r"D:/.store/tools/llama.cpp/build-B/bin/llama-server.exe",
     )
 )
 
-# First model shard
-MODEL_PATH = Path(
+# First model shard — llama.cpp resolves the remaining shards automatically
+MODEL_PATH: Path = Path(
     os.getenv(
         "QUANTMAP_MODEL_PATH",
         r"D:/.store/models/MiniMax-M2.5/UD-Q3_K_XL/"
@@ -75,9 +80,8 @@ MODEL_PATH = Path(
     )
 )
 
-# Lab root -- all runtime output lives here (gitignored)
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
-LOGS_DIR = LAB_ROOT / "logs"
+# Server log directory — runtime output, lives under LAB_ROOT (gitignored)
+LOGS_DIR: Path = LAB_ROOT / "logs"
 
 # Intel oneAPI paths -- required for Build B MKL DLL resolution
 MKL_ROOT = Path(
@@ -171,6 +175,115 @@ def _load_mkl_env() -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # 2. Log file path helper
 # ---------------------------------------------------------------------------
+
+
+def get_runtime_env_summary() -> dict[str, object]:
+    """
+    Return the environment snapshot relevant to inference reproducibility.
+
+    Two categories are captured:
+
+    INJECTED — env vars that _load_mkl_env() sets unconditionally before
+        the subprocess launches.  Required for Build B MKL DLL resolution.
+        These are always present regardless of the host environment.
+
+    AMBIENT — env vars already set in os.environ that silently alter GPU
+        device selection or inference behavior.  QuantMap does not set these;
+        they come from the user's shell or system configuration.  Their
+        *absence* (null) is explicitly recorded because absence and presence
+        are both meaningful states:
+
+          CUDA_VISIBLE_DEVICES:
+            null  = not set; all GPUs visible, CUDA selects device 0 by
+                    its own ordering (typically fastest-first)
+            "0"   = explicitly restricted to GPU 0
+            "1"   = explicitly restricted to GPU 1 (different hardware!)
+            ""    = empty string — NO GPUs visible, forces CPU-only mode
+
+          CUDA_DEVICE_ORDER:
+            null             = not set; CUDA default (FASTEST_FIRST on most
+                               drivers — ranks by compute throughput)
+            "BY_BUS_ID"      = stable PCIe slot order; GPU 0 is always the
+                               card in the lowest-numbered slot regardless
+                               of speed
+            "FASTEST_FIRST"  = explicit default; highest-throughput GPU = 0
+
+        Storing null explicitly — rather than omitting the key — makes it
+        possible to distinguish "not captured" from "confirmed not set" when
+        reading the stored JSON.
+
+    Stored in configs.runtime_env_json at config registration time (before
+    the first cycle starts), so the snapshot reflects the environment that
+    will be active when the subprocess is launched.
+
+    Returns:
+        {
+            "injected": {
+                "CUDA_PATH":         "<path>",
+                "CMAKE_PREFIX_PATH": "<path>",
+                "PATH_prepend":      ["<cuda_bin>", "<mkl_bin>", "<compiler_bin>"],
+            },
+            "ambient": {
+                "CUDA_VISIBLE_DEVICES": "<value>" | null,
+                "CUDA_DEVICE_ORDER":    "<value>" | null,
+            },
+        }
+    """
+    # _AMBIENT_VARS: env vars that affect GPU device selection or inference
+    # behavior but are NOT set by QuantMap.  Extend this list as new
+    # silent-impact vars are identified — each entry is captured at config
+    # registration time and stored verbatim (including None for absent).
+    _AMBIENT_VARS = (
+        "CUDA_VISIBLE_DEVICES",   # most common source of silent GPU mismatch
+        "CUDA_DEVICE_ORDER",      # controls device-index → physical-card mapping
+    )
+
+    return {
+        "injected": {
+            "CUDA_PATH": str(CUDA_PATH),
+            "CMAKE_PREFIX_PATH": str(MKL_ROOT),
+            "PATH_prepend": [
+                str(CUDA_PATH / "bin"),
+                str(MKL_ROOT / "bin"),
+                str(COMPILER_ROOT / "bin"),
+            ],
+        },
+        "ambient": {
+            var: os.environ.get(var)  # None if absent — explicitly represented
+            for var in _AMBIENT_VARS
+        },
+    }
+
+
+def get_production_command(extra_args: list[str]) -> str:
+    """
+    Build the canonical copy-paste production command string for a config.
+
+    Uses the fixed PRODUCTION_PORT (not the dynamic lab port) so the stored
+    resolved_command is immediately runnable without editing.
+
+    Callers (runner.py) pass the config-specific extra_args from
+    _config_to_server_args().  SERVER_BIN, MODEL_PATH, DEFAULT_HOST, and
+    PRODUCTION_PORT are all resolved here — the caller has no need to know
+    the binary path or model path directly.
+
+    Future backend migration: when backends/llamacpp.py exists, this function
+    moves there and runner.py imports from the backend module instead.
+
+    Args:
+        extra_args: config-specific llama-server flags, e.g.
+                    ["--threads", "16", "--threads-batch", "16", ...]
+
+    Returns:
+        Space-joined command string suitable for storing in configs.resolved_command.
+    """
+    parts = [
+        str(SERVER_BIN),
+        "--host", DEFAULT_HOST,
+        "--port", str(PRODUCTION_PORT),
+        "--model", str(MODEL_PATH),
+    ] + extra_args
+    return " ".join(parts)
 
 
 def _log_path(campaign_id: str, config_id: str, cycle: int, attempt: int) -> Path:

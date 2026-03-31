@@ -1,0 +1,114 @@
+# QuantMap — baseline.yaml
+# Frozen server baseline. All campaigns measure deltas against this config.
+# This file is committed. Never modified mid-campaign.
+# If changed, all prior campaign data becomes non-comparable and campaigns
+# must be re-run from scratch.
+
+machine:
+  name: "DEEP THOUGHT"
+  cpu: "Intel i9-12900K (Alder Lake)"
+  cpu_cores: "8P + 8E, 24 threads"
+  cpu_features: "AVX2, FMA, LGA1700"
+  gpu: "NVIDIA RTX 3090 24GB GDDR6X"
+  gpu_compute: "8.6"
+  ram: "128GB DDR4-3200 (Corsair Vengeance, 8x16GB)"
+  motherboard: "Gigabyte Z690 Gaming X DDR4"
+  psu: "EVGA 750W Gold"
+  os: "Windows 11 Pro"
+  storage_primary: "Samsung 990 Evo 1TB SSD (E:\\)"
+  storage_models: "D:\\ drive"
+  model_path_root: "D:\\.store\\models\\MiniMax-M2.5\\UD-Q3_K_XL\\"
+
+bios:
+  # These settings reset on power cycle (likely CMOS battery issue).
+  # Must be re-applied each session.
+  pl1_w: 160
+  pl2_w: 160
+  vcore_mode: "Adaptive"
+  vcore_offset_v: -0.050
+  cpu_internal_ac_dc_load_line: "Performance"
+  vcore_llc: "Medium"
+  ia_cep: "Disabled"
+  energy_efficient_turbo: "Disabled"
+  enhanced_multicore_performance: "Disabled"
+  gear_mode: 1
+  max_ring_ratio: 40
+  min_ring_ratio: 40
+  xmp_profile: 1
+  above_4g_decoding: "Enabled"
+  rebar: "Enabled"
+  avx_offset: 0
+
+runtime:
+  binary: "${QUANTMAP_SERVER_BIN}"
+  build_label: "Build B"
+  build_commit: "afa6bfe4f"
+  build_num: 8084
+  build_flags: "-DGGML_CUDA=ON -DGGML_CUDA_FORCE_MMQ=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Intel10_64lp"
+  cuda_version: "12.6"
+
+model:
+  path: "${QUANTMAP_MODEL_PATH}"
+  name: "MiniMax M2.5 UD-Q3_K_XL"
+  architecture: "MoE"
+  total_params_b: 230
+  active_params_b: 8
+  experts_total: 256
+  experts_active: 8
+  quantization: "Q3_K_Medium (Unsloth Dynamic)"
+  size_gb: 94
+  shards: 4
+  context_trained: 196608
+  context_operating: 32768
+
+# Server configuration — baseline values used in all campaigns unless overridden.
+# These are the parameters the lab will vary. All others are locked.
+config:
+  # --- Locked parameters (never swept) ---
+  host: "127.0.0.1"
+  n_gpu_layers: 999              # Only valid value for this hardware
+  override_tensor: "exps=CPU"    # Locked operating assumption (§3.3)
+  flash_attn: null               # null = server default (auto); FA off eliminated
+  jinja: true                    # Always enabled for correct chat templating
+  context_size: 32768            # Operating context (saves ~7.9GB VRAM vs trained 196k)
+
+  # --- Baseline values for swept parameters ---
+  # Each campaign changes exactly ONE of these. runner.py raises
+  # CampaignPurityViolationError if more than one differs from this file.
+  threads: 16                    # C05
+  threads_batch: 16              # C01
+  threads_http: 1                # C15
+  ubatch_size: 512               # C06
+  batch_size: 2048               # C07
+  n_parallel: 1                  # C02
+  kv_cache_type_k: "f16"         # C03
+  kv_cache_type_v: "f16"         # C03
+  mmap: true                     # C10
+  mlock: false                   # C12
+  cont_batching: true            # C14
+  defrag_thold: 0.1              # C13
+
+lab:
+  cycles_per_config: 5
+  requests_per_cycle: 6           # 1 cold + 5 warm
+  inter_request_delay_s: 20
+  cooldown_between_configs_s: 300
+  cooldown_temp_target_c: 55.0    # Continue cooldown until both CPU and GPU below this
+  cooldown_max_s: 600             # Hard cap; abort if still hot after 10 min
+  server_ready_timeout_s: 120
+  server_bind_timeout_s: 300
+
+# Requests directory (relative to lab root)
+requests:
+  speed_short: "requests/speed_short.json"
+  speed_medium: "requests/speed_medium.json"
+  quality_code: "requests/quality_code.json"
+  quality_reasoning: "requests/quality_reasoning.json"
+
+# Reference performance numbers (prior estimates — not expected outcomes)
+# Used as denominators in baseline-relative reporting only.
+reference:
+  warm_tg_median_ts: 8.18
+  warm_ttft_median_ms: 200.0
+  cold_ttft_ms: 6100.0
+  pp_median_ts: 100.0

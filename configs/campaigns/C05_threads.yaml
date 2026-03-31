@@ -1,0 +1,14 @@
+campaign_id: "C05_threads"
+description: "Sweep --threads across 12, 14, 16, 18, 20"
+variable: "threads"
+values: [12, 14, 16, 18, 20]
+type: "primary_sweep"
+rationale: >
+  -t controls CPU inference threads (token generation phase). For the i9-12900K
+  (8P + 8E cores, 24 threads), the optimal count for MoE RAM-bound workload
+  is uncertain. P-core-only pinning tested at -28% regression; OS scheduler wins.
+  This sweep finds the optimal thread count without affinity pinning.
+notes:
+  - "16 (baseline) is in-campaign anchor"
+  - "P-core-only was -28% — OS scheduler manages hybrid core assignment better"
+  - "Values above 16 include E-cores; may help or hurt depending on memory bandwidth"

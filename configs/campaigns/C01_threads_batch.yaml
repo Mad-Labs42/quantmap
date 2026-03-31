@@ -1,0 +1,19 @@
+# QuantMap — Campaign C01
+# Variable: --threads-batch (-tb)
+# Prior data: TB8 run1-vs-run2 showed 8.31 vs 7.56 median across two manual runs
+# (too volatile — lab resolves definitively). TB20 promising with tight TTFT.
+# Lock: all other config fields must match baseline.yaml exactly.
+
+campaign_id: "C01_threads_batch"
+description: "Sweep --threads-batch across 4, 8, 12, 16, 20"
+variable: "threads_batch"
+values: [4, 8, 12, 16, 20]
+type: "primary_sweep"
+rationale: >
+  threads-batch controls how many threads process the prompt (prefill/batch) phase.
+  Prior manual testing found TB8 volatile and TB20 promising but unvalidated.
+  This campaign produces definitive ranked data for all values.
+notes:
+  - "Baseline value (16) is included in the sweep as an in-campaign anchor"
+  - "TB8 was tested twice manually with 8.31 vs 7.56 warm TG — high variance"
+  - "TB20 showed consistent TTFT; lab confirms TG impact"
