@@ -35,7 +35,14 @@ _REPO_ROOT: Path = Path(__file__).parent.parent
 # ---------------------------------------------------------------------------
 # Lab root — all runtime output (results, logs, db, state).  Gitignored.
 # ---------------------------------------------------------------------------
-LAB_ROOT: Path = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
+_lab_root_raw = os.getenv("QUANTMAP_LAB_ROOT")
+if _lab_root_raw is None:
+    raise EnvironmentError(
+        "QUANTMAP_LAB_ROOT is not set. "
+        "Copy .env.example to .env and set QUANTMAP_LAB_ROOT to your lab directory "
+        "(e.g. D:/Workspaces/QuantMap)."
+    )
+LAB_ROOT: Path = Path(_lab_root_raw)
 
 # ---------------------------------------------------------------------------
 # Source-tree directories — live with the repo, not with runtime output.

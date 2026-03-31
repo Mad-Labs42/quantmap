@@ -55,6 +55,7 @@ import yaml
 from dotenv import load_dotenv  # type: ignore[import]
 from rich.console import Console  # type: ignore[import]
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
+from rich.table import Table  # type: ignore[import]
 
 load_dotenv()
 
@@ -1554,6 +1555,80 @@ def _validate_campaign(campaign_id: str) -> bool:
     return ok
 
 
+def _list_campaigns() -> None:
+    """
+    Print a summary table of all campaigns recorded in the lab database.
+
+    Columns: campaign ID, status, config count, winner (if scored), completed/started
+    timestamp, report path.  Exits cleanly if no db exists yet.
+    """
+    db_path = DB_DIR / "quantmap.db"
+    if not db_path.exists():
+        console.print("[yellow]No database found.[/yellow] Run a campaign first.")
+        return
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                c.id,
+                c.status,
+                (SELECT COUNT(*) FROM configs cf WHERE cf.campaign_id = c.id) AS cfg_count,
+                (SELECT s.config_id FROM scores s
+                 WHERE s.campaign_id = c.id AND s.is_score_winner = 1
+                 LIMIT 1) AS winner,
+                (SELECT ROUND(s.warm_tg_median, 2) FROM scores s
+                 WHERE s.campaign_id = c.id AND s.is_score_winner = 1
+                 LIMIT 1) AS winner_tg,
+                COALESCE(c.completed_at, c.started_at, c.created_at) AS ts,
+                (SELECT a.path FROM artifacts a
+                 WHERE a.campaign_id = c.id AND a.artifact_type = 'report_md'
+                 LIMIT 1) AS report_path
+            FROM campaigns c
+            ORDER BY ts DESC
+            """,
+        ).fetchall()
+
+    if not rows:
+        console.print("[yellow]No campaigns in database yet.[/yellow]")
+        return
+
+    tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
+    tbl.add_column("Campaign", style="cyan", no_wrap=True)
+    tbl.add_column("Status", no_wrap=True)
+    tbl.add_column("Cfgs", justify="right")
+    tbl.add_column("Winner", no_wrap=True)
+    tbl.add_column("TG (t/s)", justify="right")
+    tbl.add_column("Timestamp (UTC)", no_wrap=True)
+    tbl.add_column("Report")
+
+    status_styles = {
+        "complete": "green",
+        "running": "yellow",
+        "failed": "red",
+        "aborted": "red",
+        "pending": "dim",
+    }
+
+    for campaign_id, status, cfg_count, winner, winner_tg, ts, report_path in rows:
+        style = status_styles.get(status, "")
+        ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
+        report_display = str(report_path) if report_path else "—"
+        tbl.add_row(
+            campaign_id,
+            f"[{style}]{status}[/{style}]" if style else status,
+            str(cfg_count),
+            winner or "—",
+            f"{winner_tg:.2f}" if winner_tg is not None else "—",
+            ts_short,
+            report_display,
+        )
+
+    console.print()
+    console.print(tbl)
+    console.print()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="QuantMap campaign runner",
@@ -1567,8 +1642,12 @@ Examples:
         """,
     )
     parser.add_argument(
-        "--campaign", required=True,
-        help="Campaign ID (matches configs/campaigns/{id}.yaml)"
+        "--campaign",
+        help="Campaign ID (matches configs/campaigns/{id}.yaml); required unless --list is used"
+    )
+    parser.add_argument(
+        "--list", action="store_true",
+        help="Show all campaigns in the lab database (completed, running, pending) and exit"
     )
     parser.add_argument(
         "--validate", action="store_true",
@@ -1591,6 +1670,12 @@ Examples:
 
 if __name__ == "__main__":
     args = _parse_args()
+    if args.list:
+        _list_campaigns()
+        sys.exit(0)
+    if not args.campaign:
+        console.print("[bold red]error:[/bold red] --campaign is required (or use --list to see campaigns)")
+        sys.exit(2)
     if args.validate:
         ok = _validate_campaign(args.campaign)
         sys.exit(0 if ok else 1)

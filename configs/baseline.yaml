@@ -112,3 +112,9 @@ reference:
   warm_ttft_median_ms: 200.0
   cold_ttft_ms: 6100.0
   pp_median_ts: 100.0
+
+# Community comparison telemetry (v2.0 feature — no backend exists yet).
+# Establishes the consent field now so the database schema and YAML format
+# never need retrofitting when opt-in submission is implemented.
+telemetry:
+  share_results: false

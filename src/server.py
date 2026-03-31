@@ -64,21 +64,24 @@ logger = logging.getLogger(__name__)
 
 # llama-server binary — Build B FROZEN at commit afa6bfe4f
 # (GGML_CUDA_FORCE_MMQ=ON baked in at compile time; do not upgrade during campaigns)
-SERVER_BIN: Path = Path(
-    os.getenv(
-        "QUANTMAP_SERVER_BIN",
-        r"D:/.store/tools/llama.cpp/build-B/bin/llama-server.exe",
+_server_bin_raw = os.getenv("QUANTMAP_SERVER_BIN")
+if _server_bin_raw is None:
+    raise EnvironmentError(
+        "QUANTMAP_SERVER_BIN is not set. "
+        "Copy .env.example to .env and set QUANTMAP_SERVER_BIN to the llama-server binary path "
+        "(e.g. D:/.store/tools/llama.cpp/build-B/bin/llama-server.exe)."
     )
-)
+SERVER_BIN: Path = Path(_server_bin_raw)
 
 # First model shard — llama.cpp resolves the remaining shards automatically
-MODEL_PATH: Path = Path(
-    os.getenv(
-        "QUANTMAP_MODEL_PATH",
-        r"D:/.store/models/MiniMax-M2.5/UD-Q3_K_XL/"
-        r"MiniMax-M2.5-UD-Q3_K_XL-00001-of-00004.gguf",
+_model_path_raw = os.getenv("QUANTMAP_MODEL_PATH")
+if _model_path_raw is None:
+    raise EnvironmentError(
+        "QUANTMAP_MODEL_PATH is not set. "
+        "Copy .env.example to .env and set QUANTMAP_MODEL_PATH to the first GGUF shard "
+        "(e.g. D:/.store/models/MiniMax-M2.5/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00001-of-00004.gguf)."
     )
-)
+MODEL_PATH: Path = Path(_model_path_raw)
 
 # Server log directory — runtime output, lives under LAB_ROOT (gitignored)
 LOGS_DIR: Path = LAB_ROOT / "logs"
