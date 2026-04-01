@@ -1,0 +1,36 @@
+# QuantMap — Campaign NGL_sweep
+# Variable: --n-gpu-layers (-ngl)
+# Sweep n_gpu_layers to establish the throughput-vs-VRAM curve for this model/GPU.
+# On large-VRAM hardware (24GB+) the full curve runs without OOM.
+# On smaller GPUs (≤16GB) the runner detects the OOM boundary and terminates early.
+#
+# Common starting points by GPU VRAM tier (999 = all layers):
+# 24GB (RTX 3090/4090): values: [10, 20, 30, 40, 50, 60, 70, 80, 90, 999]
+# 12GB (RTX 3060/4070): values: [5, 10, 15, 20, 25, 30, 35, 40, 999]
+#  8GB (RTX 3060 8GB):  values: [5, 10, 15, 20, 25, 999]
+# 999 = llama.cpp convention for "all layers". If the model fits entirely in VRAM
+# at NGL=999, no OOM will occur and the full throughput curve is measured.
+
+campaign_id: "NGL_sweep"
+description: "Sweep n_gpu_layers to establish throughput-vs-VRAM curve with OOM boundary detection"
+variable: "n_gpu_layers"
+values: [10, 20, 30, 40, 50, 60, 70, 80, 90, 999]
+
+oom_boundary_sweep: true   # enables OOM detection + early termination after 2 consecutive OOMs
+
+# Optional: set to a token count (e.g. 8192) to get a targeted recommendation for the
+# fastest config that can sustain at least that context depth. When null, the full table
+# is presented and no single config is recommended.
+min_context_length: null
+
+rationale: >
+  Establishes the n_gpu_layers throughput-vs-VRAM curve for this model on this GPU.
+  Each layer moved to GPU reduces CPU↔GPU transfer overhead for that layer's attention
+  and non-expert activations. Throughput gains diminish as layers are added past the
+  point where VRAM pressure starts degrading memory bandwidth. The campaign identifies
+  the OOM boundary (if any), annotates the diminishing-returns inflection point, and
+  estimates sustainable context depth at each layer count.
+notes:
+  - "Values MUST be in ascending order — runner early-terminates on 2 consecutive OOMs"
+  - "999 is the 'all layers' sentinel — no OOM expected on DEEP THOUGHT with -ot exps=CPU"
+  - "Add n_layers/n_kv_heads/d_model to baseline.yaml model: section for context estimates"
