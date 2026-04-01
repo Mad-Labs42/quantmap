@@ -117,6 +117,98 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
+# OOM detection
+# ---------------------------------------------------------------------------
+
+# High-confidence OOM strings — any one is sufficient to classify as OOM.
+_OOM_HIGH_CONFIDENCE: tuple[str, ...] = (
+    "CUDA error: out of memory",
+    "cudaMalloc failed",
+    "failed to allocate",
+    "not enough memory",
+)
+
+# Lower-confidence — only treated as OOM if a high-confidence string also present.
+# Defined for documentation; _classify_startup_failure uses only high-confidence strings
+# (GGML_ASSERT co-occurrence rule deliberately omitted: high-confidence strings alone
+# are sufficient and GGML_ASSERT fires on non-memory assertion failures too).
+_OOM_LOW_CONFIDENCE: tuple[str, ...] = ("GGML_ASSERT",)
+
+
+class ServerOOMError(RuntimeError):
+    """
+    Raised by start_server() when the server startup fails due to GPU OOM.
+
+    Distinguishes OOM crashes from other startup failures (bad binary path,
+    model format error, port conflict).  Is a RuntimeError subclass so existing
+    except RuntimeError handlers in _run_cycle still catch it.
+
+    Attributes:
+        log_snippet: First OOM error block from the server log (≤500 chars).
+        log_path:    Path to the full server log file.
+        exit_code:   Process exit code at the time of failure, or None.
+    """
+
+    def __init__(self, log_snippet: str, log_path: Path, exit_code: int | None) -> None:
+        self.log_snippet = log_snippet
+        self.log_path = log_path
+        self.exit_code = exit_code
+        super().__init__(
+            f"llama-server OOM (exit_code={exit_code}): {log_snippet[:120]!r}"
+        )
+
+
+def _classify_startup_failure(log_path: Path) -> tuple[bool, str]:
+    """
+    Scan the server log for known CUDA OOM strings.
+
+    Returns (is_oom, snippet).
+    - is_oom: True if a high-confidence OOM string was found.
+    - snippet: Matching line + up to 3 lines of context, ≤500 chars,
+               truncated at whole-line boundary.
+
+    Returns (False, "") if the log file is missing, unreadable, or contains
+    no OOM strings.
+    """
+    if not log_path.is_file():
+        return False, ""
+
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:  # noqa: BLE001
+        return False, ""
+
+    # Find the first high-confidence OOM line.
+    match_idx: int | None = None
+    for i, line in enumerate(lines):
+        for pat in _OOM_HIGH_CONFIDENCE:
+            if pat in line:
+                match_idx = i
+                break
+        if match_idx is not None:
+            break
+
+    if match_idx is None:
+        return False, ""
+
+    # Collect up to 3 lines of context before the match + the match line itself.
+    context_start = max(0, match_idx - 3)
+    context_lines = lines[context_start: match_idx + 1]
+
+    # Truncate at whole-line boundary to stay ≤500 chars.
+    snippet_lines: list[str] = []
+    total_chars = 0
+    for line in context_lines:
+        needed = len(line) + 1  # +1 for the newline we'll join with
+        if total_chars + needed > 500:
+            break
+        snippet_lines.append(line)
+        total_chars += needed
+
+    return True, "\n".join(snippet_lines)
+
+
+# ---------------------------------------------------------------------------
 # 1. MKL Environment Loading
 # ---------------------------------------------------------------------------
 
