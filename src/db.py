@@ -93,7 +93,9 @@ CREATE TABLE IF NOT EXISTS configs (
     runtime_env_json     TEXT,             -- JSON: env-var delta injected into subprocess
     cpu_affinity_mask    TEXT,             -- null = OS default; "0-15" = P-cores
     status               TEXT NOT NULL DEFAULT 'pending',
-    -- pending | running | complete | eliminated
+    -- pending | running | complete | eliminated | oom | skipped_oom
+    -- oom: startup confirmed CUDA OOM; no inference ran; failure_detail has log snippet
+    -- skipped_oom: not attempted; prior consecutive OOMs confirmed VRAM ceiling
     elimination_reason   TEXT,
     started_at           TEXT,
     completed_at         TEXT,
@@ -303,7 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 
 class SchemaVersionError(RuntimeError):
@@ -359,6 +361,17 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "the DB row shows exactly what YAML was in effect when data was collected.",
         [
             "ALTER TABLE campaign_start_snapshot ADD COLUMN campaign_yaml_content TEXT",
+        ],
+    ),
+    (
+        4,
+        "NGL sweep: add configs.failure_detail for OOM log snippets and "
+        "campaign_start_snapshot.gpu_vram_total_mb for VRAM headroom reporting. "
+        "failure_detail stores ≤500-char CUDA OOM log excerpt when status='oom'. "
+        "gpu_vram_total_mb stores physical GPU VRAM capacity from pynvml at campaign start.",
+        [
+            "ALTER TABLE configs ADD COLUMN failure_detail TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN gpu_vram_total_mb REAL",
         ],
     ),
 ]
