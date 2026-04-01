@@ -120,12 +120,277 @@ LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
 # Report generation
 # ---------------------------------------------------------------------------
 
+def _kv_bytes_per_token(
+    baseline: dict,
+    n_gpu_layers: int,
+) -> float | None:
+    """
+    Estimate KV cache bytes consumed per token for a given n_gpu_layers.
+
+    Formula:
+        bytes_per_token = n_kv_layers_on_gpu * 2 * n_kv_heads * head_dim * bytes_per_element
+
+    Returns None if required model architecture fields are absent from baseline.yaml.
+    """
+    model = baseline.get("model", {})
+    config = baseline.get("config", {})
+
+    n_layers = model.get("n_layers")
+    n_kv_heads = model.get("n_kv_heads")
+    d_model = model.get("d_model")
+
+    if any(v is None for v in (n_layers, n_kv_heads, d_model)):
+        return None
+
+    # Derive head_dim. MiniMax M2.5: 64 query heads, 8 KV heads, d_model=7168
+    # head_dim = d_model / n_heads; n_heads not stored — approximate as d_model / 112.
+    n_heads_approx = d_model // 112 if d_model >= 112 else 64
+    head_dim = d_model // n_heads_approx
+
+    kv_type = config.get("kv_cache_type_k", "f16")
+    bytes_map = {"f16": 2, "f32": 4, "q8_0": 1, "q4_0": 0.5, "q4_1": 0.5}
+    bytes_per_element = bytes_map.get(kv_type, 2)
+
+    n_kv_layers_on_gpu = min(n_gpu_layers, int(n_layers))
+
+    # 2 = K + V tensors
+    return n_kv_layers_on_gpu * 2 * int(n_kv_heads) * head_dim * bytes_per_element
+
+
+def _ngl_sweep_section(
+    campaign_id: str,
+    campaign: dict,
+    baseline: dict,
+    scores_result: dict,
+    stats: dict,
+    db_path: Path,
+) -> list[str]:
+    """
+    Build the 'GPU Layer Sweep — Throughput vs. VRAM' section for NGL campaigns.
+
+    Returns a list of Markdown lines to be joined with newlines.
+    Called from _build_markdown() when campaign.variable == 'n_gpu_layers'.
+    """
+    from src.analyze import get_vram_per_config  # noqa: PLC0415
+
+    sections: list[str] = []
+    sections.append("## GPU Layer Sweep — Throughput vs. VRAM\n")
+
+    # Load all config rows (including oom / skipped_oom) ordered by NGL ascending
+    with get_connection(db_path) as conn:
+        config_rows = conn.execute(
+            """SELECT id, variable_value, status, failure_detail
+               FROM configs
+               WHERE campaign_id = ?
+               ORDER BY CAST(json_extract(variable_value, '$') AS INTEGER) ASC""",
+            (campaign_id,),
+        ).fetchall()
+
+    if not config_rows:
+        sections.append("_No configs recorded for this campaign._\n")
+        return sections
+
+    # VRAM data
+    vram_data = get_vram_per_config(campaign_id, db_path)
+    total_mb: float | None = None
+    for v in vram_data.values():
+        if v.get("total_mb") is not None:
+            total_mb = v["total_mb"]
+            break
+
+    model_params_available = all(
+        baseline.get("model", {}).get(k) is not None
+        for k in ("n_layers", "n_kv_heads", "d_model")
+    )
+
+    # Score winner lookup
+    scores_df = (scores_result or {}).get("scores_df")
+    score_winner_id: str | None = None
+    if scores_df is not None and not scores_df.empty and "is_score_winner" in scores_df.columns:
+        winners = scores_df[scores_df["is_score_winner"] == 1]
+        if not winners.empty:
+            score_winner_id = winners.index[0]
+
+    # Diminishing-returns computation
+    viable_points: list[tuple[int, float]] = []
+    for cfg_id_row, val_json, status, _ in config_rows:
+        if status != "complete":
+            continue
+        try:
+            ngl_val = int(json.loads(val_json))
+        except (TypeError, ValueError):
+            continue
+        tg = stats.get(cfg_id_row, {}).get("warm_tg_median")
+        if tg is not None:
+            viable_points.append((ngl_val, float(tg)))
+
+    diminishing_ngl: int | None = None
+    if len(viable_points) >= 3:
+        marginal_gains = [
+            (
+                viable_points[i][0],
+                (viable_points[i][1] - viable_points[i - 1][1])
+                / max(1, viable_points[i][0] - viable_points[i - 1][0]),
+            )
+            for i in range(1, len(viable_points))
+        ]
+        peak_marginal = max(g for _, g in marginal_gains)
+        threshold = 0.15 * peak_marginal
+        for ngl_val, gain in marginal_gains:
+            if gain < threshold:
+                diminishing_ngl = ngl_val
+                break
+
+    # Table
+    header = "| NGL | TG (t/s) | TG P10 | VRAM Used | VRAM Free | Est. Max Context | Score | Notes |"
+    sep    = "|-----|----------|--------|-----------|-----------|------------------|-------|-------|"
+    sections.append(header)
+    sections.append(sep)
+
+    for cfg_id_row, val_json, status, failure_detail in config_rows:
+        try:
+            ngl_val = int(json.loads(val_json))
+        except (TypeError, ValueError):
+            ngl_val = "?"
+        cfg_vram = vram_data.get(cfg_id_row)
+        cfg_stats = stats.get(cfg_id_row, {})
+        cfg_score_row = {}
+        if scores_df is not None and not scores_df.empty and cfg_id_row in scores_df.index:
+            cfg_score_row = scores_df.loc[cfg_id_row].to_dict()
+
+        # VRAM columns
+        free_mb: float | None = None
+        if cfg_vram:
+            peak_mb = cfg_vram.get("peak_mb")
+            peak_str = f"{peak_mb:,.0f} MB" if peak_mb is not None else "N/A"
+            if total_mb is not None and peak_mb is not None:
+                free_mb = total_mb - peak_mb
+                free_str = f"{free_mb:,.0f} MB"
+            else:
+                free_str = "N/A"
+        else:
+            peak_str = "—"
+            free_str = "—"
+
+        # Est. Max Context
+        est_ctx_str = "—"
+        if status == "complete" and free_mb is not None and model_params_available:
+            bpt = _kv_bytes_per_token(baseline, int(ngl_val))
+            if bpt and bpt > 0:
+                est_tokens = int((free_mb * 1024 * 1024) / bpt)
+                if est_tokens >= 1000:
+                    est_ctx_str = f"{est_tokens // 1000}K"
+                else:
+                    est_ctx_str = str(est_tokens)
+        elif status == "complete" and not model_params_available:
+            est_ctx_str = "N/A"
+
+        # TG and score
+        tg_str = f"{cfg_stats.get('warm_tg_median', 0):.2f}" if status == "complete" else "—"
+        p10_str = f"{cfg_stats.get('warm_tg_p10', 0):.2f}" if status == "complete" else "—"
+        score_val = cfg_score_row.get("composite_score")
+        score_str = f"{score_val:.3f}" if (status == "complete" and score_val is not None) else "—"
+
+        # Notes
+        notes_parts: list[str] = []
+        if cfg_id_row == score_winner_id:
+            notes_parts.append("★ score winner")
+        if diminishing_ngl is not None and ngl_val == diminishing_ngl:
+            notes_parts.append("← diminishing returns beyond this point")
+        if status == "oom":
+            first_line = (failure_detail or "CUDA OOM").splitlines()[0][:100]
+            notes_parts.append(f"OOM: {first_line}")
+        elif status == "skipped_oom":
+            notes_parts.append("skipped (boundary confirmed)")
+
+        notes = " | ".join(notes_parts) if notes_parts else "—"
+        sections.append(
+            f"| {ngl_val} | {tg_str} | {p10_str} | {peak_str} | {free_str} | {est_ctx_str} | {score_str} | {notes} |"
+        )
+
+    sections.append("")
+
+    # Architecture params warning
+    if not model_params_available:
+        sections.append(
+            "> **Note:** Context estimation unavailable — add `n_layers`, `n_kv_heads`, "
+            "`d_model` to the `model:` section of `baseline.yaml`.\n"
+        )
+
+    # OOM boundary note
+    oom_configs = [r for r in config_rows if r[2] == "oom"]
+    if not oom_configs:
+        sections.append("_No OOM boundary reached — all layer counts are viable on this GPU._\n")
+
+    # Below-table recommendation
+    min_ctx = campaign.get("min_context_length")
+
+    if min_ctx is not None:
+        sections.append(f"### Context Recommendation (min {min_ctx:,} tokens)\n")
+        if not model_params_available:
+            sections.append(
+                "> Context-based recommendation unavailable — add `n_layers`, `n_kv_heads`, "
+                "`d_model` to `baseline.yaml model:` section.\n"
+            )
+        else:
+            candidates = []
+            for cfg_id_row, val_json, status, _ in config_rows:
+                if status != "complete":
+                    continue
+                try:
+                    ngl_val = int(json.loads(val_json))
+                except (TypeError, ValueError):
+                    continue
+                cfg_vram = vram_data.get(cfg_id_row)
+                if not cfg_vram:
+                    continue
+                peak_mb = cfg_vram.get("peak_mb")
+                if total_mb is None or peak_mb is None:
+                    continue
+                free_mb = total_mb - peak_mb
+                bpt = _kv_bytes_per_token(baseline, ngl_val)
+                if not bpt or bpt <= 0:
+                    continue
+                est_tokens = int((free_mb * 1024 * 1024) / bpt)
+                if est_tokens >= min_ctx:
+                    tg = float(stats.get(cfg_id_row, {}).get("warm_tg_median") or 0.0)
+                    free_gb = free_mb / 1024
+                    candidates.append((tg, ngl_val, est_tokens, free_gb, cfg_id_row))
+
+            if candidates:
+                candidates.sort(reverse=True)
+                best_tg, best_ngl, best_ctx, best_free, _ = candidates[0]
+                ctx_label = f"{best_ctx // 1000}K" if best_ctx >= 1000 else str(best_ctx)
+                min_label = f"{min_ctx // 1000}K" if min_ctx >= 1000 else str(min_ctx)
+                sections.append(
+                    f"> **For your stated minimum of {min_label} context:** NGL={best_ngl} "
+                    f"(TG median {best_tg:.2f} t/s, est. max context {ctx_label}, "
+                    f"{best_free:.1f} GB VRAM free). "
+                    f"This is the fastest config that meets your context requirement.\n"
+                )
+            else:
+                min_label = f"{min_ctx // 1000}K" if min_ctx >= 1000 else str(min_ctx)
+                sections.append(
+                    f"> No config in this sweep can sustain {min_label} context — "
+                    f"consider a smaller quantization or fewer layers on GPU.\n"
+                )
+    else:
+        sections.append(
+            "> No context requirement specified. Set `min_context_length` in your "
+            "campaign YAML to get a targeted recommendation, or choose from the "
+            "table above based on your workload.\n"
+        )
+
+    return sections
+
+
 def generate_report(
     campaign_id: str,
     db_path: Path,
     baseline: dict[str, Any],
     scores_result: dict[str, Any] | None = None,
     stats: dict[str, dict[str, Any]] | None = None,
+    campaign: dict | None = None,
 ) -> Path:
     """
     Generate Markdown + CSV reports for a completed campaign.
@@ -169,7 +434,7 @@ def generate_report(
         logger.info("Scores CSV written: %s", csv_path)
 
     # Generate Markdown
-    md = _build_markdown(campaign_id, db_path, baseline, scores_result, stats)
+    md = _build_markdown(campaign_id, db_path, baseline, scores_result, stats, campaign=campaign)
     md_path.write_text(md, encoding="utf-8")
     logger.info("Report written: %s", md_path)
 
@@ -182,6 +447,7 @@ def _build_markdown(
     baseline: dict[str, Any],
     scores_result: dict[str, Any],
     stats: dict[str, dict[str, Any]],
+    campaign: dict | None = None,
 ) -> str:
     """Build the full Markdown report as a string."""
     sections: list[str] = []
@@ -718,6 +984,18 @@ def _build_markdown(
         f"- **Scoring:** min-max normalized composite across passing configs\n"
         f"- **Seed:** 42 (stabilizes sampling, does not guarantee output identity)\n"
     )
+
+    # NGL sweep section — only for n_gpu_layers campaigns
+    if campaign is not None and campaign.get("variable") == "n_gpu_layers":
+        ngl_lines = _ngl_sweep_section(
+            campaign_id=campaign_id,
+            campaign=campaign,
+            baseline=baseline,
+            scores_result=scores_result,
+            stats=stats,
+            db_path=db_path,
+        )
+        sections.extend(ngl_lines)
 
     return "\n".join(sections)
 
