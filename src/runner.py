@@ -61,7 +61,6 @@ load_dotenv()
 
 # Internal modules
 from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa: E402
-from src.server import start_server, get_production_command, get_runtime_env_summary
 from src.measure import load_request_payload, measure_request_sync, RequestOutcome
 from src import telemetry as tele
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
@@ -647,6 +646,8 @@ def _run_cycle(
     results: list[dict] = []
     thermal_event = False
 
+    from src.server import start_server  # noqa: PLC0415 — lazy: avoids EnvironmentError on --list/--validate
+
     try:
         with start_server(
             extra_args=server_args,
@@ -822,10 +823,15 @@ def _run_config(
     collector: tele.TelemetryCollector,
     progress_state: dict[str, Any],
     console: Console,
-) -> bool:
+    oom_boundary_sweep: bool = False,
+) -> bool | str:
     """
     Run all cycles for one config. Returns True if config completed without
     thermal abort.
+
+    When oom_boundary_sweep=True: returns "oom" if the server startup fails
+    with a confirmed CUDA OOM on any cycle. Returns True on clean completion.
+    When oom_boundary_sweep=False: behavior is unchanged; returns True/False.
 
     Updates progress.json before each cycle and after config completion.
     """
@@ -851,6 +857,7 @@ def _run_config(
         # NOTE: --no-warmup is intentionally excluded here — it is a startup
         # workaround tracked per-cycle in the cycles table, not a performance
         # config variable.  The report flags configs that required it.
+        from src.server import get_production_command, get_runtime_env_summary  # noqa: PLC0415
         resolved_cmd = get_production_command(config["server_args"])
         runtime_env_json = json.dumps(get_runtime_env_summary())
         conn.execute(
@@ -871,50 +878,78 @@ def _run_config(
         )
         conn.commit()
 
-    for cycle_number in range(1, cycles_per_config + 1):
-        # Update crash recovery state
-        progress_state["current_config"] = config_id
-        progress_state["current_cycle"] = cycle_number
-        progress_state["last_update"] = datetime.now(timezone.utc).isoformat()
-        _write_progress(progress_state)
+    def _run_cycles() -> None:
+        """Inner loop shared by both OOM-boundary and standard paths."""
+        for cycle_number in range(1, cycles_per_config + 1):
+            # Update crash recovery state
+            progress_state["current_config"] = config_id
+            progress_state["current_cycle"] = cycle_number
+            progress_state["last_update"] = datetime.now(timezone.utc).isoformat()
+            _write_progress(progress_state)
 
-        console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
-        logger.info("--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id)
+            console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
+            logger.info("--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id)
 
-        # Register cycle in DB
-        with get_connection(db_path) as conn:
-            cur = conn.execute(
-                """INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
-                   VALUES (?, ?, ?, 'pending')""",
-                (config_id, campaign_id, cycle_number),
+            # Register cycle in DB
+            with get_connection(db_path) as conn:
+                cur = conn.execute(
+                    """INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
+                       VALUES (?, ?, ?, 'pending')""",
+                    (config_id, campaign_id, cycle_number),
+                )
+                cycle_id = cur.lastrowid
+                conn.commit()
+
+            thermal_event, results = _run_cycle(
+                config=config,
+                cycle_number=cycle_number,
+                cycle_id=cycle_id,
+                campaign_id=campaign_id,
+                lab_config=lab_config,
+                request_files=request_files,
+                db_path=db_path,
+                raw_jsonl_path=raw_jsonl_path,
+                telemetry_jsonl_path=telemetry_jsonl_path,
+                collector=collector,
+                console=console,
             )
-            cycle_id = cur.lastrowid
-            conn.commit()
 
-        thermal_event, results = _run_cycle(
-            config=config,
-            cycle_number=cycle_number,
-            cycle_id=cycle_id,
-            campaign_id=campaign_id,
-            lab_config=lab_config,
-            request_files=request_files,
-            db_path=db_path,
-            raw_jsonl_path=raw_jsonl_path,
-            telemetry_jsonl_path=telemetry_jsonl_path,
-            collector=collector,
-            console=console,
-        )
+            if thermal_event:
+                thermal_events_total += 1
+                logger.warning(
+                    "Thermal event in cycle %d/%s (total events this config: %d)",
+                    cycle_number, config_id, thermal_events_total,
+                )
+                # Continue to next cycle — thermal events are recorded but don't abort
+                # the config (they disqualify the cycle and affect scoring)
 
-        if thermal_event:
-            thermal_events_total += 1
-            logger.warning(
-                "Thermal event in cycle %d/%s (total events this config: %d)",
-                cycle_number, config_id, thermal_events_total,
+            all_results.extend(results)
+
+    if oom_boundary_sweep:
+        from src.server import ServerOOMError  # noqa: PLC0415
+        try:
+            _run_cycles()
+        except ServerOOMError as exc:
+            logger.error("Config %s: OOM during server startup — %s", config_id, exc)
+            with get_connection(db_path) as conn:
+                conn.execute(
+                    "UPDATE configs SET status='oom', failure_detail=? "
+                    "WHERE id=? AND campaign_id=?",
+                    (exc.log_snippet[:500], config_id, campaign_id),
+                )
+                conn.commit()
+            console.print(
+                f"  [bold red]OOM:[/bold red] {config_id} — server ran out of GPU memory\n"
+                f"  [dim]{exc.log_snippet.splitlines()[0][:120]}[/dim]"
             )
-            # Continue to next cycle — thermal events are recorded but don't abort
-            # the config (they disqualify the cycle and affect scoring)
-
-        all_results.extend(results)
+            completed = progress_state.get("completed_configs", [])
+            if config_id not in completed:
+                completed.append(config_id)
+            progress_state["completed_configs"] = completed
+            _write_progress(progress_state)
+            return "oom"
+    else:
+        _run_cycles()
 
     # Mark config complete
     with get_connection(db_path) as conn:
@@ -1027,6 +1062,10 @@ def run_campaign(
             f"  Elimination filters: {dict(ELIMINATION_FILTERS)}",
             "",
         ]
+        if campaign.get("oom_boundary_sweep", False):
+            summary_lines.append(
+                "  OOM boundary detection: enabled (early termination after 2 consecutive OOMs)"
+            )
         for cfg in configs:
             summary_lines.append(
                 f"  Config: {cfg['config_id']:<35}  args: {cfg['server_args']}"
@@ -1135,6 +1174,19 @@ def run_campaign(
         cpu_affinity_policy=campaign.get("cpu_affinity_details", {}).get("default", "all_cores"),
     )
 
+    # Add gpu_vram_total_mb for NGL sweep VRAM headroom reporting.
+    # Uses pynvml directly — same device index as telemetry.py.
+    try:
+        import pynvml  # noqa: PLC0415
+        pynvml.nvmlInit()
+        _handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        mem_info = pynvml.nvmlDeviceGetMemoryInfo(_handle)
+        snap["gpu_vram_total_mb"] = mem_info.total / (1024 * 1024)
+        logger.info("gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"])
+    except Exception as _exc:  # noqa: BLE001
+        snap["gpu_vram_total_mb"] = None
+        logger.warning("Could not capture gpu_vram_total_mb: %s", _exc)
+
     with get_connection(DB_PATH) as conn:
         cols = ", ".join(snap.keys())
         placeholders = ", ".join("?" for _ in snap)
@@ -1225,6 +1277,17 @@ def run_campaign(
     # -------------------------------------------------------------------------
     # Run configs
     # -------------------------------------------------------------------------
+    oom_boundary_sweep = campaign.get("oom_boundary_sweep", False)
+    if oom_boundary_sweep:
+        # Belt-and-suspenders sort check (--validate should have caught this).
+        raw_values = campaign.get("values", [])
+        if raw_values != sorted(raw_values):
+            logger.warning(
+                "oom_boundary_sweep: values not sorted ascending in campaign YAML — "
+                "auto-sorting. Run --validate to catch this before next run."
+            )
+        consecutive_ooms = 0
+
     first_config = True
     try:
         for i, config in enumerate(configs):
@@ -1251,7 +1314,7 @@ def run_campaign(
                 _enforce_cooldown(lab_config, config_id, console)
             first_config = False
 
-            _run_config(
+            result = _run_config(
                 config=config,
                 campaign_id=campaign_id,
                 lab_config=lab_config,
@@ -1262,7 +1325,75 @@ def run_campaign(
                 collector=collector,
                 progress_state=progress_state,
                 console=console,
+                oom_boundary_sweep=oom_boundary_sweep,
             )
+
+            if oom_boundary_sweep:
+                if result == "oom":
+                    consecutive_ooms += 1
+                    if consecutive_ooms == 1:
+                        logger.warning(
+                            "OOM on config %s (consecutive=%d) — "
+                            "continuing to next config to confirm boundary",
+                            config_id, consecutive_ooms,
+                        )
+                        console.print(
+                            f"  [yellow]OOM ({consecutive_ooms}/2) — "
+                            f"continuing to confirm boundary[/yellow]"
+                        )
+                    elif consecutive_ooms >= 2:
+                        logger.error(
+                            "OOM confirmed on config %s (consecutive=%d) — "
+                            "VRAM ceiling established; terminating sweep",
+                            config_id, consecutive_ooms,
+                        )
+                        console.print(
+                            f"\n[bold red]OOM boundary confirmed[/bold red] "
+                            f"(2 consecutive OOM failures). Terminating sweep.\n"
+                            f"All remaining configs will be marked skipped_oom."
+                        )
+                        # Mark all remaining configs skipped_oom in DB + progress
+                        # BEFORE break, so crash recovery skips them on resume.
+                        remaining_configs = configs[i + 1:]
+                        if remaining_configs:
+                            detail = "boundary confirmed by 2 consecutive OOM failures"
+                            with get_connection(DB_PATH) as conn:
+                                for rc in remaining_configs:
+                                    conn.execute(
+                                        """INSERT OR IGNORE INTO configs
+                                           (id, campaign_id, variable_name, variable_value,
+                                            config_values_json, status, failure_detail, started_at)
+                                           VALUES (?, ?, ?, ?, ?, 'skipped_oom', ?, ?)""",
+                                        (
+                                            rc["config_id"], campaign_id,
+                                            rc["variable_name"],
+                                            json.dumps(rc["variable_value"]),
+                                            json.dumps(rc["full_config"]),
+                                            detail,
+                                            datetime.now(timezone.utc).isoformat(),
+                                        ),
+                                    )
+                                conn.commit()
+                            skipped_ids = [rc["config_id"] for rc in remaining_configs]
+                            completed = progress_state.get("completed_configs", [])
+                            for sid in skipped_ids:
+                                if sid not in completed:
+                                    completed.append(sid)
+                            progress_state["completed_configs"] = completed
+                            _write_progress(progress_state)
+                            logger.info(
+                                "Marked %d configs as skipped_oom: %s",
+                                len(skipped_ids), skipped_ids,
+                            )
+                        break
+                else:
+                    if oom_boundary_sweep and consecutive_ooms > 0:
+                        logger.info(
+                            "Config %s succeeded after %d OOM(s) — prior OOM was transient; "
+                            "resetting consecutive_ooms counter",
+                            config_id, consecutive_ooms,
+                        )
+                    consecutive_ooms = 0
 
     except KeyboardInterrupt:
         logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", campaign_id)
@@ -1319,7 +1450,7 @@ def run_campaign(
 
         stats = analyze_campaign(campaign_id, DB_PATH)
         scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides)
-        report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats)
+        report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats, campaign=campaign)
         console.print(f"[green]Report written:[/green] {report_path}")
         report_ok = True
     except Exception as exc:
@@ -1536,6 +1667,17 @@ def _validate_campaign(campaign_id: str) -> bool:
                 f"valid keys: {sorted(valid_keys)}" if key not in valid_keys else "",
             ) and ok
 
+    # 8. oom_boundary_sweep: values must be ascending
+    if campaign.get("oom_boundary_sweep", False):
+        values = campaign.get("values", [])
+        is_sorted = values == sorted(values)
+        ok = _check(
+            "oom_boundary_sweep: values ascending",
+            is_sorted,
+            f"values must be in ascending order for early termination to be correct; "
+            f"got {values}" if not is_sorted else f"{values}",
+        ) and ok
+
     # Summary
     console.print()
     if ok:
@@ -1562,7 +1704,7 @@ def _list_campaigns() -> None:
     Columns: campaign ID, status, config count, winner (if scored), completed/started
     timestamp, report path.  Exits cleanly if no db exists yet.
     """
-    db_path = DB_DIR / "quantmap.db"
+    db_path = DB_PATH
     if not db_path.exists():
         console.print("[yellow]No database found.[/yellow] Run a campaign first.")
         return
