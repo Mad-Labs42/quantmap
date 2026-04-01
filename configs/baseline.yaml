@@ -60,6 +60,12 @@ model:
   shards: 4
   context_trained: 196608
   context_operating: 32768
+  # Architecture parameters used for KV cache context estimation in NGL sweep report.
+  # Formula: est_max_context = vram_free / (n_layers_on_gpu * 2 * n_kv_heads * head_dim * bytes_per_element)
+  # head_dim = d_model / n_heads (n_heads = 64 for this model)
+  n_layers: 80         # total transformer blocks in the model
+  n_kv_heads: 8        # KV heads (GQA: 64 query heads / 8 = 8 KV heads)
+  d_model: 7168        # hidden dimension (head_dim = 7168/64 = 112)
 
 # Server configuration — baseline values used in all campaigns unless overridden.
 # These are the parameters the lab will vary. All others are locked.
