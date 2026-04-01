@@ -307,3 +307,58 @@ def get_background_interference_summary(
         return {}
 
     return dict(row)
+
+
+def get_vram_per_config(
+    campaign_id: str,
+    db_path: Path,
+) -> "dict[str, dict[str, float | None]]":
+    """
+    Return peak and average GPU VRAM usage per config, plus total GPU VRAM.
+
+    Queries telemetry.gpu_vram_used_mb grouped by config_id.
+    Also reads gpu_vram_total_mb from campaign_start_snapshot.
+
+    Returns:
+        {
+            config_id: {
+                "peak_mb":  float,        # max observed VRAM used during this config
+                "avg_mb":   float,        # mean VRAM used
+                "total_mb": float | None, # physical GPU VRAM capacity (same for all configs)
+            },
+            ...
+        }
+
+    IMPORTANT: OOM and skipped_oom configs produce zero telemetry rows.
+    They are absent from the returned dict. Callers MUST use .get(config_id)
+    and handle None -- never dict[config_id] directly.
+    """
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT config_id,
+                   MAX(gpu_vram_used_mb)  AS peak_mb,
+                   AVG(gpu_vram_used_mb)  AS avg_mb
+            FROM telemetry
+            WHERE campaign_id = ?
+              AND gpu_vram_used_mb IS NOT NULL
+            GROUP BY config_id
+            """,
+            (campaign_id,),
+        ).fetchall()
+
+        snap_row = conn.execute(
+            "SELECT gpu_vram_total_mb FROM campaign_start_snapshot WHERE campaign_id = ?",
+            (campaign_id,),
+        ).fetchone()
+
+    total_mb = snap_row[0] if snap_row else None
+
+    return {
+        row[0]: {
+            "peak_mb":  float(row[1]) if row[1] is not None else None,
+            "avg_mb":   float(row[2]) if row[2] is not None else None,
+            "total_mb": total_mb,
+        }
+        for row in rows
+    }
