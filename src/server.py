@@ -424,7 +424,12 @@ def _pick_port() -> int:
 # ---------------------------------------------------------------------------
 
 
-def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
+def _wait_for_server(
+    host: str,
+    port: int,
+    timeout_s: int,
+    process: subprocess.Popen | None = None,
+) -> None:
     """
     Poll until any readiness endpoint responds or timeout expires.
 
@@ -432,6 +437,10 @@ def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
     with a qualifying status code. This confirms the HTTP layer is active but
     NOT that the model is loaded. Use _wait_for_completion_ready() as the
     authoritative model readiness gate.
+
+    process: when provided, each iteration checks process.poll(). If the
+    process has exited, raises RuntimeError immediately rather than waiting
+    for the full bind_timeout_s (fast-path for OOM crashes).
     """
     deadline = time.monotonic() + timeout_s
     last_error: Exception | None = None
@@ -439,6 +448,13 @@ def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
     models_url = f"http://{host}:{port}/v1/models"
 
     while time.monotonic() < deadline:
+        # Fast-path: detect process exit before the HTTP timeout fires.
+        if process is not None:
+            rc = process.poll()
+            if rc is not None:
+                raise RuntimeError(
+                    f"Server process exited (code={rc}) before HTTP layer was ready"
+                )
         for url in (health_url, models_url):
             try:
                 with urllib.request.urlopen(url, timeout=2) as resp:
@@ -459,7 +475,12 @@ def _wait_for_server(host: str, port: int, timeout_s: int) -> None:
     )
 
 
-def _wait_for_completion_ready(host: str, port: int, timeout_s: int) -> None:
+def _wait_for_completion_ready(
+    host: str,
+    port: int,
+    timeout_s: int,
+    process: subprocess.Popen | None = None,
+) -> None:
     """
     Send a minimal completion request to confirm the model is fully loaded.
 
@@ -467,6 +488,9 @@ def _wait_for_completion_ready(host: str, port: int, timeout_s: int) -> None:
     sends a real (minimal) completion request and waits for a successful
     response, confirming the model weights are loaded and inference is
     possible. This is the authoritative readiness gate.
+
+    process: when provided, each iteration checks process.poll(). If the
+    process has exited, raises RuntimeError immediately (fast-path for OOM).
 
     Raises RuntimeError on timeout.
     """
@@ -477,6 +501,13 @@ def _wait_for_completion_ready(host: str, port: int, timeout_s: int) -> None:
     body = json.dumps(payload).encode("utf-8")
 
     while time.monotonic() < deadline:
+        # Fast-path: detect process exit before the completion-ready timeout fires.
+        if process is not None:
+            rc = process.poll()
+            if rc is not None:
+                raise RuntimeError(
+                    f"Server process exited (code={rc}) before model was ready"
+                )
         req = urllib.request.Request(
             url,
             data=body,
@@ -645,60 +676,75 @@ def start_server(
     active_cmd = base_cmd
 
     try:
-        _wait_for_server(host, port, timeout_s=bind_timeout_s)
-
         try:
-            _wait_for_completion_ready(host, port, timeout_s=ready_timeout_s)
+            _wait_for_server(host, port, timeout_s=bind_timeout_s, process=process)
 
-        except RuntimeError:
-            # -- Warmup hung: attempt 2 with --no-warmup --------------------
-            logger.warning(
-                "Server did not reach completion-ready within %ds "
-                "(warmup likely hung). Forcing termination and retrying "
-                "with --no-warmup.",
-                ready_timeout_s,
-            )
-            process.terminate()
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
+                _wait_for_completion_ready(host, port, timeout_s=ready_timeout_s, process=process)
+
+            except RuntimeError:
+                # -- Warmup hung: attempt 2 with --no-warmup --------------------
                 logger.warning(
-                    "Server (attempt 1, pid=%d) did not terminate cleanly -- "
-                    "forcing process termination.",
-                    process.pid,
+                    "Server did not reach completion-ready within %ds "
+                    "(warmup likely hung). Forcing termination and retrying "
+                    "with --no-warmup.",
+                    ready_timeout_s,
                 )
-                process.kill()
-                process.wait(timeout=5)
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Server (attempt 1, pid=%d) did not terminate cleanly -- "
+                        "forcing process termination.",
+                        process.pid,
+                    )
+                    process.kill()
+                    process.wait(timeout=5)
 
-            # Close handle from attempt 1 before opening attempt 2
-            log_handle.close()
+                # Close handle from attempt 1 before opening attempt 2
+                log_handle.close()
 
-            # New port to avoid TIME_WAIT on the same port
-            port = _pick_port()
-            attempt = 2
-            no_warmup = True
+                # New port to avoid TIME_WAIT on the same port
+                port = _pick_port()
+                attempt = 2
+                no_warmup = True
 
-            no_warmup_cmd: list[str] = (
-                [
-                    str(SERVER_BIN),
-                    "--host",
-                    host,
-                    "--port",
-                    str(port),
-                    "--model",
-                    str(MODEL_PATH),
-                ]
-                + extra_args
-                + ["--no-warmup"]
-            )
+                no_warmup_cmd: list[str] = (
+                    [
+                        str(SERVER_BIN),
+                        "--host",
+                        host,
+                        "--port",
+                        str(port),
+                        "--model",
+                        str(MODEL_PATH),
+                    ]
+                    + extra_args
+                    + ["--no-warmup"]
+                )
 
-            log_file = _log_path(campaign_id, config_id, cycle, attempt)
-            launch_ts = datetime.now(timezone.utc)
-            process, log_handle = _launch_server(no_warmup_cmd, env, log_file)
-            active_cmd = no_warmup_cmd
+                log_file = _log_path(campaign_id, config_id, cycle, attempt)
+                launch_ts = datetime.now(timezone.utc)
+                process, log_handle = _launch_server(no_warmup_cmd, env, log_file)
+                active_cmd = no_warmup_cmd
 
-            _wait_for_server(host, port, timeout_s=bind_timeout_s)
-            _wait_for_completion_ready(host, port, timeout_s=ready_timeout_s)
+                _wait_for_server(host, port, timeout_s=bind_timeout_s, process=process)
+                _wait_for_completion_ready(host, port, timeout_s=ready_timeout_s, process=process)
+
+        except ServerOOMError:
+            raise  # already classified — pass through
+        except RuntimeError as exc:
+            # Any unclassified startup RuntimeError: scan the log and re-raise
+            # as ServerOOMError if CUDA OOM strings are present.
+            is_oom, snippet = _classify_startup_failure(log_file)
+            if is_oom:
+                raise ServerOOMError(
+                    log_snippet=snippet,
+                    log_path=log_file,
+                    exit_code=process.poll(),
+                ) from exc
+            raise
 
         ready_ts = datetime.now(timezone.utc)
         startup_duration = (ready_ts - launch_ts).total_seconds()
