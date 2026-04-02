@@ -42,7 +42,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import IO, Any
 
 from dotenv import load_dotenv  # type: ignore[import]
 
@@ -809,13 +809,13 @@ def start_server(
 
 def extract_token_count(response: dict[str, Any]) -> int:
     """Extract predicted token count from a llama.cpp completion response."""
-    timings = cast(dict[str, Any], response.get("timings") or {})
+    timings: dict[str, Any] = response.get("timings") or {}
     for key in ("predicted_n", "tokens_predicted", "completion_tokens"):
         if key in timings:
             return int(timings[key])
         if key in response:
             return int(response[key])
-    usage = cast(dict[str, Any], response.get("usage") or {})
+    usage: dict[str, Any] = response.get("usage") or {}
     if "completion_tokens" in usage:
         return int(usage["completion_tokens"])
     return 0
@@ -823,7 +823,7 @@ def extract_token_count(response: dict[str, Any]) -> int:
 
 def extract_tokens_per_second(response: dict[str, Any]) -> float:
     """Extract tokens-per-second from a llama.cpp completion response."""
-    timings = cast(dict[str, Any], response.get("timings") or {})
+    timings: dict[str, Any] = response.get("timings") or {}
     for key in ("predicted_per_second", "tokens_per_second"):
         if key in timings:
             return float(timings[key])
@@ -841,4 +841,4 @@ def extract_timings(response: dict[str, Any]) -> dict[str, Any]:
     Used by measure.py to capture prompt_n, prompt_ms, predicted_n,
     predicted_ms, predicted_per_second, and cache_n in one call.
     """
-    return cast(dict[str, Any], response.get("timings") or {})
+    return response.get("timings") or {}

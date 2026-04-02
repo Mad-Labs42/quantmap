@@ -194,16 +194,23 @@ def load_request_payload(request_file: Path) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _parse_sse_chunk(raw: bytes) -> dict | None:
+def _parse_sse_line(line: str) -> dict | None:
     """
-    Parse a single SSE data line into a dict.
+    Parse a single SSE text line into a dict.
 
-    Returns None for keep-alive lines, comment lines, or empty lines.
-    Returns the parsed dict for data lines.
-    Raises ValueError for malformed data lines.
+    Accepts a fully-decoded, already-stripped text line (as produced by
+    httpx's aiter_lines()).  Callers must not pass raw bytes or unstripped
+    lines — decoding and stripping are the caller's responsibility so this
+    function stays pure and testable.
+
+    Returns:
+        None          — keep-alive ping, comment (:), empty, or non-data field
+        {"done": True} — terminal data: [DONE] sentinel
+        dict          — parsed JSON payload from a data: line
+
+    Raises:
+        ValueError    — data: line whose JSON payload does not parse
     """
-    line = raw.decode("utf-8", errors="replace").strip()
-
     if not line or line.startswith(":"):
         return None  # keep-alive or comment
 
@@ -305,8 +312,10 @@ async def measure_request(
     error_detail: str = ""
 
     url = f"{base_url}/v1/chat/completions"
-    wall_start: float = time.perf_counter()
-    ttft_deadline = wall_start + timeout_s
+    wall_start = time.perf_counter()
+    # ttft_deadline removed — per-token deadline enforcement not implemented.
+    # The httpx client-level timeout (timeout_s) is the effective time limit.
+    # If per-token timeout is added in future, compute it here. (MED-8 fix)
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
@@ -381,53 +390,64 @@ async def measure_request(
                 last_chunk: dict | None = None
                 received_any_content = False
 
-                async for raw_chunk in response.aiter_bytes():
-                    # Split on SSE line boundaries (chunks may contain
-                    # multiple data lines)
-                    for line in raw_chunk.split(b"\n"):
-                        line = line.strip()
-                        if not line:
-                            continue
+                # aiter_lines() buffers across HTTP chunk boundaries so each
+                # iteration yields one complete SSE line.  This simultaneously
+                # fixes two bugs present in the earlier aiter_bytes() design:
+                #
+                # CRIT-3 (outer-loop break scope): With aiter_bytes() + an
+                #   inner split loop, `break` on [DONE] only exited the inner
+                #   for-loop; the outer async-for kept reading.  With a single
+                #   flat aiter_lines() loop, `break` exits the only loop.
+                #
+                # HIGH-1 (split-boundary JSON parse error): aiter_bytes()
+                #   delivered raw network chunks that could be split mid-JSON
+                #   (e.g. at a 1460-byte TCP boundary), causing json.JSONDecodeError
+                #   on a valid response and a false MALFORMED_STREAM outcome.
+                #   aiter_lines() handles the buffering internally.
+                async for raw_line in response.aiter_lines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
 
-                        try:
-                            chunk = _parse_sse_chunk(line)
-                        except ValueError as exc:
-                            outcome = RequestOutcome.MALFORMED_STREAM
-                            error_detail = str(exc)
-                            total_wall_ms = (time.perf_counter() - wall_start) * 1000
-                            logger.warning(
-                                "[%s/%s cycle=%d req=%d] malformed stream: %s",
-                                config_id,
-                                request_type,
-                                cycle_number,
-                                request_index,
-                                exc,
-                            )
-                            return _build_result(
-                                locals(),
-                                outcome,
-                                timestamp_start,
-                                is_cold,
-                                campaign_id,
-                                config_id,
-                                cycle_number,
-                                request_index,
-                                request_type,
-                            )
+                    try:
+                        chunk = _parse_sse_line(line)
+                    except ValueError as exc:
+                        outcome = RequestOutcome.MALFORMED_STREAM
+                        error_detail = str(exc)
+                        total_wall_ms = (time.perf_counter() - wall_start) * 1000
+                        logger.warning(
+                            "[%s/%s cycle=%d req=%d] malformed stream: %s",
+                            config_id,
+                            request_type,
+                            cycle_number,
+                            request_index,
+                            exc,
+                        )
+                        return _build_result(
+                            locals(),
+                            outcome,
+                            timestamp_start,
+                            is_cold,
+                            campaign_id,
+                            config_id,
+                            cycle_number,
+                            request_index,
+                            request_type,
+                        )
 
-                        if chunk is None:
-                            continue
+                    if chunk is None:
+                        continue
 
-                        if chunk.get("done"):
-                            break
+                    if chunk.get("done"):
+                        break  # exits the only loop — stream reading terminates here
 
-                        # -- TTFT gate (locked definition) ----------------
-                        if not ttft_captured and _first_content_chunk(chunk):
-                            ttft_ms = (time.perf_counter() - wall_start) * 1000
-                            ttft_captured = True
-                            received_any_content = True
+                    # -- TTFT gate (locked definition) ----------------
+                    if not ttft_captured and _first_content_chunk(chunk):
+                        ttft_ms = (time.perf_counter() - wall_start) * 1000
+                        ttft_captured = True
+                        received_any_content = True
 
-                        last_chunk = chunk
+                    last_chunk = chunk
 
                 # -- Post-stream: extract timings from final chunk --------
                 total_wall_ms = (time.perf_counter() - wall_start) * 1000
@@ -463,19 +483,24 @@ async def measure_request(
                     timings = last_chunk.get("timings") or {}
                     usage = last_chunk.get("usage") or {}
 
-                    prompt_n = (
-                        _int(timings.get("prompt_n"))
-                        or _int(timings.get("tokens_evaluated"))
-                        or _int(usage.get("prompt_tokens"))
-                    )
+                    # Use explicit None checks instead of `or`-chaining.
+                    # `or` short-circuits on 0, which is a valid token count
+                    # (e.g. fully-cached prompt). (MED-1 fix)
+                    _pn_candidates = [
+                        _int(timings.get("prompt_n")),
+                        _int(timings.get("tokens_evaluated")),
+                        _int(usage.get("prompt_tokens")),
+                    ]
+                    prompt_n = next((v for v in _pn_candidates if v is not None), None)
                     prompt_ms = _float(timings.get("prompt_ms"))
                     prompt_per_second = _float(timings.get("prompt_per_second"))
 
-                    predicted_n = (
-                        _int(timings.get("predicted_n"))
-                        or _int(timings.get("tokens_predicted"))
-                        or _int(usage.get("completion_tokens"))
-                    )
+                    _pdn_candidates = [
+                        _int(timings.get("predicted_n")),
+                        _int(timings.get("tokens_predicted")),
+                        _int(usage.get("completion_tokens")),
+                    ]
+                    predicted_n = next((v for v in _pdn_candidates if v is not None), None)
                     predicted_ms = _float(timings.get("predicted_ms"))
                     predicted_per_second = _float(timings.get("predicted_per_second"))
 
