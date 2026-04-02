@@ -890,8 +890,38 @@ def _run_config(
             console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
             logger.info("--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id)
 
-            # Register cycle in DB
+            # Register cycle in DB.
+            # On resume, this cycle row may already exist from an interrupted run:
+            #   terminal (complete/invalid)  — skip; data already recorded
+            #   non-terminal (pending/started) — stale; delete and restart clean
             with get_connection(db_path) as conn:
+                existing = conn.execute(
+                    """SELECT id, status FROM cycles
+                       WHERE config_id=? AND campaign_id=? AND cycle_number=?""",
+                    (config_id, campaign_id, cycle_number),
+                ).fetchone()
+
+                if existing is not None:
+                    existing_status = existing["status"]
+                    if existing_status in ("complete", "invalid"):
+                        logger.info(
+                            "Cycle %d/%s already %s — skipping",
+                            cycle_number, config_id, existing_status,
+                        )
+                        console.print(
+                            f"  [dim]Cycle {cycle_number}/{cycles_per_config} "
+                            f"already {existing_status} — skipping[/dim]"
+                        )
+                        continue
+                    # Non-terminal: interrupted mid-run. Discard and restart.
+                    logger.info(
+                        "Cycle %d/%s found in state '%s' — discarding partial data and restarting",
+                        cycle_number, config_id, existing_status,
+                    )
+                    conn.execute("DELETE FROM requests WHERE cycle_id=?", (existing["id"],))
+                    conn.execute("DELETE FROM cycles WHERE id=?", (existing["id"],))
+                    conn.commit()
+
                 cur = conn.execute(
                     """INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
                        VALUES (?, ?, ?, 'pending')""",
@@ -1611,13 +1641,34 @@ def _validate_campaign(campaign_id: str) -> bool:
         # but a genuine warning on Linux/macOS where chmod +x may have been forgotten.
         _check(f"server binary executable: {_server_bin}", bin_executable, "")
 
-    # Model path: first shard exists and is plausibly sized (>100 MB to catch
-    # empty/placeholder files — the real first shard of any quantized 94 GB
-    # model will be several GB)
+    # Model path: first shard exists and the model set is plausibly real.
+    #
+    # Some multi-shard models (e.g. unsloth/MiniMax-M2.5-GGUF UD-Q3_K_XL) use
+    # a small header/index file as shard 1 (~8 MB) with the actual weights in
+    # shards 2-4 (~49 GB each).  Requiring shard 1 to be >100 MB incorrectly
+    # rejects these layouts.
+    #
+    # Acceptance rule:
+    #   (a) shard 1 is >100 MB  (single-file or standard multi-shard layout), OR
+    #   (b) shard 1 is small AND shard 2 (00002-of-NNNNN) exists and is >100 MB
+    #       (header-shard layout — confirms weight files are present)
     model_exists = _model_path.is_file()
     model_size_bytes = _model_path.stat().st_size if model_exists else 0
     model_size_gb = model_size_bytes / (1024 ** 3)
-    model_plausible = model_size_gb > 0.1  # >100 MB — any real GGUF shard exceeds this
+    model_plausible = model_size_gb > 0.1  # >100 MB — standard layout
+
+    shard2_detail = ""
+    if model_exists and not model_plausible:
+        # Check for header-shard layout: look for 00002-of-NNNNN adjacent shard.
+        shard2_name = _model_path.name.replace("00001-of-", "00002-of-", 1)
+        if shard2_name != _model_path.name:
+            shard2_path = _model_path.parent / shard2_name
+            if shard2_path.is_file():
+                shard2_bytes = shard2_path.stat().st_size
+                if shard2_bytes > 100 * 1024 * 1024:  # >100 MB
+                    model_plausible = True
+                    shard2_gb = shard2_bytes / (1024 ** 3)
+                    shard2_detail = f"; shard 2 present ({shard2_gb:.1f} GB) — header-shard layout"
 
     # Same pattern as the binary check: path in the label so it leads the line.
     if model_exists:
@@ -1627,7 +1678,7 @@ def _validate_campaign(campaign_id: str) -> bool:
             size_str = f"{model_size_bytes / 1024 ** 2:.1f} MB"
         else:
             size_str = f"{model_size_gb:.1f} GB"
-        model_detail = size_str
+        model_detail = size_str + shard2_detail
         if not model_plausible:
             model_detail += " — expected >100 MB for a real GGUF shard; set QUANTMAP_MODEL_PATH"
     else:
