@@ -16,9 +16,9 @@ Dependency rule:
     All other src/ modules MAY import from config.py.
     No src/ module should import infrastructure constants from another src/ module.
 
-All paths are resolved from environment variables (loaded from .env via
-python-dotenv by the entry-point scripts) with sensible defaults so the
-module works in a plain Python environment without a .env file.
+All paths are resolved from environment variables. Copy .env.example to .env
+and configure it before running any QuantMap commands. QUANTMAP_LAB_ROOT is
+required; the module raises EnvironmentError at import time if it is unset.
 """
 
 from __future__ import annotations
