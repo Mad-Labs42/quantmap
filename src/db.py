@@ -213,7 +213,7 @@ CREATE TABLE IF NOT EXISTS background_snapshots (
     top_ram_procs_json            TEXT NOT NULL DEFAULT '[]',
     top_disk_procs_json           TEXT NOT NULL DEFAULT '[]',
     all_notable_procs_json        TEXT NOT NULL DEFAULT '[]',
-    windows_defender_active       INTEGER NOT NULL DEFAULT 0,
+    defender_process_running      INTEGER NOT NULL DEFAULT 0,
     windows_update_active         INTEGER NOT NULL DEFAULT 0,
     search_indexer_active         INTEGER NOT NULL DEFAULT 0,
     antivirus_scan_active         INTEGER NOT NULL DEFAULT 0,
@@ -305,7 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 4
+SCHEMA_VERSION: int = 5
 
 
 class SchemaVersionError(RuntimeError):
@@ -372,6 +372,17 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         [
             "ALTER TABLE configs ADD COLUMN failure_detail TEXT",
             "ALTER TABLE campaign_start_snapshot ADD COLUMN gpu_vram_total_mb REAL",
+        ],
+    ),
+    (
+        5,
+        "Rename windows_defender_active to defender_process_running in "
+        "background_snapshots.  The old name implied Defender was actively scanning; "
+        "the field only reflects process existence (MsMpEng.exe running).  The "
+        "meaningful metric is antivirus_scan_active (cpu > 0.5%%).",
+        [
+            "ALTER TABLE background_snapshots RENAME COLUMN "
+            "windows_defender_active TO defender_process_running",
         ],
     ),
 ]

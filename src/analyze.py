@@ -289,7 +289,7 @@ def get_background_interference_summary(
             """
             SELECT
                 COUNT(*) as total_snapshots,
-                SUM(windows_defender_active) as defender_active_count,
+                SUM(defender_process_running) as defender_process_count,
                 SUM(windows_update_active) as update_active_count,
                 SUM(antivirus_scan_active) as av_scan_count,
                 SUM(search_indexer_active) as search_indexer_count,

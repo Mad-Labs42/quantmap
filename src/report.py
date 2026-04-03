@@ -14,7 +14,7 @@ Report contents (MDD §14.1 + extended):
   5. Statistical tables (median, P10, P90, CV, TTFT, outliers, thermal events)
   6. speed_medium flags (configs with >5% relative TG drop)
   7. Telemetry summary per config (temperature, power, VRAM, background)
-  8. Background interference log (Windows Defender, Update, AV activity)
+  8. Background interference log (AV scan activity, Defender process, Update, Search)
   9. Winner declaration with confidence statement
  10. Production command (copy-paste ready, fixed --port 8000)
 
@@ -706,7 +706,7 @@ def _build_markdown(
     #     be indistinguishable from "GPU was idle" vs "sensor was unavailable".
     sections.append(
         "| Config | Avg CPU °C | Max CPU °C | Avg GPU °C | Max GPU °C | "
-        "Avg VRAM MB | Avg GPU Util % | Avg CPU Util % | Avg CPU Power W | Throttle Samples | Defender | Update |"
+        "Avg VRAM MB | Avg GPU Util % | Avg CPU Util % | Avg CPU Power W | Throttle Samples | AV Scan Active | Update |"
     )
     sections.append(
         "|--------|-----------|-----------|-----------|-----------|"
@@ -722,11 +722,11 @@ def _build_markdown(
         tel = get_telemetry_summary(campaign_id, config_id, db_path)
         bg = get_background_interference_summary(campaign_id, config_id, db_path)
 
-        # Defender/Update flags: treat None (no background snapshots at all) as
+        # AV Scan/Update flags: treat None (no background snapshots at all) as
         # unknown rather than clean — only show ✓ when we have actual data.
-        def_count = bg.get("defender_active_count")
+        av_count = bg.get("av_scan_count")
         upd_count = bg.get("update_active_count")
-        def_flag = "⚠️" if (def_count or 0) > 0 else ("?" if def_count is None else "✓")
+        av_flag = "⚠️" if (av_count or 0) > 0 else ("?" if av_count is None else "✓")
         upd_flag = "⚠️" if (upd_count or 0) > 0 else ("?" if upd_count is None else "✓")
 
         sections.append(
@@ -740,7 +740,7 @@ def _build_markdown(
             f"{_fmt_tel(tel.get('avg_cpu_util'), '.1f')} | "
             f"{_fmt_tel(tel.get('avg_cpu_power'), '.1f')} | "
             f"{tel.get('throttle_samples') or 0} | "
-            f"{def_flag} | "
+            f"{av_flag} | "
             f"{upd_flag} |"
         )
     sections.append("")
@@ -757,11 +757,11 @@ def _build_markdown(
         "Snapshot counts where each interference source was active during the config run.\n"
     )
     sections.append(
-        "| Config | Snapshots | Defender | Update | AV Scan | Search Idx | "
+        "| Config | Snapshots | AV Scan Active | Defender Proc | Update | Search Idx | "
         "Avg High-CPU Procs | Max High-CPU Procs |"
     )
     sections.append(
-        "|--------|-----------|----------|--------|---------|------------|"
+        "|--------|-----------|----------------|---------------|--------|------------|"
         "-------------------|-------------------|"
     )
 
@@ -777,9 +777,9 @@ def _build_markdown(
 
         sections.append(
             f"| `{config_id}` | {total_snaps} | "
-            f"{_bg_flag(bg.get('defender_active_count'))} | "
-            f"{_bg_flag(bg.get('update_active_count'))} | "
             f"{_bg_flag(bg.get('av_scan_count'))} | "
+            f"{_bg_flag(bg.get('defender_process_count'))} | "
+            f"{_bg_flag(bg.get('update_active_count'))} | "
             f"{_bg_flag(bg.get('search_indexer_count'))} | "
             f"{_fmt_tel(bg.get('avg_high_cpu_procs'), '.1f')} | "
             f"{bg.get('max_high_cpu_procs') if bg.get('max_high_cpu_procs') is not None else 'N/A'} |"

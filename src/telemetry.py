@@ -485,7 +485,7 @@ class BackgroundSnapshot:
     top_disk_procs_json: str = "[]"
     all_notable_procs_json: str = "[]"
 
-    windows_defender_active: bool = False
+    defender_process_running: bool = False
     windows_update_active: bool = False
     search_indexer_active: bool = False
     antivirus_scan_active: bool = False
@@ -1121,7 +1121,7 @@ def collect_background_snapshot(
     """
     ts = datetime.now(timezone.utc).isoformat()
 
-    windows_defender_active = False
+    defender_process_running = False
     windows_update_active = False
     search_indexer_active = False
     antivirus_scan_active = False
@@ -1141,7 +1141,7 @@ def collect_background_snapshot(
                 name_lower = name.lower()
 
                 if "msmpeng" in name_lower or "mpcmdrun" in name_lower:
-                    windows_defender_active = True
+                    defender_process_running = True
                     if cpu > 0.5:
                         antivirus_scan_active = True
                 elif "tiworker" in name_lower or "wuauclt" in name_lower:
@@ -1186,7 +1186,7 @@ def collect_background_snapshot(
         top_ram_procs_json=json.dumps(by_ram[:10]),
         top_disk_procs_json=json.dumps(by_disk[:10]),
         all_notable_procs_json=json.dumps(proc_data),
-        windows_defender_active=windows_defender_active,
+        defender_process_running=defender_process_running,
         windows_update_active=windows_update_active,
         search_indexer_active=search_indexer_active,
         antivirus_scan_active=antivirus_scan_active,
