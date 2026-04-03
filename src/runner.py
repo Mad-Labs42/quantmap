@@ -188,7 +188,11 @@ def build_config_list(
 
         # Merge baseline + this value
         full_config = dict(baseline_config)
-        if variable == "cpu_affinity":
+        if variable == "interaction" and isinstance(value, dict):
+            # Interaction campaigns: each value is a dict of variable overrides
+            config_id = value.get("config_id", f"{campaign_id}_combined")
+            full_config.update(value.get("overrides", value))
+        elif variable == "cpu_affinity":
             full_config["_cpu_affinity"] = value
         elif variable == "kv_cache_type_k":
             # C03: mirrors K and V
