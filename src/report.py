@@ -16,7 +16,7 @@ Report contents (MDD §14.1 + extended):
   7. Telemetry summary per config (temperature, power, VRAM, background)
   8. Background interference log (AV scan activity, Defender process, Update, Search)
   9. Winner declaration with confidence statement
- 10. Production command (copy-paste ready, fixed --port 8000)
+ 10. Production command (copy-paste ready, respects QUANTMAP_SERVER_HOST)
 
 The report is gitignored (*.md rule). It is regenerable from lab.sqlite.
 """
@@ -848,7 +848,8 @@ def _build_markdown(
         # Production command
         # -----------------------------------------------------------------------
         sections.append("## Production Command\n")
-        sections.append("Copy-paste ready. Fixed port 8000 (Mimiry deployment).\n")
+        from src.config import DEFAULT_HOST, PRODUCTION_PORT  # noqa: PLC0415
+        sections.append(f"Copy-paste ready. Host {DEFAULT_HOST}, port {PRODUCTION_PORT}.\n")
 
         with get_connection(db_path) as conn:
             cmd_row = conn.execute(
@@ -886,7 +887,7 @@ def _build_markdown(
                 winner_args = _config_to_server_args_for_report(cfg_vals)
                 sections.append(f"{server_bin} ^")
                 sections.append(f'  -m "{model_path}" ^')
-                sections.append(f'  --host 127.0.0.1 --port 8000 ^')
+                sections.append(f'  --host {DEFAULT_HOST} --port {PRODUCTION_PORT} ^')
                 for i, arg in enumerate(winner_args):
                     separator = " ^" if i < len(winner_args) - 1 else ""
                     sections.append(f"  {arg}{separator}")

@@ -58,7 +58,7 @@ REQUESTS_DIR: Path = Path(
 # Network — infrastructure constants, backend-agnostic
 # ---------------------------------------------------------------------------
 # Loopback only — lab measurements never go over the network.
-DEFAULT_HOST: str = "127.0.0.1"
+DEFAULT_HOST: str = os.getenv("QUANTMAP_SERVER_HOST", "127.0.0.1")
 
 # Port used in copy-paste reproduction commands (stored in configs.resolved_command).
 # Lab runs use OS-assigned dynamic ports per cycle; production commands always
