@@ -52,7 +52,7 @@ from typing import Any
 import psutil
 
 try:
-    import pynvml  # type: ignore[import]
+    import pynvml  # type: ignore[import]  # nvidia-ml-py exposes as 'pynvml'
     _PYNVML_AVAILABLE = True
 except ImportError:
     _PYNVML_AVAILABLE = False
@@ -60,8 +60,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# pynvml 13.x compatibility
-# pynvml 13.x wraps nvidia-ml-py; some constants moved or were renamed.
+# NVML constant resolution
+# Some constants moved or were renamed across nvidia-ml-py versions.
 # We resolve them at import time with fallbacks to known raw bitmask values.
 # ---------------------------------------------------------------------------
 _NVML_INITIALIZED = False
