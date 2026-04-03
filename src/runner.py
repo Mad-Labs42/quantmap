@@ -518,13 +518,19 @@ def _apply_cpu_affinity(pid: int, mask: str | None) -> bool:
 def _check_defender_exclusions(
     server_bin: Path,
     model_path: Path,
+    lab_root: Path,
     console: Console,
 ) -> None:
     """
-    Warn if Windows Defender real-time protection may be scanning the server
-    binary or model files.  Unexcluded MoE model paths can add measurable I/O
-    latency during model load and during expert dispatch (each active-expert
-    weight page is a potential scan trigger).
+    Warn if Windows Defender may be scanning benchmark paths.  Checks:
+      - Whether real-time protection is enabled (DisableRealtimeMonitoring)
+      - Whether server binary dir, model dir, results dir, and db dir are
+        all in the Defender exclusion list (ExclusionPath)
+      - Whether the server binary is in the process exclusion list
+        (ExclusionProcess)
+
+    NGL_sweep finding: antivirus_scan_active was True for ~70% of snapshots
+    despite D:\\ supposedly being excluded — real-time protection was the cause.
 
     This is a WARNING only — it never aborts the campaign.  If PowerShell is
     unavailable or the query times out the check is silently skipped.
@@ -536,7 +542,8 @@ def _check_defender_exclusions(
         result = subprocess.run(
             [
                 "powershell", "-NoProfile", "-NonInteractive", "-Command",
-                "(Get-MpPreference).ExclusionPath | ConvertTo-Json -Compress",
+                "Get-MpPreference | Select-Object ExclusionPath, ExclusionProcess,"
+                " DisableRealtimeMonitoring | ConvertTo-Json -Compress",
             ],
             capture_output=True, text=True, timeout=15,
         )
@@ -550,20 +557,48 @@ def _check_defender_exclusions(
         import json as _json  # noqa: PLC0415 — lazy, only reached on win32
 
         raw = result.stdout.strip()
-        if not raw or raw.lower() == "null":
+        data: dict = _json.loads(raw) if raw and raw.lower() != "null" else {}
+
+        issues = 0
+
+        # --- Real-time protection check ---
+        # DisableRealtimeMonitoring=False means real-time IS active (scanning).
+        rtm_disabled = data.get("DisableRealtimeMonitoring", False)
+        if not rtm_disabled:
+            issues += 1
+            console.print("[yellow]⚠️  Windows Defender: real-time protection is ENABLED[/yellow]")
+            logger.warning(
+                "Defender real-time protection is enabled — antivirus_scan_active was True "
+                "in ~70%% of NGL_sweep snapshots despite path exclusions being set. "
+                "Real-time protection scans file I/O regardless of exclusion list entries "
+                "in some Defender policy configurations."
+            )
+            console.print(
+                "[yellow]  Remediation (choose one):\n"
+                "    1. Disable real-time protection for benchmarking:\n"
+                "       Settings → Windows Security → Virus & threat protection\n"
+                "         → Manage settings → Real-time protection → Off\n"
+                "    2. Verify exclusions are applied at the policy level, not just\n"
+                "       the user-preference level (Group Policy may override).[/yellow]"
+            )
+
+        # --- Exclusion path check ---
+        excl_raw = data.get("ExclusionPath")
+        if excl_raw is None or (isinstance(excl_raw, str) and excl_raw.lower() == "null"):
             exclusions: list[str] = []
         else:
-            data = _json.loads(raw)
-            exclusions = [data] if isinstance(data, str) else list(data or [])
+            exclusions = [excl_raw] if isinstance(excl_raw, str) else list(excl_raw or [])
 
         excl_lower = [str(e).rstrip("\\/ ").lower() for e in exclusions]
 
-        # Check each path: consider it covered if the exclusion is a prefix of
-        # the target dir (or an exact match).  Also accepts if the target dir is
-        # a prefix of the exclusion (e.g. user excluded the whole drive root).
+        # Check each path: covered if the exclusion is an ancestor or equal
+        # (check_lower.startswith(excl)) or a descendant (excl.startswith(check_lower)).
+        # The second arm handles "user excluded D:\\ and target is D:\\results".
         paths_to_check = [
             ("server binary dir", server_bin.parent),
-            ("model dir", model_path.parent),
+            ("model dir",         model_path.parent),
+            ("results dir",       lab_root / "results"),
+            ("db dir",            lab_root / "db"),
         ]
 
         not_excluded: list[tuple[str, Path]] = []
@@ -577,24 +612,58 @@ def _check_defender_exclusions(
                 not_excluded.append((label, check_path))
 
         if not_excluded:
+            issues += 1
             console.print("[yellow]⚠️  Windows Defender Exclusion Warning[/yellow]")
             logger.warning("Windows Defender: the following paths are NOT in the exclusion list:")
             for label, path in not_excluded:
                 console.print(f"  [yellow]• {label}: {path}[/yellow]")
                 logger.warning("  Not excluded: %s (%s)", label, path)
             console.print(
-                "[yellow]  Defender may scan model loads and MoE dispatch I/O, adding "
-                "non-deterministic latency.  To add exclusions:\n"
-                "  Settings → Windows Security → Virus & threat protection → "
-                "Manage settings → Exclusions → Add or remove exclusions → Add a folder[/yellow]"
+                "[yellow]  Defender may scan model loads, MoE dispatch I/O, and result writes,\n"
+                "  adding non-deterministic latency across all cycles.\n"
+                "  To add exclusions:\n"
+                "    Settings → Windows Security → Virus & threat protection\n"
+                "      → Manage settings → Exclusions → Add or remove exclusions → Add a folder[/yellow]"
             )
             logger.warning(
-                "Recommendation: add '%s' and '%s' to Defender exclusions.",
-                server_bin.parent, model_path.parent,
+                "Recommendation: add to Defender exclusions: '%s', '%s', '%s', '%s'",
+                server_bin.parent, model_path.parent, lab_root / "results", lab_root / "db",
             )
+
+        # --- Process exclusion check ---
+        # ExclusionProcess entries exempt a process from real-time scanning of
+        # its file I/O.  If the server binary isn't listed, every model shard
+        # read and mmap page fault triggers a scan.
+        proc_excl_raw = data.get("ExclusionProcess")
+        if proc_excl_raw is None or (isinstance(proc_excl_raw, str) and proc_excl_raw.lower() == "null"):
+            proc_exclusions: list[str] = []
         else:
-            logger.info("Defender exclusion check: server binary dir and model dir are excluded ✓")
-            console.print("[green]✓ Defender exclusions OK[/green]")
+            proc_exclusions = [proc_excl_raw] if isinstance(proc_excl_raw, str) else list(proc_excl_raw or [])
+
+        proc_excl_lower = [str(e).lower() for e in proc_exclusions]
+        bin_name_lower = server_bin.name.lower()
+        bin_path_lower = str(server_bin).lower()
+        proc_covered = any(
+            bin_name_lower == pe or bin_path_lower == pe
+            for pe in proc_excl_lower
+        )
+        if not proc_covered:
+            issues += 1
+            console.print(f"[yellow]⚠️  Server binary not in Defender process exclusions: {server_bin.name}[/yellow]")
+            logger.warning("Server binary '%s' not in ExclusionProcess list.", server_bin.name)
+            console.print(
+                "[yellow]  Every file read by the server (model shards, mmap pages) may be scanned.\n"
+                "  To add a process exclusion:\n"
+                "    Settings → Windows Security → Virus & threat protection\n"
+                "      → Manage settings → Exclusions → Add or remove exclusions\n"
+                f"      → Add an exclusion → Process → enter: {server_bin.name}\n"
+                f"  Or via PowerShell:\n"
+                f"    Add-MpPreference -ExclusionProcess '{server_bin.name}'[/yellow]"
+            )
+
+        if issues == 0:
+            logger.info("Defender: real-time off, paths excluded, server process excluded ✓")
+            console.print("[green]✓ Defender OK[/green]")
 
     except FileNotFoundError:
         logger.debug("Defender check skipped — powershell.exe not found")
@@ -602,6 +671,89 @@ def _check_defender_exclusions(
         logger.warning("Defender exclusion check timed out (>15s) — skipping")
     except Exception as exc:
         logger.debug("Defender exclusion check failed: %s — skipping", exc)
+
+
+# ---------------------------------------------------------------------------
+# Windows Search indexer check
+# ---------------------------------------------------------------------------
+
+def _check_windows_search(
+    lab_root: Path,
+    model_path: Path,
+    console: Console,
+) -> None:
+    """
+    Warn if the Windows Search indexer (WSearch) service is running.
+
+    NGL_sweep finding: search_indexer_active was True for 100% of snapshots.
+    WSearch triggers background file reads on newly-written files under indexed
+    paths — results/ and db/ writes during a cycle can pull the indexer's
+    I/O onto the same disk as model reads, adding non-deterministic latency.
+
+    This is a WARNING only — it never aborts the campaign.
+    """
+    if sys.platform != "win32":
+        return
+
+    try:
+        result = subprocess.run(
+            [
+                "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                "Get-Service WSearch | Select-Object Status | ConvertTo-Json -Compress",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logger.debug("WSearch check skipped — Get-Service failed: %s", result.stderr.strip())
+            return
+
+        import json as _json  # noqa: PLC0415
+
+        raw = result.stdout.strip()
+        if not raw or raw.lower() == "null":
+            logger.debug("WSearch service not found on this system")
+            return
+
+        data = _json.loads(raw)
+        # PS serialises ServiceControllerStatus as an integer: Running=4.
+        # Older PS versions may emit the string "Running" instead.
+        status = str(data.get("Status", ""))
+        if status not in ("4", "Running"):
+            logger.info("Windows Search (WSearch): not running ✓")
+            console.print("[green]✓ Windows Search not running[/green]")
+            return
+
+        console.print("[yellow]⚠️  Windows Search (WSearch) is RUNNING[/yellow]")
+        logger.warning(
+            "WSearch service is running — it was active in 100%% of NGL_sweep snapshots. "
+            "The indexer scans newly-written files under indexed paths; results/ and db/ "
+            "writes during cycles may trigger indexer I/O on the same drive as model reads."
+        )
+        console.print(
+            "[yellow]  Paths at risk if indexed:\n"
+            f"    • {lab_root / 'results'}\n"
+            f"    • {lab_root / 'db'}\n"
+            f"    • {model_path.parent}\n"
+            "  Remediation options:\n"
+            "    Stop for this session (re-enables on reboot):\n"
+            "      Stop-Service WSearch\n"
+            "    Disable permanently:\n"
+            "      Set-Service WSearch -StartupType Disabled\n"
+            "    Or exclude paths from indexing:\n"
+            "      Settings → Search → Searching Windows → Excluded Folders → Add[/yellow]"
+        )
+        logger.warning(
+            "Recommendation: Stop-Service WSearch before campaigns, or exclude "
+            "'%s', '%s', '%s' from Windows Search indexing.",
+            lab_root / "results", lab_root / "db", model_path.parent,
+        )
+
+    except FileNotFoundError:
+        logger.debug("WSearch check skipped — powershell.exe not found")
+    except subprocess.TimeoutExpired:
+        logger.warning("WSearch check timed out (>15s) — skipping")
+    except Exception as exc:
+        logger.debug("WSearch check failed: %s — skipping", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1124,7 +1276,8 @@ def run_campaign(
     # Import the resolved paths from server.py so we check the same binary and
     # model that will actually be used, respecting .env overrides.
     from src.server import SERVER_BIN as _sb_pre, MODEL_PATH as _mp_pre  # noqa: PLC0415
-    _check_defender_exclusions(_sb_pre, _mp_pre, console)
+    _check_defender_exclusions(_sb_pre, _mp_pre, LAB_ROOT, console)
+    _check_windows_search(LAB_ROOT, _mp_pre, console)
 
     # -------------------------------------------------------------------------
     # Initialize filesystem and database
@@ -1728,6 +1881,14 @@ def _validate_campaign(campaign_id: str) -> bool:
             f"values must be in ascending order for early termination to be correct; "
             f"got {values}" if not is_sorted else f"{values}",
         ) and ok
+
+    # 9. Environment warnings (advisory — do not affect the ok flag)
+    #    Run the same Defender and WSearch checks as campaign startup so users
+    #    see interference risks before committing to a multi-hour run.
+    if sys.platform == "win32":
+        console.print("\n[bold]Environment warnings (advisory — do not block validation):[/bold]")
+        _check_defender_exclusions(_server_bin, _model_path, LAB_ROOT, console)
+        _check_windows_search(LAB_ROOT, _model_path, console)
 
     # Summary
     console.print()
