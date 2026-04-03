@@ -44,3 +44,13 @@ $RECYCLE.BIN/
 .idea/
 *.suo
 *.user
+
+# Local assistant / planning artifacts
+.claude/
+phase2_prep_snapshots/
+
+# Local docs / notes not meant for repo
+*.docx
+
+# Local environment manager config
+mise.toml
