@@ -120,6 +120,9 @@ python -m src.runner [OPTIONS]
 | `--validate` | Pre-flight check — verifies setup without running anything |
 | `--dry-run` | Shows what would run without executing |
 | `--resume` | Resume an interrupted campaign (skips completed configs) |
+| `--no-resume` | Start fresh, ignoring crash recovery state |
+| `--cycles N` | Override cycles_per_config for this run |
+| `--requests-per-cycle N` | Override requests_per_cycle for this run |
 | `--list` | Show all campaigns with status, winner, and report path |
 
 ### Rescoring
@@ -129,6 +132,15 @@ python rescore.py CAMPAIGN_ID
 
 # Re-score all completed campaigns
 python rescore.py --all
+```
+
+### Campaign generation
+```bash
+# Generate C08 interaction campaign from C01-C07 winners
+python -m src.score --generate-c08
+
+# Generate Finalist validation campaign from C08 winner
+python -m src.score --generate-finalist
 ```
 
 ---
@@ -181,26 +193,30 @@ elimination_overrides:
 
 ## Campaign YAML Structure
 
-Campaigns live in `campaigns/` and reference a baseline configuration:
+Campaigns live in `configs/campaigns/` and sweep one variable from the baseline:
 
 ```yaml
-name: C01_threads_batch
-description: Sweep --threads-batch to find optimal batch threading
-baseline: baseline.yaml
-
-variable: threads_batch
+campaign_id: "C01_threads_batch"
+description: "Sweep --threads-batch across 4, 8, 12, 16, 20"
+variable: "threads_batch"
 values: [4, 8, 12, 16, 20]
+type: "primary_sweep"
 
-cycles: 5
-warmup_strategy:
-  mode: single_cycle
+# Optional: override cycles for this campaign
+# cycles_per_config: 5
 
-elimination_overrides: {}  # use defaults
+# Optional: override elimination thresholds
+elimination_overrides: {}
 ```
 
 ### Baseline
 
-`baseline.yaml` defines your model, server binary, default server args, and request definitions. This is your "known good" configuration — campaigns sweep one variable at a time against this baseline.
+`configs/baseline.yaml` defines your model, hardware profile, default server args, and request definitions. This is your "known good" configuration — campaigns sweep one variable at a time against this baseline.
+
+Cycles and requests are configurable at three levels (highest priority wins):
+1. CLI flags: `--cycles N`, `--requests-per-cycle N`
+2. Campaign YAML: `cycles_per_config`, `requests_per_cycle` keys
+3. `baseline.yaml` lab section (global default: 3 cycles, 6 requests)
 
 ---
 
@@ -237,10 +253,11 @@ QuantMap/
 │   ├── score.py            # Elimination filtering + composite scoring
 │   ├── report.py           # Markdown report generation
 │   └── db.py               # SQLite schema, migrations, data access
-├── campaigns/              # Campaign YAML definitions
+├── configs/
+│   ├── baseline.yaml       # Default server configuration
+│   └── campaigns/          # Campaign YAML definitions (C01-C15, Finalist, NGL_sweep)
 ├── requests/               # Request payload files (prompts for benchmarking)
-├── results/                # Campaign outputs (reports, YAML snapshots)
-├── baseline.yaml           # Default server configuration
+├── results/                # Campaign outputs (reports, YAML snapshots) [gitignored]
 ├── rescore.py              # Re-score campaigns without re-collecting data
 ├── requirements.txt        # Python dependencies
 ├── .env.example            # Environment variable template
@@ -266,7 +283,7 @@ QuantMap/
 **Campaign design:**
 - Sweep one variable at a time. QuantMap's elimination pipeline assumes single-variable campaigns where the baseline anchors everything else.
 - Start with thread counts (`--threads`, `--threads-batch`, `--threads-http`) — they're fast to sweep and have the biggest impact on most setups.
-- Use `--dry-run` to verify the measurement budget before committing to a long campaign. A 10-config × 5-cycle campaign at 6 requests per cycle is 300 total requests.
+- Use `--dry-run` to verify the measurement budget before committing to a long campaign. A 10-config × 3-cycle campaign at 6 requests per cycle is 180 total requests. Use `--cycles 5` for higher statistical confidence when needed.
 
 ---
 
@@ -282,7 +299,6 @@ QuantMap/
 - Resume support for interrupted campaigns
 
 ### v1.x (planned)
-- **`n_gpu_layers` sweep** — find optimal GPU/CPU layer split for partial offload
 - **Context length degradation** — throughput curves across escalating context depths
 - **KV cache quantization + flash attention sweep** — combinatorial parameter exploration
 - **Stress/soak test** — sustained load over time to validate thermal stability
@@ -306,7 +322,7 @@ A: Yes, for GPU/CPU telemetry. Without it, QuantMap can still run campaigns and 
 A: Not yet. The codebase is structured for cross-platform support (platform-specific functions are isolated behind `sys.platform` branches), but the current release is Windows-only. Linux support is a priority for an upcoming release.
 
 **Q: How long does a campaign take?**
-A: Depends on the model, config count, and cycle count. A typical 5-config × 5-cycle campaign takes 15–45 minutes including cooldowns. Use `--dry-run` to see the exact measurement budget before committing.
+A: Depends on the model, config count, and cycle count. A typical 5-config × 3-cycle campaign takes 10–30 minutes including cooldowns. Use `--dry-run` to see the exact measurement budget before committing.
 
 **Q: Can I re-score results without re-running the campaign?**
 A: Yes — that's what `rescore.py` is for. Raw measurement data is immutable. You can adjust elimination thresholds and re-score in seconds.
