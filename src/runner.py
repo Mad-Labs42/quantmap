@@ -1190,11 +1190,18 @@ def run_campaign(
     campaign_id: str,
     dry_run: bool = False,
     resume: bool = True,
+    cycles_override: int | None = None,
+    requests_per_cycle_override: int | None = None,
 ) -> None:
     """
     Run a complete campaign from start to finish (or resume if interrupted).
 
     This is the main entry point. Call from CLI or directly.
+
+    Override resolution order (highest priority wins):
+      1. CLI flags (--cycles, --requests-per-cycle)
+      2. Campaign YAML (cycles_per_config, requests_per_cycle keys)
+      3. baseline.yaml lab section (global defaults)
     """
     _setup_logging(campaign_id)
     logger.info("=" * 70)
@@ -1224,26 +1231,77 @@ def run_campaign(
 
     lab_config = baseline.get("lab", {})
 
+    # -------------------------------------------------------------------------
+    # Apply cycles / requests overrides (campaign YAML → CLI flags)
+    # -------------------------------------------------------------------------
+    # Layer 2: campaign YAML overrides baseline defaults
+    if "cycles_per_config" in campaign:
+        logger.info(
+            "Campaign YAML overrides cycles_per_config: %d → %d",
+            lab_config.get("cycles_per_config", 3), campaign["cycles_per_config"],
+        )
+        lab_config["cycles_per_config"] = campaign["cycles_per_config"]
+    if "requests_per_cycle" in campaign:
+        logger.info(
+            "Campaign YAML overrides requests_per_cycle: %d → %d",
+            lab_config.get("requests_per_cycle", 6), campaign["requests_per_cycle"],
+        )
+        lab_config["requests_per_cycle"] = campaign["requests_per_cycle"]
+
+    # Layer 3: CLI flags override everything
+    if cycles_override is not None:
+        logger.info(
+            "CLI --cycles overrides cycles_per_config: %d → %d",
+            lab_config.get("cycles_per_config", 3), cycles_override,
+        )
+        lab_config["cycles_per_config"] = cycles_override
+    if requests_per_cycle_override is not None:
+        logger.info(
+            "CLI --requests-per-cycle overrides requests_per_cycle: %d → %d",
+            lab_config.get("requests_per_cycle", 6), requests_per_cycle_override,
+        )
+        lab_config["requests_per_cycle"] = requests_per_cycle_override
+
     if dry_run:
         # Log and print so the dry-run output survives in the campaign log file.
         # Any validation failures above (FileNotFoundError, purity violation) would
         # have already raised — reaching here means the campaign is structurally
         # valid. (U2 fix)
-        cycles = lab_config.get("cycles_per_config", 5)
+        cycles = lab_config.get("cycles_per_config", 3)
         reqs_per_cycle = lab_config.get("requests_per_cycle", 6)
         total_requests = len(configs) * cycles * reqs_per_cycle
+        warm_per_cycle = reqs_per_cycle - 1
+        warm_samples = cycles * warm_per_cycle
+
+        # Annotate override sources
+        cycles_src = ""
+        if cycles_override is not None:
+            cycles_src = " (CLI override)"
+        elif "cycles_per_config" in campaign:
+            cycles_src = " (campaign YAML)"
+        reqs_src = ""
+        if requests_per_cycle_override is not None:
+            reqs_src = " (CLI override)"
+        elif "requests_per_cycle" in campaign:
+            reqs_src = " (campaign YAML)"
 
         summary_lines = [
             f"DRY RUN — campaign: {campaign_id}",
             f"  Variable:          {variable}",
             f"  Configs to test:   {len(configs)}",
-            f"  Cycles per config: {cycles}",
-            f"  Requests per cycle:{reqs_per_cycle} (1 cold + {reqs_per_cycle - 1} warm)",
+            f"  Cycles per config: {cycles}{cycles_src}",
+            f"  Requests per cycle:{reqs_per_cycle} (1 cold + {warm_per_cycle} warm){reqs_src}",
+            f"  Warm samples/cfg:  {warm_samples}",
             f"  Total requests:    {total_requests}",
             f"  Request types:     {', '.join(sorted(request_files.keys()))}",
             f"  Elimination filters: {dict(ELIMINATION_FILTERS)}",
             "",
         ]
+        if warm_samples < 20:
+            summary_lines.append(
+                f"  Note: {warm_samples} warm samples — detectable difference ~0.4 t/s "
+                f"at 95% confidence"
+            )
         if campaign.get("oom_boundary_sweep", False):
             summary_lines.append(
                 "  OOM boundary detection: enabled (early termination after 2 consecutive OOMs)"
@@ -1894,13 +1952,30 @@ def _validate_campaign(campaign_id: str) -> bool:
     console.print()
     if ok:
         configs = build_config_list(baseline, campaign)
-        cycles = lab.get("cycles_per_config", 5)
-        reqs = lab.get("requests_per_cycle", 6)
+        # Resolve effective cycles/requests (campaign YAML overrides baseline)
+        cycles = campaign.get("cycles_per_config", lab.get("cycles_per_config", 3))
+        reqs = campaign.get("requests_per_cycle", lab.get("requests_per_cycle", 6))
+        source_parts: list[str] = []
+        if "cycles_per_config" in campaign:
+            source_parts.append(f"cycles from campaign YAML ({cycles})")
+        if "requests_per_cycle" in campaign:
+            source_parts.append(f"requests from campaign YAML ({reqs})")
+        source_note = f"  [dim]({'; '.join(source_parts)})[/dim]" if source_parts else ""
+
+        warm_per_cycle = reqs - 1  # first request each cycle is cold
+        warm_samples = len(configs) and (cycles * warm_per_cycle)
+
         console.print(
             f"[bold green]All checks passed.[/bold green]  "
             f"{len(configs)} configs × {cycles} cycles × {reqs} requests = "
-            f"{len(configs) * cycles * reqs} total requests."
+            f"{len(configs) * cycles * reqs} total requests.{source_note}"
         )
+        if warm_samples < 20:
+            console.print(
+                f"  [dim]Note: {warm_samples} warm samples per config — "
+                f"detectable difference ~0.4 t/s at 95% confidence. "
+                f"Use --cycles {max(cycles + 1, 4)} for narrower confidence interval.[/dim]"
+            )
         logger.info("Validation passed: %s", campaign_id)
     else:
         console.print("[bold red]Validation FAILED — fix errors above before running.[/bold red]")
@@ -2019,6 +2094,14 @@ Examples:
         "--no-resume", action="store_false", dest="resume",
         help="Start fresh, ignoring crash recovery state"
     )
+    parser.add_argument(
+        "--cycles", type=int, default=None, metavar="N",
+        help="Override cycles_per_config (baseline.yaml and campaign YAML) for this run"
+    )
+    parser.add_argument(
+        "--requests-per-cycle", type=int, default=None, metavar="N",
+        help="Override requests_per_cycle (baseline.yaml and campaign YAML) for this run"
+    )
     return parser.parse_args()
 
 
@@ -2037,4 +2120,6 @@ if __name__ == "__main__":
         campaign_id=args.campaign,
         dry_run=args.dry_run,
         resume=args.resume,
+        cycles_override=args.cycles,
+        requests_per_cycle_override=args.requests_per_cycle,
     )

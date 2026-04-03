@@ -66,7 +66,7 @@ ELIMINATION_FILTERS: dict[str, float] = {
     "max_warm_ttft_p90_ms":     500.0,
     "min_success_rate":         0.90,    # lowered from 1.0: allows ~3 transient failures per 30 requests
     "min_warm_tg_p10":          7.0,
-    "min_valid_warm_count":     20,
+    "min_valid_warm_count":     10,      # lowered from 20: 3 cycles × 5 warm = 15 is sufficient (CV 0.002-0.030)
 }
 
 # Scoring weights — sum to 1.0

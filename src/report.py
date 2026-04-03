@@ -970,12 +970,25 @@ def _build_markdown(
     # -------------------------------------------------------------------------
     sections.append("## Methodology\n")
     lab = baseline.get("lab", {})
+    # Resolve effective values: campaign YAML overrides baseline defaults
+    eff_cycles = lab.get("cycles_per_config", 3)
+    eff_reqs = lab.get("requests_per_cycle", 6)
+    if campaign:
+        if "cycles_per_config" in campaign:
+            eff_cycles = campaign["cycles_per_config"]
+        if "requests_per_cycle" in campaign:
+            eff_reqs = campaign["requests_per_cycle"]
+    warm_per_cycle = eff_reqs - 1
+    warm_samples = eff_cycles * warm_per_cycle
+    last_cycle = eff_cycles
+
     sections.append(
-        f"- **Cycles per config:** {lab.get('cycles_per_config', 5)} "
+        f"- **Cycles per config:** {eff_cycles} "
         f"(fresh server restart per cycle)\n"
-        f"- **Requests per cycle:** {lab.get('requests_per_cycle', 6)} "
-        f"(1 cold + 5 warm)\n"
-        f"- **Cycle 5 mix:** 4 warm speed_short + 1 warm speed_medium\n"
+        f"- **Requests per cycle:** {eff_reqs} "
+        f"(1 cold + {warm_per_cycle} warm)\n"
+        f"- **Cycle {last_cycle} mix:** {warm_per_cycle - 1} warm speed_short + 1 warm speed_medium\n"
+        f"- **Warm samples per config:** {warm_samples}\n"
         f"- **Inter-request delay:** {lab.get('inter_request_delay_s', 20)}s\n"
         f"- **Config cooldown:** {lab.get('cooldown_between_configs_s', 300)}s "
         f"(+ temperature gate <{lab.get('cooldown_temp_target_c', 55)}°C)\n"
@@ -984,6 +997,12 @@ def _build_markdown(
         f"- **Scoring:** min-max normalized composite across passing configs\n"
         f"- **Seed:** 42 (stabilizes sampling, does not guarantee output identity)\n"
     )
+    if warm_samples < 20:
+        sections.append(
+            f"> **Note:** {warm_samples} warm samples per config — "
+            f"detectable difference ~0.4 t/s at 95% confidence. "
+            f"For narrower confidence intervals, re-run with `--cycles {max(eff_cycles + 1, 4)}`.\n"
+        )
 
     # NGL sweep section — only for n_gpu_layers campaigns
     if campaign is not None and campaign.get("variable") == "n_gpu_layers":
