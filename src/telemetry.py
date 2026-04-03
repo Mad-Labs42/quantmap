@@ -1147,7 +1147,8 @@ def collect_background_snapshot(
                 elif "tiworker" in name_lower or "wuauclt" in name_lower:
                     windows_update_active = True
                 elif "searchindexer" in name_lower or "searchhost" in name_lower:
-                    search_indexer_active = True
+                    if cpu > 0.5:
+                        search_indexer_active = True
 
                 if cpu > 0.5 or rss_mb > 100:
                     io = info.get("io_counters")
