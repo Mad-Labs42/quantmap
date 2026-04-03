@@ -42,7 +42,6 @@ import argparse
 import json
 import logging
 import os
-import sqlite3
 import statistics
 import subprocess
 import sys

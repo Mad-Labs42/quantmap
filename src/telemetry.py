@@ -48,11 +48,14 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import warnings
 
 import psutil
 
 try:
-    import pynvml  # type: ignore[import]  # nvidia-ml-py exposes as 'pynvml'
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FutureWarning)
+        import pynvml  # type: ignore[import]  # nvidia-ml-py exposes as 'pynvml'
     _PYNVML_AVAILABLE = True
 except ImportError:
     _PYNVML_AVAILABLE = False
