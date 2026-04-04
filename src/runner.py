@@ -1074,6 +1074,7 @@ def _run_config(
 
     def _run_cycles() -> None:
         """Inner loop shared by both OOM-boundary and standard paths."""
+        nonlocal thermal_events_total
         for cycle_number in range(1, cycles_per_config + 1):
             # Update crash recovery state
             progress_state["current_config"] = config_id
