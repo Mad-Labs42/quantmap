@@ -73,6 +73,9 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT: Path = Path(__file__).parent.parent
 
 # Runtime outputs always go into LAB_ROOT.
+# These module-level constants are the DEFAULT (used when no --baseline override is
+# active). Inside run_campaign / _validate_campaign, the effective lab root is
+# derived by _derive_lab_root() and local variables shadow these names.
 RESULTS_DIR = LAB_ROOT / "results"
 LOGS_DIR = LAB_ROOT / "logs"
 DB_DIR = LAB_ROOT / "db"
@@ -82,6 +85,31 @@ STATE_FILE = STATE_DIR / "progress.json"
 
 BASELINE_YAML = CONFIGS_DIR / "baseline.yaml"
 CAMPAIGNS_DIR = CONFIGS_DIR / "campaigns"
+
+
+# ---------------------------------------------------------------------------
+# Per-baseline lab root derivation
+# ---------------------------------------------------------------------------
+
+def _derive_lab_root(baseline_path: Path) -> Path:
+    """
+    Derive the effective lab root for a given baseline file.
+
+    Rules:
+      - Default baseline (configs/baseline.yaml): use LAB_ROOT unchanged.
+        This is the zero-change path for existing users.
+      - Any other --baseline <path>: return
+        LAB_ROOT / "profiles" / <baseline_stem>
+        e.g. configs/baselines/devstral_small_2507_q5_k_m.yaml
+             -> <LAB_ROOT>/profiles/devstral_small_2507_q5_k_m/
+
+    The stem of the baseline filename becomes the namespace so each model
+    gets fully isolated DB, logs, results, and state without any manual
+    .env edits.
+    """
+    if baseline_path.resolve() == BASELINE_YAML.resolve():
+        return LAB_ROOT
+    return LAB_ROOT / "profiles" / baseline_path.stem
 
 
 # ---------------------------------------------------------------------------
@@ -349,29 +377,29 @@ def _build_request_schedule(
 # Crash recovery state
 # ---------------------------------------------------------------------------
 
-def _read_progress() -> dict[str, Any]:
+def _read_progress(state_file: Path) -> dict[str, Any]:
     """Read crash recovery state. Returns empty dict if none exists."""
-    if STATE_FILE.is_file():
+    if state_file.is_file():
         try:
-            with open(STATE_FILE, encoding="utf-8") as f:
+            with open(state_file, encoding="utf-8") as f:
                 return json.load(f)
         except Exception as exc:
             logger.warning("Could not read progress.json: %s — starting fresh", exc)
     return {}
 
 
-def _write_progress(state: dict[str, Any]) -> None:
+def _write_progress(state: dict[str, Any], state_dir: Path, state_file: Path) -> None:
     """Write crash recovery state."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with open(state_file, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
 
-def _clear_progress() -> None:
+def _clear_progress(state_file: Path) -> None:
     """Clear crash recovery state on clean campaign completion."""
-    if STATE_FILE.is_file():
+    if state_file.is_file():
         # Overwrite with empty object rather than deleting (per MDD §11.3)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        with open(state_file, "w", encoding="utf-8") as f:
             json.dump({}, f)
 
 
@@ -775,6 +803,7 @@ def _run_cycle(
     telemetry_jsonl_path: Path,
     collector: tele.TelemetryCollector,
     console: Console,
+    logs_dir: Path | None = None,
 ) -> tuple[bool, list[dict]]:
     """
     Run one cycle (server start + N requests).
@@ -811,6 +840,7 @@ def _run_cycle(
             cycle=cycle_number,
             ready_timeout_s=ready_timeout,
             bind_timeout_s=bind_timeout,
+            logs_dir=logs_dir,
         ) as srv:
             base_url = srv["base_url"]
             server_pid = srv["pid"]
@@ -979,6 +1009,9 @@ def _run_config(
     progress_state: dict[str, Any],
     console: Console,
     oom_boundary_sweep: bool = False,
+    state_dir: Path | None = None,
+    state_file: Path | None = None,
+    logs_dir: Path | None = None,
 ) -> bool | str:
     """
     Run all cycles for one config. Returns True if config completed without
@@ -989,7 +1022,13 @@ def _run_config(
     When oom_boundary_sweep=False: behavior is unchanged; returns True/False.
 
     Updates progress.json before each cycle and after config completion.
+    state_dir / state_file: effective locations for crash recovery state
+    (derived from the active lab root; fall back to module-level defaults).
+    logs_dir: effective server log directory (namespaced when --baseline used).
     """
+    _eff_state_dir  = state_dir  if state_dir  is not None else STATE_DIR
+    _eff_state_file = state_file if state_file is not None else STATE_FILE
+    _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
     thermal_events_total = 0
@@ -1040,7 +1079,7 @@ def _run_config(
             progress_state["current_config"] = config_id
             progress_state["current_cycle"] = cycle_number
             progress_state["last_update"] = datetime.now(timezone.utc).isoformat()
-            _write_progress(progress_state)
+            _write_progress(progress_state, _eff_state_dir, _eff_state_file)
 
             console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
             logger.info("--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id)
@@ -1097,6 +1136,7 @@ def _run_config(
                 telemetry_jsonl_path=telemetry_jsonl_path,
                 collector=collector,
                 console=console,
+                logs_dir=_eff_logs_dir,
             )
 
             if thermal_event:
@@ -1131,7 +1171,7 @@ def _run_config(
             if config_id not in completed:
                 completed.append(config_id)
             progress_state["completed_configs"] = completed
-            _write_progress(progress_state)
+            _write_progress(progress_state, _eff_state_dir, _eff_state_file)
             return "oom"
     else:
         _run_cycles()
@@ -1151,7 +1191,7 @@ def _run_config(
     progress_state["completed_configs"] = completed
     progress_state["current_config"] = None
     progress_state["current_cycle"] = None
-    _write_progress(progress_state)
+    _write_progress(progress_state, _eff_state_dir, _eff_state_file)
 
     # Summary log
     warm_tgs = [
@@ -1207,12 +1247,29 @@ def run_campaign(
       2. Campaign YAML (cycles_per_config, requests_per_cycle keys)
       3. baseline.yaml lab section (global defaults)
     """
-    _setup_logging(campaign_id)
+    _effective_lab_root = _derive_lab_root(baseline_path)
+    _eff_results_dir = _effective_lab_root / "results"
+    _eff_logs_dir    = _effective_lab_root / "logs"
+    _eff_db_dir      = _effective_lab_root / "db"
+    _eff_state_dir   = _effective_lab_root / "state"
+    _eff_db_path     = _eff_db_dir / "lab.sqlite"
+    _eff_state_file  = _eff_state_dir / "progress.json"
+
+    _setup_logging(campaign_id, logs_dir=_eff_logs_dir)
     logger.info("=" * 70)
     logger.info(
         "QuantMap campaign starting: %s  dry_run=%s  baseline=%s",
         campaign_id, dry_run, baseline_path,
     )
+    if _effective_lab_root != LAB_ROOT:
+        logger.info(
+            "Lab root (namespaced): %s", _effective_lab_root,
+        )
+        console.print(
+            f"[dim]Lab root (namespaced): {_effective_lab_root}[/dim]"
+        )
+    else:
+        logger.info("Lab root (default): %s", _effective_lab_root)
     logger.info("=" * 70)
 
     # -------------------------------------------------------------------------
@@ -1297,6 +1354,9 @@ def run_campaign(
         summary_lines = [
             f"DRY RUN — campaign: {campaign_id}",
             f"  Baseline:          {baseline_path}",
+            f"  Lab root:          {_effective_lab_root}" + (
+                "  [namespaced]" if _effective_lab_root != LAB_ROOT else "  [default]"
+            ),
             f"  Variable:          {variable}",
             f"  Configs to test:   {len(configs)}",
             f"  Cycles per config: {cycles}{cycles_src}",
@@ -1344,28 +1404,28 @@ def run_campaign(
     # Import the resolved paths from server.py so we check the same binary and
     # model that will actually be used, respecting .env overrides.
     from src.server import SERVER_BIN as _sb_pre, MODEL_PATH as _mp_pre  # noqa: PLC0415
-    _check_defender_exclusions(_sb_pre, _mp_pre, LAB_ROOT, console)
-    _check_windows_search(LAB_ROOT, _mp_pre, console)
+    _check_defender_exclusions(_sb_pre, _mp_pre, _effective_lab_root, console)
+    _check_windows_search(_effective_lab_root, _mp_pre, console)
 
     # -------------------------------------------------------------------------
     # Initialize filesystem and database
     # -------------------------------------------------------------------------
-    for d in [RESULTS_DIR, LOGS_DIR, DB_DIR, STATE_DIR]:
+    for d in [_eff_results_dir, _eff_logs_dir, _eff_db_dir, _eff_state_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    campaign_results_dir = RESULTS_DIR / campaign_id
+    campaign_results_dir = _eff_results_dir / campaign_id
     campaign_results_dir.mkdir(parents=True, exist_ok=True)
 
     raw_jsonl_path = campaign_results_dir / "raw.jsonl"
     telemetry_jsonl_path = campaign_results_dir / "telemetry.jsonl"
 
-    init_db(DB_PATH)
+    init_db(_eff_db_path)
 
     # -------------------------------------------------------------------------
     # Register or resume campaign in DB
     # -------------------------------------------------------------------------
     now_iso = datetime.now(timezone.utc).isoformat()
-    with get_connection(DB_PATH) as conn:
+    with get_connection(_eff_db_path) as conn:
         existing = conn.execute(
             "SELECT status FROM campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
@@ -1438,7 +1498,7 @@ def run_campaign(
         snap["gpu_vram_total_mb"] = None
         logger.warning("Could not capture gpu_vram_total_mb: %s", _exc)
 
-    with get_connection(DB_PATH) as conn:
+    with get_connection(_eff_db_path) as conn:
         cols = ", ".join(snap.keys())
         placeholders = ", ".join("?" for _ in snap)
         conn.execute(
@@ -1450,7 +1510,7 @@ def run_campaign(
     # Write a parallel human-readable YAML snapshot alongside the report.
     # The DB row is the authoritative record; this file is a convenience copy
     # that can be inspected or diffed without opening SQLite. (L1/U6 fix)
-    yaml_snapshot_path = RESULTS_DIR / campaign_id / "campaign_yaml_snapshot.yaml"
+    yaml_snapshot_path = _eff_results_dir / campaign_id / "campaign_yaml_snapshot.yaml"
     try:
         yaml_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_snapshot_path.write_text(
@@ -1487,7 +1547,7 @@ def run_campaign(
     # -------------------------------------------------------------------------
     # Load crash recovery state
     # -------------------------------------------------------------------------
-    progress_state = _read_progress() if resume else {}
+    progress_state = _read_progress(_eff_state_file) if resume else {}
     if progress_state.get("campaign_id") and progress_state["campaign_id"] != campaign_id:
         logger.warning(
             "progress.json is for a different campaign (%s vs %s) — starting fresh",
@@ -1521,7 +1581,7 @@ def run_campaign(
     # Initialize telemetry collector
     # -------------------------------------------------------------------------
     collector = tele.TelemetryCollector(
-        db_path=DB_PATH,
+        db_path=_eff_db_path,
         telemetry_jsonl_path=telemetry_jsonl_path,
     )
 
@@ -1570,13 +1630,16 @@ def run_campaign(
                 campaign_id=campaign_id,
                 lab_config=lab_config,
                 request_files=request_files,
-                db_path=DB_PATH,
+                db_path=_eff_db_path,
                 raw_jsonl_path=raw_jsonl_path,
                 telemetry_jsonl_path=telemetry_jsonl_path,
                 collector=collector,
                 progress_state=progress_state,
                 console=console,
                 oom_boundary_sweep=oom_boundary_sweep,
+                state_dir=_eff_state_dir,
+                state_file=_eff_state_file,
+                logs_dir=_eff_logs_dir,
             )
 
             if oom_boundary_sweep:
@@ -1631,7 +1694,7 @@ def run_campaign(
                                 if sid not in completed:
                                     completed.append(sid)
                             progress_state["completed_configs"] = completed
-                            _write_progress(progress_state)
+                            _write_progress(progress_state, _eff_state_dir, _eff_state_file)
                             logger.info(
                                 "Marked %d configs as skipped_oom: %s",
                                 len(skipped_ids), skipped_ids,
@@ -1653,7 +1716,7 @@ def run_campaign(
     except Exception as exc:
         logger.critical("Campaign %s fatal error: %s", campaign_id, exc, exc_info=True)
         console.print(f"[bold red]Fatal error: {exc}[/bold red]")
-        with get_connection(DB_PATH) as conn:
+        with get_connection(_eff_db_path) as conn:
             conn.execute(
                 "UPDATE campaigns SET status='failed', failed_at=?, failure_reason=? WHERE id=?",
                 (datetime.now(timezone.utc).isoformat(), str(exc), campaign_id),
@@ -1667,14 +1730,14 @@ def run_campaign(
     # -------------------------------------------------------------------------
     # Campaign complete
     # -------------------------------------------------------------------------
-    with get_connection(DB_PATH) as conn:
+    with get_connection(_eff_db_path) as conn:
         conn.execute(
             "UPDATE campaigns SET status='complete', completed_at=? WHERE id=?",
             (datetime.now(timezone.utc).isoformat(), campaign_id),
         )
         conn.commit()
 
-    _clear_progress()
+    _clear_progress(_eff_state_file)
 
     console.print(f"\n[bold green]Campaign {campaign_id} complete.[/bold green]")
     logger.info("Campaign %s complete.", campaign_id)
@@ -1699,9 +1762,13 @@ def run_campaign(
         if filter_overrides:
             logger.info("Campaign-level filter overrides active: %s", filter_overrides)
 
-        stats = analyze_campaign(campaign_id, DB_PATH)
-        scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides)
-        report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats, campaign=campaign)
+        stats = analyze_campaign(campaign_id, _eff_db_path)
+        scores = score_campaign(campaign_id, _eff_db_path, baseline, filter_overrides=filter_overrides)
+        report_path = generate_report(
+            campaign_id, _eff_db_path, baseline, scores, stats,
+            campaign=campaign,
+            lab_root=_effective_lab_root,
+        )
         console.print(f"[green]Report written:[/green] {report_path}")
         report_ok = True
     except Exception as exc:
@@ -1718,9 +1785,12 @@ def run_campaign(
 # Logging setup
 # ---------------------------------------------------------------------------
 
-def _setup_logging(campaign_id: str) -> None:
+def _setup_logging(campaign_id: str, logs_dir: Path | None = None) -> None:
     """Configure logging to both console and file."""
-    log_dir = LOGS_DIR / campaign_id
+    # Allow callers to supply an effective logs_dir derived from the active
+    # lab root; fall back to the module-level default for default-baseline runs.
+    effective_logs_dir = logs_dir if logs_dir is not None else LOGS_DIR
+    log_dir = effective_logs_dir / campaign_id
     log_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_file = log_dir / f"runner_{ts}.log"
@@ -1776,11 +1846,22 @@ def _validate_campaign(
     Returns True if all checks pass, False if any fail.
     (U1 fix)
     """
-    _setup_logging(campaign_id)
+    # Derive effective lab root FIRST — _setup_logging must receive the
+    # correct logs_dir or the runner log file lands in the wrong directory.
+    _eff_lab_root_val = _derive_lab_root(baseline_path)
+    _eff_logs_dir_val = _eff_lab_root_val / "logs"
+
+    _setup_logging(campaign_id, logs_dir=_eff_logs_dir_val)
     logger.info("Validating campaign: %s  (baseline=%s)", campaign_id, baseline_path)
     if baseline_path != BASELINE_YAML:
         logger.info("INFO: --baseline override active: %s", baseline_path)
         console.print(f"[dim]Active baseline: {baseline_path}[/dim]")
+
+    if _eff_lab_root_val != LAB_ROOT:
+        logger.info("Lab root (namespaced): %s", _eff_lab_root_val)
+        console.print(f"[dim]Lab root (namespaced): {_eff_lab_root_val}[/dim]")
+    else:
+        logger.info("Lab root (default): %s", _eff_lab_root_val)
 
     ok = True
 
@@ -1961,8 +2042,8 @@ def _validate_campaign(
     #    see interference risks before committing to a multi-hour run.
     if sys.platform == "win32":
         console.print("\n[bold]Environment warnings (advisory — do not block validation):[/bold]")
-        _check_defender_exclusions(_server_bin, _model_path, LAB_ROOT, console)
-        _check_windows_search(LAB_ROOT, _model_path, console)
+        _check_defender_exclusions(_server_bin, _model_path, _eff_lab_root_val, console)
+        _check_windows_search(_eff_lab_root_val, _model_path, console)
 
     # Summary
     console.print()

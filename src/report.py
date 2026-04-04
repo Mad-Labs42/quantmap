@@ -113,6 +113,9 @@ def _config_to_server_args_for_report(config: dict) -> list[str]:
 
 logger = logging.getLogger(__name__)
 
+# LAB_ROOT is kept here as a module-level fallback so that tools calling
+# generate_report() without a lab_root kwarg (e.g. rescore.py) continue to
+# work unchanged. The canonical path is injected by runner.py via lab_root=.
 LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
 
 
@@ -391,6 +394,7 @@ def generate_report(
     scores_result: dict[str, Any] | None = None,
     stats: dict[str, dict[str, Any]] | None = None,
     campaign: dict | None = None,
+    lab_root: Path | None = None,
 ) -> Path:
     """
     Generate Markdown + CSV reports for a completed campaign.
@@ -398,14 +402,18 @@ def generate_report(
     If scores_result and stats are provided (from score_campaign()), they are
     used directly. Otherwise, analysis is re-run from the database.
 
+    lab_root: effective lab root to write reports under. If None, falls back to
+    the module-level LAB_ROOT (default baseline, backwards-compatible behaviour).
+
     Returns the path to the generated Markdown report.
     """
+    effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
     if stats is None:
         stats = analyze_campaign(campaign_id, db_path)
     if scores_result is None:
         scores_result = score_campaign(campaign_id, db_path, baseline)
 
-    report_dir = LAB_ROOT / "results" / campaign_id
+    report_dir = effective_lab_root / "results" / campaign_id
     report_dir.mkdir(parents=True, exist_ok=True)
 
     md_path = report_dir / "report.md"
