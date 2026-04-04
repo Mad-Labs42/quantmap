@@ -473,14 +473,38 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             try:
                 conn.execute(sql)
             except sqlite3.OperationalError as exc:
+                err = str(exc).lower()
                 # "duplicate column name" fires when the DDL already created the
                 # column (new DB path) and the migration tries to ADD it again.
-                # Any other OperationalError is a real problem — re-raise it.
-                if "duplicate column name" in str(exc).lower():
+                if "duplicate column name" in err:
                     logger.debug(
                         "Migration v%d SQL skipped — column already exists: %s",
                         target_version, sql,
                     )
+                # "no such column" fires on RENAME COLUMN when the source column
+                # doesn't exist — happens on a fresh DB where _DDL already created
+                # the table with the post-rename column name.  Safe to skip only
+                # when the destination column is confirmed present.
+                elif "no such column" in err and "rename column" in sql.lower():
+                    # Extract destination column name: last token after " TO "
+                    dest_col = sql.upper().split(" TO ")[-1].strip().split()[0]
+                    # Identify the table being altered: token after "ALTER TABLE"
+                    tokens = sql.split()
+                    table_name = tokens[tokens.index("TABLE") + 1] if "TABLE" in [t.upper() for t in tokens] else None
+                    col_exists = False
+                    if table_name:
+                        col_exists = any(
+                            row[1].upper() == dest_col.upper()
+                            for row in conn.execute(f"PRAGMA table_info({table_name})")
+                        )
+                    if col_exists:
+                        logger.debug(
+                            "Migration v%d RENAME COLUMN skipped — destination column "
+                            "'%s' already exists in '%s' (fresh DB, DDL already current): %s",
+                            target_version, dest_col, table_name, sql,
+                        )
+                    else:
+                        raise  # source missing AND dest missing — real schema problem
                 else:
                     raise
         logger.info("Schema migration v%d applied.", target_version)
