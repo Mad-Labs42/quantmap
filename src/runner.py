@@ -1195,6 +1195,7 @@ def run_campaign(
     resume: bool = True,
     cycles_override: int | None = None,
     requests_per_cycle_override: int | None = None,
+    baseline_path: Path = BASELINE_YAML,
 ) -> None:
     """
     Run a complete campaign from start to finish (or resume if interrupted).
@@ -1208,13 +1209,18 @@ def run_campaign(
     """
     _setup_logging(campaign_id)
     logger.info("=" * 70)
-    logger.info("QuantMap campaign starting: %s  dry_run=%s", campaign_id, dry_run)
+    logger.info(
+        "QuantMap campaign starting: %s  dry_run=%s  baseline=%s",
+        campaign_id, dry_run, baseline_path,
+    )
     logger.info("=" * 70)
 
     # -------------------------------------------------------------------------
     # Load configuration
     # -------------------------------------------------------------------------
-    baseline = load_baseline()
+    if baseline_path != BASELINE_YAML:
+        logger.info("INFO: --baseline override active: %s", baseline_path)
+    baseline = load_baseline(baseline_path)
     campaign = load_campaign(campaign_id)
 
     # Validate purity
@@ -1290,6 +1296,7 @@ def run_campaign(
 
         summary_lines = [
             f"DRY RUN — campaign: {campaign_id}",
+            f"  Baseline:          {baseline_path}",
             f"  Variable:          {variable}",
             f"  Configs to test:   {len(configs)}",
             f"  Cycles per config: {cycles}{cycles_src}",
@@ -1365,7 +1372,7 @@ def run_campaign(
 
         if existing is None:
             import hashlib
-            baseline_sha = hashlib.sha256(BASELINE_YAML.read_bytes()).hexdigest()
+            baseline_sha = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
             campaign_yaml_path = CAMPAIGNS_DIR / f"{campaign_id}.yaml"
             campaign_sha = hashlib.sha256(campaign_yaml_path.read_bytes()).hexdigest()
 
@@ -1413,7 +1420,7 @@ def run_campaign(
         build_commit=baseline.get("runtime", {}).get("build_commit", "unknown"),
         request_files=request_files,
         campaign_yaml_path=campaign_yaml_path,
-        baseline_yaml_path=BASELINE_YAML,
+        baseline_yaml_path=baseline_path,
         sampling_params=sampling_params,
         cpu_affinity_policy=campaign.get("cpu_affinity_details", {}).get("default", "all_cores"),
     )
@@ -1744,7 +1751,10 @@ def _setup_logging(campaign_id: str) -> None:
 # CLI entry point
 # ---------------------------------------------------------------------------
 
-def _validate_campaign(campaign_id: str) -> bool:
+def _validate_campaign(
+    campaign_id: str,
+    baseline_path: Path = BASELINE_YAML,
+) -> bool:
     """
     Validate a campaign YAML without running any measurements.
 
@@ -1767,7 +1777,10 @@ def _validate_campaign(campaign_id: str) -> bool:
     (U1 fix)
     """
     _setup_logging(campaign_id)
-    logger.info("Validating campaign: %s", campaign_id)
+    logger.info("Validating campaign: %s  (baseline=%s)", campaign_id, baseline_path)
+    if baseline_path != BASELINE_YAML:
+        logger.info("INFO: --baseline override active: %s", baseline_path)
+        console.print(f"[dim]Active baseline: {baseline_path}[/dim]")
 
     ok = True
 
@@ -1783,10 +1796,10 @@ def _validate_campaign(campaign_id: str) -> bool:
 
     # 1. baseline.yaml
     try:
-        baseline = load_baseline()
-        ok = _check("baseline.yaml loads", True) and ok
+        baseline = load_baseline(baseline_path)
+        ok = _check(f"baseline YAML loads: {baseline_path}", True) and ok
     except Exception as exc:
-        _check("baseline.yaml loads", False, str(exc))
+        _check(f"baseline YAML loads: {baseline_path}", False, str(exc))
         return False  # can't continue without baseline
 
     # 2. campaign YAML
@@ -2071,11 +2084,20 @@ Examples:
   python -m src.runner --campaign C01_threads_batch --resume
   python -m src.runner --campaign C01_threads_batch --dry-run
   python -m src.runner --campaign C01_threads_batch --validate
+  python -m src.runner --campaign C01_threads_batch --baseline configs/minimax_baseline.yaml
         """,
     )
     parser.add_argument(
         "--campaign",
         help="Campaign ID (matches configs/campaigns/{id}.yaml); required unless --list is used"
+    )
+    parser.add_argument(
+        "--baseline", default=None, metavar="PATH",
+        help=(
+            "Path to a baseline YAML file (default: configs/baseline.yaml). "
+            "Overrides the default for this run only — useful when benchmarking "
+            "multiple models without touching the committed baseline."
+        ),
     )
     parser.add_argument(
         "--list", action="store_true",
@@ -2110,6 +2132,23 @@ Examples:
 
 if __name__ == "__main__":
     args = _parse_args()
+
+    # Resolve --baseline to an absolute Path, defaulting to the repo's
+    # configs/baseline.yaml.  Validated here so the error is reported before
+    # any logging is set up (cleaner UX than a FileNotFoundError from deep inside).
+    if args.baseline is not None:
+        _active_baseline = Path(args.baseline)
+        if not _active_baseline.is_absolute():
+            _active_baseline = (_REPO_ROOT / _active_baseline).resolve()
+        if not _active_baseline.is_file():
+            console.print(
+                f"[bold red]error:[/bold red] --baseline path not found: {_active_baseline}"
+            )
+            sys.exit(2)
+        console.print(f"[dim]Active baseline: {_active_baseline}[/dim]")
+    else:
+        _active_baseline = BASELINE_YAML
+
     if args.list:
         _list_campaigns()
         sys.exit(0)
@@ -2117,7 +2156,7 @@ if __name__ == "__main__":
         console.print("[bold red]error:[/bold red] --campaign is required (or use --list to see campaigns)")
         sys.exit(2)
     if args.validate:
-        ok = _validate_campaign(args.campaign)
+        ok = _validate_campaign(args.campaign, baseline_path=_active_baseline)
         sys.exit(0 if ok else 1)
     run_campaign(
         campaign_id=args.campaign,
@@ -2125,4 +2164,5 @@ if __name__ == "__main__":
         resume=args.resume,
         cycles_override=args.cycles,
         requests_per_cycle_override=args.requests_per_cycle,
+        baseline_path=_active_baseline,
     )
