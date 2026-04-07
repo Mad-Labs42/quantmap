@@ -34,6 +34,7 @@ LOGGING:
 
 USAGE:
     python -m src.runner --campaign C01_threads_batch [--dry-run] [--resume]
+    python -m src.runner --campaign NGL_sweep --values 30,80   # Custom mode (isolated)
 """
 
 from __future__ import annotations
@@ -63,6 +64,7 @@ from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa
 from src.measure import load_request_payload, measure_request_sync, RequestOutcome
 from src import telemetry as tele
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
+from src.run_plan import RunPlan, resolve_run_mode  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
 
 console = Console()
@@ -110,6 +112,35 @@ def _derive_lab_root(baseline_path: Path) -> Path:
     if baseline_path.resolve() == BASELINE_YAML.resolve():
         return LAB_ROOT
     return LAB_ROOT / "profiles" / baseline_path.stem
+
+
+# ---------------------------------------------------------------------------
+# Effective run identity for targeted executions
+# ---------------------------------------------------------------------------
+
+def _derive_effective_campaign_id(campaign_id: str, values_override: list | None) -> str:
+    """
+    Return the stable, scoped run identity for this execution.
+
+    When --values is active a targeted run must be fully isolated from the
+    broader parent campaign's DB rows, progress state, analysis, and report.
+    Appending the canonically-sorted value list to the campaign ID creates a
+    deterministic, human-readable key that never collides with a real campaign
+    (real IDs never contain double-underscore).
+
+    Full runs (values_override=None) return campaign_id unchanged —
+    zero behaviour change for all existing callers.
+
+    Examples:
+      campaign_id="NGL_sweep"  values_override=[30]         → "NGL_sweep__v30"
+      campaign_id="NGL_sweep"  values_override=[30, 80, 999] → "NGL_sweep__v30_80_999"
+      campaign_id="NGL_sweep"  values_override=None          → "NGL_sweep"
+    """
+    if values_override is None:
+        return campaign_id
+    # Sort for canonical order so --values 30,80 ≡ --values 80,30
+    val_str = "_".join(str(v) for v in sorted(values_override, key=str))
+    return f"{campaign_id}__v{val_str}"
 
 
 # ---------------------------------------------------------------------------
@@ -1236,6 +1267,7 @@ def run_campaign(
     resume: bool = True,
     cycles_override: int | None = None,
     requests_per_cycle_override: int | None = None,
+    values_override: list | None = None,
     baseline_path: Path = BASELINE_YAML,
 ) -> None:
     """
@@ -1256,12 +1288,23 @@ def run_campaign(
     _eff_db_path     = _eff_db_dir / "lab.sqlite"
     _eff_state_file  = _eff_state_dir / "progress.json"
 
-    _setup_logging(campaign_id, logs_dir=_eff_logs_dir)
+    effective_campaign_id = _derive_effective_campaign_id(campaign_id, values_override)
+
+    _setup_logging(effective_campaign_id, logs_dir=_eff_logs_dir)
     logger.info("=" * 70)
     logger.info(
         "QuantMap campaign starting: %s  dry_run=%s  baseline=%s",
-        campaign_id, dry_run, baseline_path,
+        effective_campaign_id, dry_run, baseline_path,
     )
+    if effective_campaign_id != campaign_id:
+        logger.info(
+            "Effective run ID (--values scope): %s  (parent campaign: %s)",
+            effective_campaign_id, campaign_id,
+        )
+        console.print(
+            f"[yellow]Effective run ID:[/yellow] {effective_campaign_id}  "
+            f"[dim](parent campaign: {campaign_id})[/dim]"
+        )
     if _effective_lab_root != LAB_ROOT:
         logger.info(
             "Lab root (namespaced): %s", _effective_lab_root,
@@ -1286,6 +1329,29 @@ def run_campaign(
 
     # Build config list
     configs = build_config_list(baseline, campaign)
+
+    # Apply values override (Custom mode — targeted subset run)
+    if values_override is not None:
+        if not values_override:
+            raise ValueError("--values is empty — provide at least one value")
+        campaign_values = campaign.get("values", [])
+        bad = [v for v in values_override if v not in campaign_values]
+        if bad:
+            raise ValueError(
+                f"--values contains values not present in campaign '{campaign_id}':\n"
+                f"  invalid: {bad}\n"
+                f"  valid:   {campaign_values}"
+            )
+        original_count = len(configs)
+        configs = [c for c in configs if c["variable_value"] in values_override]
+        logger.info(
+            "--values override: using %d/%d configs (values=%s)",
+            len(configs), original_count, values_override,
+        )
+        console.print(
+            f"[yellow]--values override:[/yellow] {len(configs)} of "
+            f"{original_count} configs  [dim](values={values_override})[/dim]"
+        )
 
     # Build request file map
     req_cfg = baseline.get("requests", {})
@@ -1329,6 +1395,50 @@ def run_campaign(
         )
         lab_config["requests_per_cycle"] = requests_per_cycle_override
 
+    # -------------------------------------------------------------------------
+    # Resolve run mode and build execution plan
+    # -------------------------------------------------------------------------
+    # RunPlan is the single authoritative description of this execution:
+    # what mode, which identity, which values, what schedule, which paths.
+    # Validate / dry-run / execution / reporting all read from it.
+    _run_mode = resolve_run_mode(values_override)
+
+    # Custom mode: relax min_valid_warm_count so intentionally sparse targeted
+    # runs are not gate-kept as "insufficient data".
+    # The report carries honesty about the actual sample count.
+    # Other modes use ELIMINATION_FILTERS defaults unchanged.
+    # Campaign-level elimination_overrides (from YAML) are merged at call time.
+    _mode_filter_overrides: dict | None = None
+    if _run_mode == "custom":
+        _mode_filter_overrides = {"min_valid_warm_count": 1}
+
+    run_plan = RunPlan(
+        parent_campaign_id=campaign_id,
+        effective_campaign_id=effective_campaign_id,
+        run_mode=_run_mode,
+        variable=variable,
+        all_campaign_values=campaign.get("values", []),
+        selected_values=[c["variable_value"] for c in configs],
+        selected_configs=configs,
+        cycles_per_config=lab_config.get("cycles_per_config", 5),
+        requests_per_cycle=lab_config.get("requests_per_cycle", 6),
+        baseline_path=baseline_path,
+        effective_lab_root=_effective_lab_root,
+        db_path=_eff_db_path,
+        state_file=_eff_state_file,
+        results_dir=_eff_results_dir / effective_campaign_id,
+        filter_overrides=_mode_filter_overrides,
+        values_override=values_override,
+        cycles_override=cycles_override,
+        requests_per_cycle_override=requests_per_cycle_override,
+    )
+    logger.info(
+        "Run plan: mode=%s  effective_id=%s  configs=%d  cycles=%d  reqs=%d",
+        run_plan.run_mode, run_plan.effective_campaign_id,
+        len(run_plan.selected_configs), run_plan.cycles_per_config,
+        run_plan.requests_per_cycle,
+    )
+
     if dry_run:
         # Log and print so the dry-run output survives in the campaign log file.
         # Any validation failures above (FileNotFoundError, purity violation) would
@@ -1352,13 +1462,39 @@ def run_campaign(
         elif "requests_per_cycle" in campaign:
             reqs_src = " (campaign YAML)"
 
+        _mode_label = run_plan.mode_label
+        _mode_desc  = run_plan.mode_description
         summary_lines = [
-            f"DRY RUN — campaign: {campaign_id}",
+            f"DRY RUN — {campaign_id}",
+            f"  Mode:              {_mode_label} — {_mode_desc}",
             f"  Baseline:          {baseline_path}",
             f"  Lab root:          {_effective_lab_root}" + (
                 "  [namespaced]" if _effective_lab_root != LAB_ROOT else "  [default]"
             ),
+        ]
+        if effective_campaign_id != campaign_id:
+            summary_lines.append(
+                f"  Effective run ID:  {effective_campaign_id}"
+            )
+            summary_lines.append(
+                f"  Parent campaign:   {campaign_id}"
+            )
+        _all_vals = run_plan.all_campaign_values
+        _sel_vals = run_plan.selected_values
+        _untested = run_plan.untested_values
+        summary_lines += [
             f"  Variable:          {variable}",
+            f"  Tested values:     {_sel_vals}  ({len(_sel_vals)} of {len(_all_vals)} total)",
+        ]
+        if _untested:
+            summary_lines.append(
+                f"  Skipped values:    {_untested}  (not in this run)"
+            )
+        if run_plan.filter_overrides:
+            summary_lines.append(
+                f"  Filter overrides:  {run_plan.filter_overrides}  [{_mode_label} mode]"
+            )
+        summary_lines += [
             f"  Configs to test:   {len(configs)}",
             f"  Cycles per config: {cycles}{cycles_src}",
             f"  Requests per cycle:{reqs_per_cycle} (1 cold + {warm_per_cycle} warm){reqs_src}",
@@ -1369,10 +1505,16 @@ def run_campaign(
             "",
         ]
         if warm_samples < 20:
-            summary_lines.append(
-                f"  Note: {warm_samples} warm samples — detectable difference ~0.4 t/s "
-                f"at 95% confidence"
-            )
+            if run_plan.is_custom:
+                summary_lines.append(
+                    f"  Note: {warm_samples} warm samples — Custom run, sparse data is intentional. "
+                    f"Results are valid for comparison within the tested subset only."
+                )
+            else:
+                summary_lines.append(
+                    f"  Note: {warm_samples} warm samples — detectable difference ~0.4 t/s "
+                    f"at 95% confidence"
+                )
         if campaign.get("oom_boundary_sweep", False):
             summary_lines.append(
                 "  OOM boundary detection: enabled (early termination after 2 consecutive OOMs)"
@@ -1414,7 +1556,7 @@ def run_campaign(
     for d in [_eff_results_dir, _eff_logs_dir, _eff_db_dir, _eff_state_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    campaign_results_dir = _eff_results_dir / campaign_id
+    campaign_results_dir = _eff_results_dir / effective_campaign_id
     campaign_results_dir.mkdir(parents=True, exist_ok=True)
 
     raw_jsonl_path = campaign_results_dir / "raw.jsonl"
@@ -1428,7 +1570,7 @@ def run_campaign(
     now_iso = datetime.now(timezone.utc).isoformat()
     with get_connection(_eff_db_path) as conn:
         existing = conn.execute(
-            "SELECT status FROM campaigns WHERE id=?", (campaign_id,)
+            "SELECT status FROM campaigns WHERE id=?", (effective_campaign_id,)
         ).fetchone()
 
         if existing is None:
@@ -1439,28 +1581,29 @@ def run_campaign(
 
             conn.execute(
                 """INSERT INTO campaigns
-                   (id, name, variable, campaign_type, status, created_at, started_at,
+                   (id, name, variable, campaign_type, run_mode, status, created_at, started_at,
                     baseline_sha256, campaign_sha256, rationale)
-                   VALUES (?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
                 (
-                    campaign_id,
-                    campaign.get("campaign_id", campaign_id),
+                    effective_campaign_id,
+                    campaign_id,  # human-readable name = parent campaign YAML id
                     variable,
                     campaign.get("type", "primary_sweep"),
+                    run_plan.run_mode,
                     now_iso, now_iso,
                     baseline_sha, campaign_sha,
                     campaign.get("rationale", ""),
                 ),
             )
             conn.commit()
-            logger.info("Campaign %s registered in database", campaign_id)
+            logger.info("Campaign %s registered in database", effective_campaign_id)
         elif existing["status"] == "complete" and not resume:
             # U7: clarify what --resume actually does (skips completed configs,
             # does NOT re-run them) so operators aren't confused about data integrity.
             console.print(
-                f"[yellow]Campaign {campaign_id} is already marked complete in the database. "
-                f"Pass --resume to continue in re-entry mode — completed configs will be "
-                f"skipped; only configs not yet marked complete will run.[/yellow]"
+                f"[yellow]Campaign {effective_campaign_id} is already marked complete in the "
+                f"database. Pass --resume to continue in re-entry mode — completed configs will "
+                f"be skipped; only configs not yet marked complete will run.[/yellow]"
             )
             return
 
@@ -1475,7 +1618,7 @@ def run_campaign(
     sampling_params = baseline.get("sampling", {})
 
     snap = tele.collect_campaign_start_snapshot(
-        campaign_id=campaign_id,
+        campaign_id=effective_campaign_id,
         server_bin=_server_bin,
         model_path=_model_path,
         build_commit=baseline.get("runtime", {}).get("build_commit", "unknown"),
@@ -1511,7 +1654,7 @@ def run_campaign(
     # Write a parallel human-readable YAML snapshot alongside the report.
     # The DB row is the authoritative record; this file is a convenience copy
     # that can be inspected or diffed without opening SQLite. (L1/U6 fix)
-    yaml_snapshot_path = _eff_results_dir / campaign_id / "campaign_yaml_snapshot.yaml"
+    yaml_snapshot_path = _eff_results_dir / effective_campaign_id / "campaign_yaml_snapshot.yaml"
     try:
         yaml_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         yaml_snapshot_path.write_text(
@@ -1527,7 +1670,7 @@ def run_campaign(
     logger.info(
         "Campaign %s loaded: variable=%s, values=%s, cycles_per_config=%d, "
         "requests_per_cycle=%d, yaml_sha256=%s",
-        campaign_id,
+        effective_campaign_id,
         variable,
         [c.get("variable_value") for c in configs],
         lab_config.get("cycles_per_config", 5),
@@ -1536,12 +1679,12 @@ def run_campaign(
     )
 
     console.print(
-        f"[bold]Campaign:[/bold] {campaign_id}  "
+        f"[bold]Campaign:[/bold] {effective_campaign_id}  "
         f"[dim]variable={variable}  configs={len(configs)}[/dim]"
     )
     logger.info(
         "Campaign %s: variable=%s, %d configs, %d cycles each",
-        campaign_id, variable, len(configs),
+        effective_campaign_id, variable, len(configs),
         lab_config.get("cycles_per_config", 5),
     )
 
@@ -1549,21 +1692,21 @@ def run_campaign(
     # Load crash recovery state
     # -------------------------------------------------------------------------
     progress_state = _read_progress(_eff_state_file) if resume else {}
-    if progress_state.get("campaign_id") and progress_state["campaign_id"] != campaign_id:
+    if progress_state.get("campaign_id") and progress_state["campaign_id"] != effective_campaign_id:
         logger.warning(
             "progress.json is for a different campaign (%s vs %s) — starting fresh",
-            progress_state["campaign_id"], campaign_id,
+            progress_state["campaign_id"], effective_campaign_id,
         )
         progress_state = {}
 
-    progress_state["campaign_id"] = campaign_id
+    progress_state["campaign_id"] = effective_campaign_id
     progress_state.setdefault("completed_configs", [])
     completed_config_ids = set(progress_state["completed_configs"])
 
     if completed_config_ids:
         remaining = [c["config_id"] for c in configs if c["config_id"] not in completed_config_ids]
         console.print(
-            f"[yellow]Resuming campaign {campaign_id}: "
+            f"[yellow]Resuming campaign {effective_campaign_id}: "
             f"{len(completed_config_ids)}/{len(configs)} configs already complete, "
             f"{len(remaining)} remaining[/yellow]"
         )
@@ -1571,12 +1714,12 @@ def run_campaign(
         # which configs ran in a prior session vs this one. (L3 fix)
         logger.info(
             "Resuming campaign %s: completed=%s remaining=%s",
-            campaign_id,
+            effective_campaign_id,
             sorted(completed_config_ids),
             remaining,
         )
     else:
-        logger.info("Starting campaign %s fresh (no prior progress state found)", campaign_id)
+        logger.info("Starting campaign %s fresh (no prior progress state found)", effective_campaign_id)
 
     # -------------------------------------------------------------------------
     # Initialize telemetry collector
@@ -1628,7 +1771,7 @@ def run_campaign(
 
             result = _run_config(
                 config=config,
-                campaign_id=campaign_id,
+                campaign_id=effective_campaign_id,
                 lab_config=lab_config,
                 request_files=request_files,
                 db_path=_eff_db_path,
@@ -1672,7 +1815,7 @@ def run_campaign(
                         remaining_configs = configs[i + 1:]
                         if remaining_configs:
                             detail = "boundary confirmed by 2 consecutive OOM failures"
-                            with get_connection(DB_PATH) as conn:
+                            with get_connection(_eff_db_path) as conn:
                                 for rc in remaining_configs:
                                     conn.execute(
                                         """INSERT OR IGNORE INTO configs
@@ -1680,7 +1823,7 @@ def run_campaign(
                                             config_values_json, status, failure_detail, started_at)
                                            VALUES (?, ?, ?, ?, ?, 'skipped_oom', ?, ?)""",
                                         (
-                                            rc["config_id"], campaign_id,
+                                            rc["config_id"], effective_campaign_id,
                                             rc["variable_name"],
                                             json.dumps(rc["variable_value"]),
                                             json.dumps(rc["full_config"]),
@@ -1711,16 +1854,16 @@ def run_campaign(
                     consecutive_ooms = 0
 
     except KeyboardInterrupt:
-        logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", campaign_id)
+        logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", effective_campaign_id)
         console.print("\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]")
         return
     except Exception as exc:
-        logger.critical("Campaign %s fatal error: %s", campaign_id, exc, exc_info=True)
+        logger.critical("Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True)
         console.print(f"[bold red]Fatal error: {exc}[/bold red]")
         with get_connection(_eff_db_path) as conn:
             conn.execute(
                 "UPDATE campaigns SET status='failed', failed_at=?, failure_reason=? WHERE id=?",
-                (datetime.now(timezone.utc).isoformat(), str(exc), campaign_id),
+                (datetime.now(timezone.utc).isoformat(), str(exc), effective_campaign_id),
             )
             conn.commit()
         raise
@@ -1734,14 +1877,14 @@ def run_campaign(
     with get_connection(_eff_db_path) as conn:
         conn.execute(
             "UPDATE campaigns SET status='complete', completed_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), campaign_id),
+            (datetime.now(timezone.utc).isoformat(), effective_campaign_id),
         )
         conn.commit()
 
     _clear_progress(_eff_state_file)
 
-    console.print(f"\n[bold green]Campaign {campaign_id} complete.[/bold green]")
-    logger.info("Campaign %s complete.", campaign_id)
+    console.print(f"\n[bold green]Campaign {effective_campaign_id} complete.[/bold green]")
+    logger.info("Campaign %s complete.", effective_campaign_id)
 
     # Run analysis + scoring + report
     # Failure here does NOT mean data was lost — raw.jsonl and lab.sqlite are
@@ -1756,19 +1899,36 @@ def run_campaign(
         from src.score import score_campaign
         from src.report import generate_report
 
-        # Pass campaign-level elimination overrides if the YAML defines them.
-        # score_campaign() merges these with ELIMINATION_FILTERS at call time —
-        # the global defaults remain unchanged for every other callsite. (L6 fix)
-        filter_overrides = campaign.get("elimination_overrides")
-        if filter_overrides:
-            logger.info("Campaign-level filter overrides active: %s", filter_overrides)
+        # Build the effective filter_overrides for scoring:
+        #   1. Start with mode-level overrides (from RunPlan — e.g. Custom relaxes
+        #      min_valid_warm_count so sparse-but-intentional runs aren't rejected).
+        #   2. Merge campaign YAML elimination_overrides on top (YAML wins on conflict
+        #      so explicit campaign-level decisions always take precedence).
+        yaml_filter_overrides = campaign.get("elimination_overrides") or {}
+        effective_filter_overrides: dict | None = None
+        if run_plan.filter_overrides or yaml_filter_overrides:
+            effective_filter_overrides = {**(run_plan.filter_overrides or {}), **yaml_filter_overrides}
+            logger.info(
+                "Effective filter overrides (mode=%s + campaign YAML): %s",
+                run_plan.run_mode, effective_filter_overrides,
+            )
 
-        stats = analyze_campaign(campaign_id, _eff_db_path)
-        scores = score_campaign(campaign_id, _eff_db_path, baseline, filter_overrides=filter_overrides)
+        # effective_campaign_id is the DB key for this run.  For full runs it
+        # equals campaign_id; for Custom runs it is the scoped identity
+        # (e.g. "NGL_sweep__v30"), so analyze/score/report operate only on the
+        # rows this run actually inserted — no cross-contamination from prior
+        # broader runs.
+        stats = analyze_campaign(effective_campaign_id, _eff_db_path)
+        scores = score_campaign(
+            effective_campaign_id, _eff_db_path, baseline,
+            filter_overrides=effective_filter_overrides,
+        )
+
         report_path = generate_report(
-            campaign_id, _eff_db_path, baseline, scores, stats,
+            effective_campaign_id, _eff_db_path, baseline, scores, stats,
             campaign=campaign,
             lab_root=_effective_lab_root,
+            run_plan=run_plan,
         )
         console.print(f"[green]Report written:[/green] {report_path}")
         report_ok = True
@@ -1824,6 +1984,7 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None) -> None:
 
 def _validate_campaign(
     campaign_id: str,
+    values_override: list | None = None,
     baseline_path: Path = BASELINE_YAML,
 ) -> bool:
     """
@@ -1852,12 +2013,26 @@ def _validate_campaign(
     _eff_lab_root_val = _derive_lab_root(baseline_path)
     _eff_logs_dir_val = _eff_lab_root_val / "logs"
 
-    _setup_logging(campaign_id, logs_dir=_eff_logs_dir_val)
-    logger.info("Validating campaign: %s  (baseline=%s)", campaign_id, baseline_path)
+    # Effective campaign identity — same logic as run_campaign.
+    # values_override is not yet validated here (check 3.5 does that), but the
+    # helper is safe to call with any list; it only formats the string.
+    _eff_cid_val = _derive_effective_campaign_id(campaign_id, values_override)
+
+    _setup_logging(_eff_cid_val, logs_dir=_eff_logs_dir_val)
+    logger.info("Validating campaign: %s  (baseline=%s)", _eff_cid_val, baseline_path)
     if baseline_path != BASELINE_YAML:
         logger.info("INFO: --baseline override active: %s", baseline_path)
         console.print(f"[dim]Active baseline: {baseline_path}[/dim]")
 
+    if _eff_cid_val != campaign_id:
+        logger.info(
+            "Effective run ID (--values scope): %s  (parent campaign: %s)",
+            _eff_cid_val, campaign_id,
+        )
+        console.print(
+            f"[yellow]Effective run ID:[/yellow] {_eff_cid_val}  "
+            f"[dim](parent campaign: {campaign_id})[/dim]"
+        )
     if _eff_lab_root_val != LAB_ROOT:
         logger.info("Lab root (namespaced): %s", _eff_lab_root_val)
         console.print(f"[dim]Lab root (namespaced): {_eff_lab_root_val}[/dim]")
@@ -1900,6 +2075,25 @@ def _validate_campaign(
                     f"variable={variable!r}, {len(values)} values: {values}") and ok
     except CampaignPurityViolationError as exc:
         ok = _check("campaign purity (one variable)", False, str(exc)) and ok
+
+    # 3.5 Values override validation (if --values used)
+    if values_override is not None:
+        campaign_values_all = campaign.get("values", [])
+        bad_vals = [v for v in values_override if v not in campaign_values_all]
+        ok = _check(
+            "--values override: all values present in campaign",
+            len(bad_vals) == 0,
+            (
+                f"using {len(values_override)} of {len(campaign_values_all)} values: {values_override}"
+                if not bad_vals
+                else f"invalid: {bad_vals}; campaign has: {campaign_values_all}"
+            ),
+        ) and ok
+        _check(
+            "effective run ID",
+            True,
+            f"{_eff_cid_val}",
+        )
 
     # 4. Request files
     req_cfg = baseline.get("requests", {})
@@ -2050,6 +2244,13 @@ def _validate_campaign(
     console.print()
     if ok:
         configs = build_config_list(baseline, campaign)
+        if values_override is not None:
+            all_count = len(configs)
+            configs = [c for c in configs if c["variable_value"] in values_override]
+            console.print(
+                f"[dim]--values override: {len(configs)} of {all_count} campaign configs "
+                f"(values={values_override})[/dim]"
+            )
         # Resolve effective cycles/requests (campaign YAML overrides baseline)
         cycles = campaign.get("cycles_per_config", lab.get("cycles_per_config", 3))
         reqs = campaign.get("requests_per_cycle", lab.get("requests_per_cycle", 6))
@@ -2069,11 +2270,18 @@ def _validate_campaign(
             f"{len(configs) * cycles * reqs} total requests.{source_note}"
         )
         if warm_samples < 20:
-            console.print(
-                f"  [dim]Note: {warm_samples} warm samples per config — "
-                f"detectable difference ~0.4 t/s at 95% confidence. "
-                f"Use --cycles {max(cycles + 1, 4)} for narrower confidence interval.[/dim]"
-            )
+            if values_override is not None:
+                console.print(
+                    f"  [dim]Note: {warm_samples} warm samples per config — "
+                    f"Custom run, sparse data is intentional. "
+                    f"Results are valid for comparison within the tested subset only.[/dim]"
+                )
+            else:
+                console.print(
+                    f"  [dim]Note: {warm_samples} warm samples per config — "
+                    f"detectable difference ~0.4 t/s at 95% confidence. "
+                    f"Use --cycles {max(cycles + 1, 4)} for narrower confidence interval.[/dim]"
+                )
         logger.info("Validation passed: %s", campaign_id)
     else:
         console.print("[bold red]Validation FAILED — fix errors above before running.[/bold red]")
@@ -2099,6 +2307,7 @@ def _list_campaigns() -> None:
             """
             SELECT
                 c.id,
+                c.run_mode,
                 c.status,
                 (SELECT COUNT(*) FROM configs cf WHERE cf.campaign_id = c.id) AS cfg_count,
                 (SELECT s.config_id FROM scores s
@@ -2120,8 +2329,11 @@ def _list_campaigns() -> None:
         console.print("[yellow]No campaigns in database yet.[/yellow]")
         return
 
+    from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
+
     tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
     tbl.add_column("Campaign", style="cyan", no_wrap=True)
+    tbl.add_column("Mode", no_wrap=True)
     tbl.add_column("Status", no_wrap=True)
     tbl.add_column("Cfgs", justify="right")
     tbl.add_column("Winner", no_wrap=True)
@@ -2137,12 +2349,14 @@ def _list_campaigns() -> None:
         "pending": "dim",
     }
 
-    for campaign_id, status, cfg_count, winner, winner_tg, ts, report_path in rows:
+    for campaign_id, run_mode, status, cfg_count, winner, winner_tg, ts, report_path in rows:
         style = status_styles.get(status, "")
         ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
         report_display = str(report_path) if report_path else "—"
+        mode_label = _ML.get(run_mode, run_mode.title()) if run_mode else "—"
         tbl.add_row(
             campaign_id,
+            mode_label,
             f"[{style}]{status}[/{style}]" if style else status,
             str(cfg_count),
             winner or "—",
@@ -2156,6 +2370,25 @@ def _list_campaigns() -> None:
     console.print()
 
 
+def _parse_values_arg(raw: str) -> list:
+    """
+    Parse the --values string into a typed list.
+
+    Tries int conversion first; keeps original string on failure.
+    Example: "30,80,999" → [30, 80, 999]
+    """
+    result = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            result.append(int(part))
+        except ValueError:
+            result.append(part)
+    return result
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="QuantMap campaign runner",
@@ -2167,6 +2400,8 @@ Examples:
   python -m src.runner --campaign C01_threads_batch --dry-run
   python -m src.runner --campaign C01_threads_batch --validate
   python -m src.runner --campaign C01_threads_batch --baseline configs/minimax_baseline.yaml
+  python -m src.runner --campaign NGL_sweep --values 30         (Custom mode — single value)
+  python -m src.runner --campaign NGL_sweep --values 30,80,999  (Custom mode — subset)
         """,
     )
     parser.add_argument(
@@ -2209,6 +2444,17 @@ Examples:
         "--requests-per-cycle", type=int, default=None, metavar="N",
         help="Override requests_per_cycle (baseline.yaml and campaign YAML) for this run"
     )
+    parser.add_argument(
+        "--values", default=None, metavar="VALUE_LIST",
+        help=(
+            "Comma-separated list of campaign variable values to test (e.g. 30 or 30,80,999). "
+            "Triggers Custom mode: an isolated run scoped to exactly these values. "
+            "The run gets its own DB identity (e.g. NGL_sweep__v30), results directory, "
+            "and report — fully isolated from any Full run of the same campaign. "
+            "Values must exist in the campaign's values list. "
+            "If omitted, all campaign values are used (Full mode)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2231,6 +2477,14 @@ if __name__ == "__main__":
     else:
         _active_baseline = BASELINE_YAML
 
+    # Parse --values override (if supplied)
+    _values_override: list | None = None
+    if args.values is not None:
+        _values_override = _parse_values_arg(args.values)
+        if not _values_override:
+            console.print("[bold red]error:[/bold red] --values is empty — provide at least one value")
+            sys.exit(2)
+
     if args.list:
         _list_campaigns()
         sys.exit(0)
@@ -2238,7 +2492,7 @@ if __name__ == "__main__":
         console.print("[bold red]error:[/bold red] --campaign is required (or use --list to see campaigns)")
         sys.exit(2)
     if args.validate:
-        ok = _validate_campaign(args.campaign, baseline_path=_active_baseline)
+        ok = _validate_campaign(args.campaign, values_override=_values_override, baseline_path=_active_baseline)
         sys.exit(0 if ok else 1)
     run_campaign(
         campaign_id=args.campaign,
@@ -2246,5 +2500,6 @@ if __name__ == "__main__":
         resume=args.resume,
         cycles_override=args.cycles,
         requests_per_cycle_override=args.requests_per_cycle,
+        values_override=_values_override,
         baseline_path=_active_baseline,
     )

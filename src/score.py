@@ -328,19 +328,13 @@ def score_campaign(
         campaign_id:      campaign to score
         db_path:          path to lab.sqlite
         baseline:         loaded baseline.yaml dict (for reference comparison)
-        filter_overrides: optional per-campaign threshold overrides.  Keys must
-                          match ELIMINATION_FILTERS keys; values replace defaults.
-                          Example: {"min_success_rate": 0.99, "max_cv": 0.03}
+        filter_overrides: optional threshold overrides merged on top of ELIMINATION_FILTERS.
+                          Keys must match ELIMINATION_FILTERS keys; values replace defaults.
                           Unspecified keys use the ELIMINATION_FILTERS defaults.
-
-                          PRE-RELEASE: runner.py and rescore.py should read this
-                          from the campaign YAML's `elimination_overrides` section
-                          and pass it here.  YAML structure:
-                              elimination_overrides:
-                                  min_success_rate: 0.99
-                                  max_cv: 0.03
-                          This parameter is already wired — only the YAML reading
-                          callsite needs updating when that work is scheduled.
+                          runner.py builds this from two sources merged in priority order:
+                            1. mode-level overrides from RunPlan.filter_overrides
+                               (e.g. Custom mode injects {"min_valid_warm_count": 1})
+                            2. campaign YAML elimination_overrides (YAML wins on conflict)
 
     Returns a dict with keys:
         stats              — per-config statistics from analyze_campaign()

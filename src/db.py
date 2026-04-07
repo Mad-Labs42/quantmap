@@ -305,7 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
 
 
 class SchemaVersionError(RuntimeError):
@@ -383,6 +383,16 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         [
             "ALTER TABLE background_snapshots RENAME COLUMN "
             "windows_defender_active TO defender_process_running",
+        ],
+    ),
+    (
+        6,
+        "Mode system foundation: add run_mode TEXT column to campaigns table. "
+        "Stores the resolved execution mode for each run: 'full' | 'custom'. "
+        "NULL means pre-v6 data (mode unknown). "
+        "Required for mode-aware reporting and the future cumulative master report.",
+        [
+            "ALTER TABLE campaigns ADD COLUMN run_mode TEXT",
         ],
     ),
 ]
