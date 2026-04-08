@@ -388,7 +388,7 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
     (
         6,
         "Mode system foundation: add run_mode TEXT column to campaigns table. "
-        "Stores the resolved execution mode for each run: 'full' | 'custom'. "
+        "Stores the resolved execution mode for each run: 'full' | 'custom' | 'standard' | 'quick'. "
         "NULL means pre-v6 data (mode unknown). "
         "Required for mode-aware reporting and the future cumulative master report.",
         [

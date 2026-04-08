@@ -95,7 +95,7 @@ config:
   defrag_thold: 0.1              # C13
 
 lab:
-  cycles_per_config: 3
+  cycles_per_config: 5
   requests_per_cycle: 6           # 1 cold + 5 warm
   inter_request_delay_s: 20
   cooldown_between_configs_s: 300
