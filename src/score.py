@@ -10,7 +10,7 @@ ELIMINATION FILTERS (applied before scoring, thresholds locked before data is se
     max_warm_ttft_p90_ms    500     P90 TTFT > 500ms is unacceptable
     min_success_rate        0.90    Allows ~3 transient failures per 30 requests
     min_warm_tg_p10         7.0     Hard floor below which config is unusable
-    min_valid_warm_count    20      Require minimum samples for statistical validity
+    min_valid_warm_count    10      Require minimum samples for statistical validity
 
 SCORING (Option A — min-max normalization, MDD §12.2 + fix):
     Each metric is normalized to [0,1] across the passing candidate set.
@@ -69,7 +69,11 @@ ELIMINATION_FILTERS: dict[str, float] = {
     "max_warm_ttft_p90_ms":     500.0,
     "min_success_rate":         0.90,    # lowered from 1.0: allows ~3 transient failures per 30 requests
     "min_warm_tg_p10":          7.0,
-    "min_valid_warm_count":     10,      # lowered from 20: 3 cycles × 5 warm = 15 is sufficient (CV 0.002-0.030)
+    "min_valid_warm_count":     10,      # Full: 4×5 + 4 = 24 warm speed_short; Standard: 2×5 + 4 = 14. Both exceed 10.
+                                         # Quick mode injects filter_overrides={"min_valid_warm_count": 3} via RunPlan
+                                         # because Quick's only cycle yields 4 warm speed_short (last req = speed_medium).
+                                         # NOTE: counts above are warm speed_short only (analyze.py valid_warm_request_count).
+                                         # warm_samples_per_config in run_plan.py includes speed_medium (+1 per config).
 }
 
 # Scoring weights — sum to 1.0

@@ -9,8 +9,11 @@ Campaign orchestrator. Runs one campaign YAML from start to finish:
        a. Enforces inter-config cooldown (min 300s + temperature gate)
        b. For each cycle (1–5):
             - Starts llama-server via server.py context manager
-            - Runs 6 requests (cycles 1–4: all speed_short;
-              cycle 5: 5 speed_short + 1 speed_medium)
+            - Runs requests_per_cycle requests per cycle.
+              Non-final cycles: all speed_short (1 cold + N−1 warm).
+              Final cycle only: last request is speed_medium instead of speed_short.
+              Quick mode (1 cycle): the only cycle IS the final cycle — it runs
+              1 cold speed_short + 4 warm speed_short + 1 warm speed_medium.
             - Telemetry runs in background throughout
             - Writes results to raw.jsonl + lab.sqlite
             - Marks cycle invalid on any crash; resumes from cycle boundary
@@ -34,7 +37,9 @@ LOGGING:
 
 USAGE:
     python -m src.runner --campaign C01_threads_batch [--dry-run] [--resume]
-    python -m src.runner --campaign NGL_sweep --values 30,80   # Custom mode (isolated)
+    python -m src.runner --campaign NGL_sweep --mode quick      # Quick mode (all values, 1 cycle)
+    python -m src.runner --campaign NGL_sweep --mode standard   # Standard mode (all values, reduced repetition)
+    python -m src.runner --campaign NGL_sweep --values 30,80    # Custom mode (isolated)
 """
 
 from __future__ import annotations
@@ -64,7 +69,7 @@ from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa
 from src.measure import load_request_payload, measure_request_sync, RequestOutcome
 from src import telemetry as tele
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
-from src.run_plan import RunPlan, resolve_run_mode  # noqa: E402
+from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
 
 console = Console()
@@ -118,29 +123,42 @@ def _derive_lab_root(baseline_path: Path) -> Path:
 # Effective run identity for targeted executions
 # ---------------------------------------------------------------------------
 
-def _derive_effective_campaign_id(campaign_id: str, values_override: list | None) -> str:
+def _derive_effective_campaign_id(
+    campaign_id: str,
+    values_override: list | None,
+    mode_flag: str | None = None,
+) -> str:
     """
     Return the stable, scoped run identity for this execution.
 
-    When --values is active a targeted run must be fully isolated from the
-    broader parent campaign's DB rows, progress state, analysis, and report.
-    Appending the canonically-sorted value list to the campaign ID creates a
-    deterministic, human-readable key that never collides with a real campaign
-    (real IDs never contain double-underscore).
+    Standard runs get a __standard suffix so their DB rows, progress state,
+    and reports are isolated from any Full run of the same campaign.
 
-    Full runs (values_override=None) return campaign_id unchanged —
+    When --values is active (Custom mode) a targeted run must be fully
+    isolated from the broader parent campaign's DB rows.  Appending the
+    canonically-sorted value list creates a deterministic, human-readable key
+    that never collides with a real campaign (real IDs never contain
+    double-underscore).
+
+    Full runs (no mode_flag, no values_override) return campaign_id unchanged —
     zero behaviour change for all existing callers.
 
     Examples:
-      campaign_id="NGL_sweep"  values_override=[30]         → "NGL_sweep__v30"
-      campaign_id="NGL_sweep"  values_override=[30, 80, 999] → "NGL_sweep__v30_80_999"
-      campaign_id="NGL_sweep"  values_override=None          → "NGL_sweep"
+      mode_flag="quick"     values_override=None   → "NGL_sweep__quick"
+      mode_flag="standard"  values_override=None   → "NGL_sweep__standard"
+      mode_flag=None        values_override=[30]   → "NGL_sweep__v30"
+      mode_flag=None        values_override=[30, 80, 999] → "NGL_sweep__v30_80_999"
+      mode_flag=None        values_override=None   → "NGL_sweep"
     """
-    if values_override is None:
-        return campaign_id
-    # Sort for canonical order so --values 30,80 ≡ --values 80,30
-    val_str = "_".join(str(v) for v in sorted(values_override, key=str))
-    return f"{campaign_id}__v{val_str}"
+    if mode_flag == "quick":
+        return f"{campaign_id}__quick"
+    if mode_flag == "standard":
+        return f"{campaign_id}__standard"
+    if values_override is not None:
+        # Sort for canonical order so --values 30,80 ≡ --values 80,30
+        val_str = "_".join(str(v) for v in sorted(values_override, key=str))
+        return f"{campaign_id}__v{val_str}"
+    return campaign_id
 
 
 # ---------------------------------------------------------------------------
@@ -937,8 +955,9 @@ def _run_cycle(
                 payload = load_request_payload(payload_path)
 
                 console.print(
-                    f"  [dim]Cycle {cycle_number}/5  req {req_idx}/6  "
-                    f"{req_type}  {'(cold)' if req_idx == 1 else '(warm)'}[/dim]"
+                    f"  [dim]Cycle {cycle_number}/{lab_config.get('cycles_per_config', 5)}"
+                    f"  req {req_idx}/{len(schedule)}"
+                    f"  {req_type}  {'(cold)' if req_idx == 1 else '(warm)'}[/dim]"
                 )
 
                 result = measure_request_sync(
@@ -1269,6 +1288,7 @@ def run_campaign(
     requests_per_cycle_override: int | None = None,
     values_override: list | None = None,
     baseline_path: Path = BASELINE_YAML,
+    mode_flag: str | None = None,
 ) -> None:
     """
     Run a complete campaign from start to finish (or resume if interrupted).
@@ -1277,8 +1297,9 @@ def run_campaign(
 
     Override resolution order (highest priority wins):
       1. CLI flags (--cycles, --requests-per-cycle)
-      2. Campaign YAML (cycles_per_config, requests_per_cycle keys)
-      3. baseline.yaml lab section (global defaults)
+      2. Mode-specific default (QUICK/STANDARD_CYCLES_PER_CONFIG) — only if no --cycles
+      3. Campaign YAML (cycles_per_config, requests_per_cycle keys)
+      4. baseline.yaml lab section (global defaults)
     """
     _effective_lab_root = _derive_lab_root(baseline_path)
     _eff_results_dir = _effective_lab_root / "results"
@@ -1288,7 +1309,7 @@ def run_campaign(
     _eff_db_path     = _eff_db_dir / "lab.sqlite"
     _eff_state_file  = _eff_state_dir / "progress.json"
 
-    effective_campaign_id = _derive_effective_campaign_id(campaign_id, values_override)
+    effective_campaign_id = _derive_effective_campaign_id(campaign_id, values_override, mode_flag)
 
     _setup_logging(effective_campaign_id, logs_dir=_eff_logs_dir)
     logger.info("=" * 70)
@@ -1297,9 +1318,15 @@ def run_campaign(
         effective_campaign_id, dry_run, baseline_path,
     )
     if effective_campaign_id != campaign_id:
+        if mode_flag == "quick":
+            _scope_reason = "--mode quick"
+        elif mode_flag == "standard":
+            _scope_reason = "--mode standard"
+        else:
+            _scope_reason = "--values scope"
         logger.info(
-            "Effective run ID (--values scope): %s  (parent campaign: %s)",
-            effective_campaign_id, campaign_id,
+            "Effective run ID (%s): %s  (parent campaign: %s)",
+            _scope_reason, effective_campaign_id, campaign_id,
         )
         console.print(
             f"[yellow]Effective run ID:[/yellow] {effective_campaign_id}  "
@@ -1381,6 +1408,23 @@ def run_campaign(
         )
         lab_config["requests_per_cycle"] = campaign["requests_per_cycle"]
 
+    # Layer 2.5: Mode-specific cycle defaults — applied after campaign YAML,
+    # before CLI --cycles so the explicit override always wins.
+    if mode_flag == "standard" and cycles_override is None:
+        _before = lab_config.get("cycles_per_config", 5)
+        lab_config["cycles_per_config"] = STANDARD_CYCLES_PER_CONFIG
+        logger.info(
+            "--mode standard: overriding cycles_per_config %d → %d (STANDARD_CYCLES_PER_CONFIG)",
+            _before, STANDARD_CYCLES_PER_CONFIG,
+        )
+    elif mode_flag == "quick" and cycles_override is None:
+        _before = lab_config.get("cycles_per_config", 5)
+        lab_config["cycles_per_config"] = QUICK_CYCLES_PER_CONFIG
+        logger.info(
+            "--mode quick: overriding cycles_per_config %d → %d (QUICK_CYCLES_PER_CONFIG)",
+            _before, QUICK_CYCLES_PER_CONFIG,
+        )
+
     # Layer 3: CLI flags override everything
     if cycles_override is not None:
         logger.info(
@@ -1401,16 +1445,22 @@ def run_campaign(
     # RunPlan is the single authoritative description of this execution:
     # what mode, which identity, which values, what schedule, which paths.
     # Validate / dry-run / execution / reporting all read from it.
-    _run_mode = resolve_run_mode(values_override)
+    _run_mode = resolve_run_mode(values_override, mode_flag)
 
-    # Custom mode: relax min_valid_warm_count so intentionally sparse targeted
-    # runs are not gate-kept as "insufficient data".
-    # The report carries honesty about the actual sample count.
-    # Other modes use ELIMINATION_FILTERS defaults unchanged.
+    # Mode-specific filter overrides:
+    # - Custom: relax min_valid_warm_count to 1 (intentionally sparse targeted run)
+    # - Quick: relax min_valid_warm_count to 3.
+    #          Why 3: Quick's only cycle uses requests [cold, warm×4, warm speed_medium].
+    #          analyze.py counts warm speed_short only → 4 valid warm samples per config.
+    #          min=3 allows exactly 1 request failure (4−3=1) before eliminating a config.
+    #          The default of 10 would eliminate every Quick config (4 < 10).
+    # - Standard and Full: use ELIMINATION_FILTERS defaults unchanged
     # Campaign-level elimination_overrides (from YAML) are merged at call time.
     _mode_filter_overrides: dict | None = None
     if _run_mode == "custom":
         _mode_filter_overrides = {"min_valid_warm_count": 1}
+    elif _run_mode == "quick":
+        _mode_filter_overrides = {"min_valid_warm_count": 3}
 
     run_plan = RunPlan(
         parent_campaign_id=campaign_id,
@@ -1428,6 +1478,7 @@ def run_campaign(
         state_file=_eff_state_file,
         results_dir=_eff_results_dir / effective_campaign_id,
         filter_overrides=_mode_filter_overrides,
+        mode_flag=mode_flag,
         values_override=values_override,
         cycles_override=cycles_override,
         requests_per_cycle_override=requests_per_cycle_override,
@@ -1454,6 +1505,10 @@ def run_campaign(
         cycles_src = ""
         if cycles_override is not None:
             cycles_src = " (CLI override)"
+        elif run_plan.is_quick and cycles_override is None:
+            cycles_src = " (Quick mode default — 1 cycle, fastest complete-pass)"
+        elif run_plan.is_standard and cycles_override is None:
+            cycles_src = " (Standard mode default — reduced repetition)"
         elif "cycles_per_config" in campaign:
             cycles_src = " (campaign YAML)"
         reqs_src = ""
@@ -1509,6 +1564,17 @@ def run_campaign(
                 summary_lines.append(
                     f"  Note: {warm_samples} warm samples — Custom run, sparse data is intentional. "
                     f"Results are valid for comparison within the tested subset only."
+                )
+            elif run_plan.is_quick:
+                summary_lines.append(
+                    f"  Note: {warm_samples} warm samples — Quick run (1 cycle, complete coverage). "
+                    f"Broad but shallow. Lowest-confidence full-coverage result. "
+                    f"Use Standard or Full for deeper confirmation."
+                )
+            elif run_plan.is_standard:
+                summary_lines.append(
+                    f"  Note: {warm_samples} warm samples — Standard run (reduced repetition). "
+                    f"Development-grade result. Run Full for higher-confidence results."
                 )
             else:
                 summary_lines.append(
@@ -1986,6 +2052,7 @@ def _validate_campaign(
     campaign_id: str,
     values_override: list | None = None,
     baseline_path: Path = BASELINE_YAML,
+    mode_flag: str | None = None,
 ) -> bool:
     """
     Validate a campaign YAML without running any measurements.
@@ -2016,7 +2083,7 @@ def _validate_campaign(
     # Effective campaign identity — same logic as run_campaign.
     # values_override is not yet validated here (check 3.5 does that), but the
     # helper is safe to call with any list; it only formats the string.
-    _eff_cid_val = _derive_effective_campaign_id(campaign_id, values_override)
+    _eff_cid_val = _derive_effective_campaign_id(campaign_id, values_override, mode_flag)
 
     _setup_logging(_eff_cid_val, logs_dir=_eff_logs_dir_val)
     logger.info("Validating campaign: %s  (baseline=%s)", _eff_cid_val, baseline_path)
@@ -2025,9 +2092,15 @@ def _validate_campaign(
         console.print(f"[dim]Active baseline: {baseline_path}[/dim]")
 
     if _eff_cid_val != campaign_id:
+        if mode_flag == "quick":
+            _val_scope_reason = "--mode quick"
+        elif mode_flag == "standard":
+            _val_scope_reason = "--mode standard"
+        else:
+            _val_scope_reason = "--values scope"
         logger.info(
-            "Effective run ID (--values scope): %s  (parent campaign: %s)",
-            _eff_cid_val, campaign_id,
+            "Effective run ID (%s): %s  (parent campaign: %s)",
+            _val_scope_reason, _eff_cid_val, campaign_id,
         )
         console.print(
             f"[yellow]Effective run ID:[/yellow] {_eff_cid_val}  "
@@ -2093,6 +2166,30 @@ def _validate_campaign(
             "effective run ID",
             True,
             f"{_eff_cid_val}",
+        )
+
+    # 3.6 Mode identity checks (if --mode quick or --mode standard used)
+    if mode_flag == "quick":
+        _check(
+            "effective run ID (--mode quick)",
+            True,
+            f"{_eff_cid_val}  (isolated from Full/Standard run of same campaign)",
+        )
+        _check(
+            "--mode quick cycles",
+            True,
+            f"{QUICK_CYCLES_PER_CONFIG} cycle per config (broad but shallow — lowest-confidence full-coverage)",
+        )
+    elif mode_flag == "standard":
+        _check(
+            "effective run ID (--mode standard)",
+            True,
+            f"{_eff_cid_val}  (isolated from Full run of same campaign)",
+        )
+        _check(
+            "--mode standard cycles",
+            True,
+            f"{STANDARD_CYCLES_PER_CONFIG} cycles per config (reduced repetition — development-grade)",
         )
 
     # 4. Request files
@@ -2251,12 +2348,22 @@ def _validate_campaign(
                 f"[dim]--values override: {len(configs)} of {all_count} campaign configs "
                 f"(values={values_override})[/dim]"
             )
-        # Resolve effective cycles/requests (campaign YAML overrides baseline)
-        cycles = campaign.get("cycles_per_config", lab.get("cycles_per_config", 3))
+        # Resolve effective cycles/requests using the same layer ordering as run_campaign:
+        # baseline → campaign YAML → mode-specific default → (CLI --cycles not available here)
+        cycles = campaign.get("cycles_per_config", lab.get("cycles_per_config", 5))
         reqs = campaign.get("requests_per_cycle", lab.get("requests_per_cycle", 6))
         source_parts: list[str] = []
         if "cycles_per_config" in campaign:
             source_parts.append(f"cycles from campaign YAML ({cycles})")
+        if mode_flag == "quick":
+            # Quick mode override applied here to match run_campaign Layer 2.5 behavior.
+            # CLI --cycles is not available in validate; if user passes --cycles it will
+            # take precedence at actual run time.
+            cycles = QUICK_CYCLES_PER_CONFIG
+            source_parts.append(f"cycles from Quick mode default ({cycles})")
+        elif mode_flag == "standard":
+            cycles = STANDARD_CYCLES_PER_CONFIG
+            source_parts.append(f"cycles from Standard mode default ({cycles})")
         if "requests_per_cycle" in campaign:
             source_parts.append(f"requests from campaign YAML ({reqs})")
         source_note = f"  [dim]({'; '.join(source_parts)})[/dim]" if source_parts else ""
@@ -2269,12 +2376,26 @@ def _validate_campaign(
             f"{len(configs)} configs × {cycles} cycles × {reqs} requests = "
             f"{len(configs) * cycles * reqs} total requests.{source_note}"
         )
+        _validate_run_mode = resolve_run_mode(values_override, mode_flag)
         if warm_samples < 20:
-            if values_override is not None:
+            if _validate_run_mode == "custom":
                 console.print(
                     f"  [dim]Note: {warm_samples} warm samples per config — "
                     f"Custom run, sparse data is intentional. "
                     f"Results are valid for comparison within the tested subset only.[/dim]"
+                )
+            elif _validate_run_mode == "quick":
+                console.print(
+                    f"  [dim]Note: {warm_samples} warm samples per config — "
+                    f"Quick run (1 cycle, complete coverage). Broad but shallow. "
+                    f"Lowest-confidence full-coverage result. "
+                    f"Use Standard or Full for deeper confirmation.[/dim]"
+                )
+            elif _validate_run_mode == "standard":
+                console.print(
+                    f"  [dim]Note: {warm_samples} warm samples per config — "
+                    f"Standard run (reduced repetition). Development-grade result. "
+                    f"Run Full for higher-confidence statistics.[/dim]"
                 )
             else:
                 console.print(
@@ -2400,6 +2521,8 @@ Examples:
   python -m src.runner --campaign C01_threads_batch --dry-run
   python -m src.runner --campaign C01_threads_batch --validate
   python -m src.runner --campaign C01_threads_batch --baseline configs/minimax_baseline.yaml
+  python -m src.runner --campaign NGL_sweep --mode standard     (Standard mode — all values, reduced repetition)
+  python -m src.runner --campaign NGL_sweep --mode quick        (Quick mode — all values, 1 cycle, fastest complete-pass)
   python -m src.runner --campaign NGL_sweep --values 30         (Custom mode — single value)
   python -m src.runner --campaign NGL_sweep --values 30,80,999  (Custom mode — subset)
         """,
@@ -2445,6 +2568,19 @@ Examples:
         help="Override requests_per_cycle (baseline.yaml and campaign YAML) for this run"
     )
     parser.add_argument(
+        "--mode", default=None, choices=["full", "standard", "quick"],
+        metavar="MODE",
+        help=(
+            "Run mode: 'full' (default), 'standard', or 'quick'. "
+            "full: complete campaign, all values, full schedule — highest-confidence, recommendation-grade. "
+            "standard: complete campaign, all values, reduced repetition (3 cycles) — development-grade. "
+            "quick: complete campaign, all values, 1 cycle — fastest complete-pass, broad but shallow. "
+            "Each non-full mode gets its own DB identity (e.g. NGL_sweep__quick, NGL_sweep__standard) "
+            "and report, isolated from any Full run of the same campaign. "
+            "Cannot be combined with --values."
+        ),
+    )
+    parser.add_argument(
         "--values", default=None, metavar="VALUE_LIST",
         help=(
             "Comma-separated list of campaign variable values to test (e.g. 30 or 30,80,999). "
@@ -2452,7 +2588,8 @@ Examples:
             "The run gets its own DB identity (e.g. NGL_sweep__v30), results directory, "
             "and report — fully isolated from any Full run of the same campaign. "
             "Values must exist in the campaign's values list. "
-            "If omitted, all campaign values are used (Full mode)."
+            "Cannot be combined with --mode. "
+            "If omitted and --mode is not set, all campaign values are used (Full mode)."
         ),
     )
     return parser.parse_args()
@@ -2485,6 +2622,22 @@ if __name__ == "__main__":
             console.print("[bold red]error:[/bold red] --values is empty — provide at least one value")
             sys.exit(2)
 
+    # Resolve mode flag — None means Full (default); "full" is explicitly the default
+    # and normalized to None so existing callers are unaffected.
+    _mode_flag: str | None = args.mode if args.mode not in (None, "full") else None
+
+    # --mode and --values are mutually exclusive regardless of the mode value.
+    # "full" is the default, so --mode full --values 30 is ambiguous: the user said
+    # "full mode" but --values would trigger Custom isolation. Reject explicitly.
+    if args.mode is not None and _values_override is not None:
+        console.print(
+            "[bold red]error:[/bold red] --mode and --values cannot be combined. "
+            "--mode selects a run mode for the full campaign value list; "
+            "--values triggers Custom mode for a specific value subset. "
+            "Omit --mode to let --values alone trigger Custom mode."
+        )
+        sys.exit(2)
+
     if args.list:
         _list_campaigns()
         sys.exit(0)
@@ -2492,7 +2645,12 @@ if __name__ == "__main__":
         console.print("[bold red]error:[/bold red] --campaign is required (or use --list to see campaigns)")
         sys.exit(2)
     if args.validate:
-        ok = _validate_campaign(args.campaign, values_override=_values_override, baseline_path=_active_baseline)
+        ok = _validate_campaign(
+            args.campaign,
+            values_override=_values_override,
+            baseline_path=_active_baseline,
+            mode_flag=_mode_flag,
+        )
         sys.exit(0 if ok else 1)
     run_campaign(
         campaign_id=args.campaign,
@@ -2502,4 +2660,5 @@ if __name__ == "__main__":
         requests_per_cycle_override=args.requests_per_cycle,
         values_override=_values_override,
         baseline_path=_active_baseline,
+        mode_flag=_mode_flag,
     )

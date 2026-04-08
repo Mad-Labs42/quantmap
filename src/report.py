@@ -169,6 +169,8 @@ def _ngl_sweep_section(
     stats: dict,
     db_path: Path,
     is_custom: bool = False,
+    is_standard: bool = False,
+    is_quick: bool = False,
 ) -> list[str]:
     """
     Build the 'GPU Layer Sweep — Throughput vs. VRAM' section for NGL campaigns.
@@ -305,7 +307,12 @@ def _ngl_sweep_section(
         # Notes
         notes_parts: list[str] = []
         if cfg_id_row == score_winner_id:
-            notes_parts.append("★ best tested" if is_custom else "★ score winner")
+            if is_custom:
+                notes_parts.append("★ best tested")
+            elif is_standard or is_quick:
+                notes_parts.append("★ top config")
+            else:
+                notes_parts.append("★ score winner")
         if diminishing_ngl is not None and ngl_val == diminishing_ngl:
             notes_parts.append("← diminishing returns beyond this point")
         if status == "oom":
@@ -373,7 +380,14 @@ def _ngl_sweep_section(
                 best_tg, best_ngl, best_ctx, best_free, _ = candidates[0]
                 ctx_label = f"{best_ctx // 1000}K" if best_ctx >= 1000 else str(best_ctx)
                 min_label = f"{min_ctx // 1000}K" if min_ctx >= 1000 else str(min_ctx)
-                _scope_note = " Among tested values only — run Full to confirm across all NGL values." if is_custom else ""
+                if is_custom:
+                    _scope_note = " Among tested values only — run Full to confirm across all NGL values."
+                elif is_quick:
+                    _scope_note = " Quick run (1 cycle, broad but shallow) — run Standard or Full to confirm with higher-confidence statistics."
+                elif is_standard:
+                    _scope_note = " Standard run (development-grade) — run Full to confirm with higher-confidence statistics."
+                else:
+                    _scope_note = ""
                 sections.append(
                     f"> **For your stated minimum of {min_label} context:** NGL={best_ngl} "
                     f"(TG median {best_tg:.2f} t/s, est. max context {ctx_label}, "
@@ -595,6 +609,22 @@ def _build_markdown(
                 "Do not treat this as a full campaign recommendation."
             )
             sections.append("")
+        elif run_plan.is_standard:
+            sections.append(
+                "> ℹ️ **Standard run** — complete value coverage, reduced repetition. "
+                f"All {_total} campaign values tested with {run_plan.cycles_per_config} cycles per config. "
+                "Development-grade result. Run Full for highest-confidence recommendation."
+            )
+            sections.append("")
+        elif run_plan.is_quick:
+            _q_cycles = run_plan.cycles_per_config
+            _q_cycle_word = "cycle" if _q_cycles == 1 else "cycles"
+            sections.append(
+                f"> ⚡ **Quick run** — complete value coverage, {_q_cycles} {_q_cycle_word} per config. "
+                f"All {_total} campaign values tested — broad but shallow. "
+                "Lowest-confidence full-coverage result. Use Standard or Full for deeper confirmation."
+            )
+            sections.append("")
 
     # -------------------------------------------------------------------------
     # Three required result views
@@ -609,6 +639,8 @@ def _build_markdown(
     sections.append("## Results — Three Required Views\n")
 
     _is_custom = run_plan is not None and run_plan.is_custom
+    _is_standard = run_plan is not None and run_plan.is_standard
+    _is_quick = run_plan is not None and run_plan.is_quick
 
     all_same = (winner == highest_tg and winner in pareto_frontier)
     if all_same and winner:
@@ -617,13 +649,30 @@ def _build_markdown(
                 f"> **Best tested config:** All three views agree on `{winner}` "
                 "as the top result among the tested subset."
             )
+        elif _is_quick:
+            sections.append(
+                f"> **Consistent result:** All three views agree on `{winner}` "
+                "across all campaign values. Quick run — broad but shallow, lowest-confidence full-coverage."
+            )
+        elif _is_standard:
+            sections.append(
+                f"> **Consistent result:** All three views agree on `{winner}` "
+                "across all campaign values. Standard run — development-grade confidence."
+            )
         else:
             sections.append(
                 f"> **Strong evidence:** All three views agree on the same winner: `{winner}`. "
                 "Score winner, Pareto frontier, and highest raw TG are identical."
             )
     elif winner:
-        _decl_section = "Custom Run Summary" if _is_custom else "Winner Declaration"
+        if _is_custom:
+            _decl_section = "Custom Run Summary"
+        elif _is_quick:
+            _decl_section = "Quick Run Summary"
+        elif _is_standard:
+            _decl_section = "Standard Run Summary"
+        else:
+            _decl_section = "Winner Declaration"
         sections.append(
             f"> **Views diverge.** See tradeoff explanation in the {_decl_section} section."
         )
@@ -636,7 +685,7 @@ def _build_markdown(
     sections.append(_v1_header)
     if winner and winner in passing:
         w_stats = passing[winner]
-        _winner_label = "Best tested config" if _is_custom else "Winner"
+        _winner_label = "Best tested config" if _is_custom else ("Top config" if (_is_standard or _is_quick) else "Winner")
         sections.append(f"**{_winner_label}: `{winner}`**\n")
         sections.append(_config_stats_table(winner, w_stats, scores_df, ref))
         sm_flag = speed_medium_flags.get(winner, False)
@@ -647,11 +696,12 @@ def _build_markdown(
                 "on the 512-token request vs 256-token baseline. Review before using in production."
             )
     else:
-        sections.append(
-            "*No best tested config — all tested configs eliminated.*"
-            if _is_custom else
-            "*No winner — all configs eliminated.*"
-        )
+        if _is_custom:
+            sections.append("*No best tested config — all tested configs eliminated.*")
+        elif _is_quick or _is_standard:
+            sections.append("*No top config — all configs eliminated.*")
+        else:
+            sections.append("*No winner — all configs eliminated.*")
     sections.append("")
 
     # View 2: Pareto frontier
@@ -683,7 +733,12 @@ def _build_markdown(
             tg_pct_str = f"+{tg_pct:.1f}%" if tg_pct and tg_pct >= 0 else f"{tg_pct:.1f}%"
             notes = ""
             if cid == winner:
-                notes = "← best tested" if _is_custom else "← score winner"
+                if _is_custom:
+                    notes = "← best tested"
+                elif _is_quick or _is_standard:
+                    notes = "← top config"
+                else:
+                    notes = "← score winner"
             elif cid == highest_tg:
                 notes = "← highest TG"
             sections.append(
@@ -699,7 +754,12 @@ def _build_markdown(
     if highest_tg and highest_tg in passing:
         h_stats = passing[highest_tg]
         sections.append(f"**Highest TG Config: `{highest_tg}`**\n")
-        _best_label = "best tested config" if _is_custom else "score winner"
+        if _is_custom:
+            _best_label = "best tested config"
+        elif _is_quick or _is_standard:
+            _best_label = "top config"
+        else:
+            _best_label = "score winner"
         if highest_tg == winner:
             sections.append(f"*Same as {_best_label}.*")
         else:
@@ -709,7 +769,12 @@ def _build_markdown(
             )
             sections.append(_config_stats_table(highest_tg, h_stats, scores_df, ref))
     else:
-        sections.append("*Same as best tested config or no passing configs.*" if _is_custom else "*Same as score winner or no passing configs.*")
+        if _is_custom:
+            sections.append("*Same as best tested config or no passing configs.*")
+        elif _is_quick or _is_standard:
+            sections.append("*Same as top config or no passing configs.*")
+        else:
+            sections.append("*Same as score winner or no passing configs.*")
     sections.append("")
 
     # -------------------------------------------------------------------------
@@ -878,9 +943,16 @@ def _build_markdown(
     sections.append("")
 
     # -------------------------------------------------------------------------
-    # Winner Declaration / Custom Run Summary
+    # Winner Declaration / Quick Run Summary / Standard Run Summary / Custom Run Summary
     # -------------------------------------------------------------------------
-    _decl_header = "## Custom Run Summary\n" if _is_custom else "## Winner Declaration\n"
+    if _is_custom:
+        _decl_header = "## Custom Run Summary\n"
+    elif _is_quick:
+        _decl_header = "## Quick Run Summary\n"
+    elif _is_standard:
+        _decl_header = "## Standard Run Summary\n"
+    else:
+        _decl_header = "## Winner Declaration\n"
     sections.append(_decl_header)
 
     if winner and winner in passing:
@@ -943,6 +1015,59 @@ def _build_markdown(
                     "These were not measured in this run. The true optimum may lie "
                     "elsewhere. Run Full to measure all campaign values."
                 )
+        elif _is_quick:
+            # Quick mode: complete coverage, 1 cycle, broad but shallow.
+            # Not "validated optimal" — lowest-confidence full-coverage result.
+            _rp = run_plan  # type: ignore[union-attr]  # _is_quick guarantees non-None
+            _total_vals = len(_rp.all_campaign_values)
+            _q_c = _rp.cycles_per_config
+            _q_cw = "cycle" if _q_c == 1 else "cycles"
+            sections.append(
+                f'> **Quick Run — Broad Coverage Result:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the top-performing config across all {_total_vals} campaign values '
+                f'under {_q_c} {_q_cw} (broad but shallow) '
+                f'is `{winner}`, delivering **{tg:.2f} t/s** warm TG median '
+                f'(**{tg_p10:.2f} t/s** P10) and **{ttft:.0f}ms** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal}** thermal events '
+                f'and **{outliers}** outlier(s) on '
+                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
+            sections.append(
+                f'>\n> ⚡ **Broad but shallow:** Quick mode uses {_q_c} {_q_cw} per config '
+                f'({_rp.warm_samples_per_config} warm request slots). '
+                'Useful for plumbing checks, bug-finding, and first-look identification. '
+                'Run Standard or Full to confirm with higher-confidence statistics before '
+                'treating this as a production recommendation.'
+            )
+        elif _is_standard:
+            # Standard mode: complete coverage, reduced repetition, development-grade.
+            # Not "validated optimal" — development-grade, confirm with Full.
+            _rp = run_plan  # type: ignore[union-attr]  # _is_standard guarantees non-None
+            _total_vals = len(_rp.all_campaign_values)
+            sections.append(
+                f'> **Standard Run — Development-Grade Result:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the top-performing config across all {_total_vals} campaign values '
+                f'under reduced repetition ({_rp.cycles_per_config} cycles) '
+                f'is `{winner}`, delivering **{tg:.2f} t/s** warm TG median '
+                f'(**{tg_p10:.2f} t/s** P10) and **{ttft:.0f}ms** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal}** thermal events '
+                f'and **{outliers}** outlier(s) on '
+                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
+            sections.append(
+                f'>\n> ℹ️ **Development-grade:** Standard mode uses {_rp.cycles_per_config} cycles per config '
+                '(reduced repetition). This result identifies the leading config across the full '
+                'value space. Run Full to confirm with highest-confidence statistics before '
+                'treating this as a production recommendation.'
+            )
         else:
             sections.append(
                 f'> **Confidence Statement:**\n>\n'
@@ -970,6 +1095,18 @@ def _build_markdown(
                 f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
                 "Validate with a Full run before deploying as a permanent config.\n"
             )
+        elif _is_quick:
+            sections.append(
+                f"Command for `{winner}` — top config in this Quick run. "
+                f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
+                "Quick run (1 cycle, broad but shallow) — run Standard or Full to confirm before deploying.\n"
+            )
+        elif _is_standard:
+            sections.append(
+                f"Command for `{winner}` — top config in this Standard run. "
+                f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
+                "Development-grade — run Full for highest-confidence confirmation before deploying.\n"
+            )
         else:
             sections.append(f"Copy-paste ready. Host {DEFAULT_HOST}, port {PRODUCTION_PORT}.\n")
 
@@ -987,7 +1124,12 @@ def _build_markdown(
             model_path = "<QUANTMAP_MODEL_PATH not set — copy .env.example to .env>"
         build_commit = snap.get("build_commit", runtime.get("build_commit", "afa6bfe4f"))
 
-        _cmd_label = "QuantMap — Custom Run — Best Tested Config" if _is_custom else "QuantMap — Validated Production Config"
+        if _is_custom:
+            _cmd_label = "QuantMap — Custom Run — Best Tested Config"
+        elif _is_standard:
+            _cmd_label = "QuantMap — Standard Run — Development-Grade"
+        else:
+            _cmd_label = "QuantMap — Validated Production Config"
         sections.append("```batch")
         sections.append(f"rem {_cmd_label}")
         sections.append(f"rem Campaign: {campaign_id} | Config: {winner}")
@@ -996,6 +1138,10 @@ def _build_markdown(
         sections.append(f"rem Machine: {machine.get('name','DEEP THOUGHT')} ({machine.get('cpu','i9-12900K')} + {machine.get('gpu','RTX 3090')} + {machine.get('ram','128GB DDR4-3200')})")
         if _is_custom and run_plan is not None:
             sections.append(f"rem Mode: Custom | Tested: {len(run_plan.selected_values)} of {len(run_plan.all_campaign_values)} values")
+        elif _is_quick and run_plan is not None:
+            sections.append(f"rem Mode: Quick | All {len(run_plan.all_campaign_values)} values | {run_plan.cycles_per_config} cycle per config (broad but shallow)")
+        elif _is_standard and run_plan is not None:
+            sections.append(f"rem Mode: Standard | All {len(run_plan.all_campaign_values)} values | {run_plan.cycles_per_config} cycles per config")
         sections.append("")
 
         # Rebuild the winning command with --port 8000
@@ -1091,6 +1237,34 @@ def _build_markdown(
             sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
             sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
             sections.append("- Low sample count: if fewer cycles than usual, add `--cycles N` and re-run")
+        elif _is_quick:
+            sections.append(
+                "**No result declared.** All configs failed elimination filters. "
+                "Check the Full Config Ranking table for the specific elimination reason per config.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference or background processes during the run")
+            sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
+            _q_c_nw = run_plan.cycles_per_config if run_plan is not None else 1
+            _q_cw_nw = "cycle" if _q_c_nw == 1 else "cycles"
+            sections.append(
+                f"- Low sample count: Quick uses {_q_c_nw} {_q_cw_nw} per config (lowest-confidence). "
+                "Re-run with `--mode standard` or `--mode full` for higher-confidence results."
+            )
+        elif _is_standard:
+            sections.append(
+                "**No result declared.** All configs failed elimination filters. "
+                "Check the Full Config Ranking table for the specific elimination reason per config.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference or background processes during the run")
+            sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
+            sections.append(
+                "- Low sample count: Standard uses reduced repetition. "
+                "Add `--cycles N` to increase or re-run with `--mode full` for higher confidence."
+            )
         else:
             sections.append(
                 "**No winner declared.** All configs failed elimination filters. "
@@ -1131,6 +1305,22 @@ def _build_markdown(
             f"{len(_rp.selected_values)} of {len(_rp.all_campaign_values)} campaign values tested deliberately. "
             "Sparse data is intentional; results are valid for comparison within the tested subset only.\n"
         )
+    elif _is_quick and run_plan is not None:
+        _rp = run_plan
+        _q_c = _rp.cycles_per_config
+        _q_cw = "cycle" if _q_c == 1 else "cycles"
+        sections.append(
+            f"**Run mode:** Quick — complete value coverage, {_q_c} {_q_cw} per config. "
+            f"All {len(_rp.all_campaign_values)} campaign values tested — broad but shallow. "
+            "Lowest-confidence full-coverage mode; run Standard or Full for higher-confidence confirmation.\n"
+        )
+    elif _is_standard and run_plan is not None:
+        _rp = run_plan
+        sections.append(
+            f"**Run mode:** Standard — complete value coverage, reduced repetition. "
+            f"All {len(_rp.all_campaign_values)} campaign values tested with {_rp.cycles_per_config} cycles per config. "
+            "Development-grade result; run Full for highest-confidence confirmation.\n"
+        )
 
     sections.append(
         f"- **Cycles per config:** {eff_cycles} "
@@ -1154,6 +1344,18 @@ def _build_markdown(
                 f"(Custom run). Results are statistically valid within the tested scope. "
                 f"Run Full to measure all campaign values and extend coverage.\n"
             )
+        elif _is_quick:
+            sections.append(
+                f"> **Note:** {warm_samples} warm request slot(s) per config — Quick run "
+                f"({eff_cycles} cycle, broad but shallow). Lowest-confidence full-coverage result. "
+                f"Run Standard or Full for higher-confidence statistics.\n"
+            )
+        elif _is_standard:
+            sections.append(
+                f"> **Note:** {warm_samples} warm sample(s) per config — Standard run "
+                f"(reduced repetition). Development-grade result across all campaign values. "
+                f"Run Full for higher-confidence statistics.\n"
+            )
         else:
             sections.append(
                 f"> **Note:** {warm_samples} warm samples per config — "
@@ -1171,6 +1373,8 @@ def _build_markdown(
             stats=stats,
             db_path=db_path,
             is_custom=_is_custom,
+            is_standard=_is_standard,
+            is_quick=_is_quick,
         )
         sections.extend(ngl_lines)
 
