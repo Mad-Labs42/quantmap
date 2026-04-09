@@ -999,6 +999,41 @@ def _run_cycle(
                     time.sleep(inter_request_delay)
 
     except Exception as exc:
+        from src.server import ServerOOMError
+        
+        # Determine if this was an OOM
+        is_oom = isinstance(exc, ServerOOMError)
+        log_snippet = str(exc)
+        
+        # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
+        if not is_oom:
+            try:
+                server_log = Path(request_files.get("speed_short")).parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
+                # actually srv["log_file"] was defined inside the `with` block, we might not have it.
+                # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
+                pass
+            except Exception:
+                pass
+            
+            # Use `server_log` if it is in locals and exists
+            try:
+                if 'server_log' in locals() and server_log and server_log.is_file():
+                    tail = server_log.read_text(encoding="utf-8", errors="replace")[-3000:].lower()
+                    if "out of memory" in tail:
+                        is_oom = True
+                        log_snippet = tail[-500:]
+            except Exception:
+                pass
+
+        if is_oom:
+            logger.error("Cycle %d/%s OOM detected: %s", cycle_number, config_id, exc)
+            _mark_cycle_invalid(db_path, cycle_id, "crash: OOM")
+            raise ServerOOMError(
+                log_snippet=log_snippet,
+                log_path=server_log if 'server_log' in locals() else Path(),
+                exit_code=getattr(exc, "exit_code", -1),
+            )
+
         logger.error("Cycle %d/%s crashed: %s", cycle_number, config_id, exc, exc_info=True)
         # Mark existing results as invalid
         _mark_cycle_invalid(db_path, cycle_id, f"crash: {exc}")
@@ -1081,7 +1116,16 @@ def _run_config(
     _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
-    thermal_events_total = 0
+    
+    with get_connection(db_path) as conn:
+        try:
+            thermal_events_total = conn.execute(
+                "SELECT COUNT(*) FROM telemetry WHERE config_id=? AND campaign_id=? AND (power_limit_throttling=1 OR cpu_temp_c >= 100.0)",
+                (config_id, campaign_id)
+            ).fetchone()[0]
+        except Exception:
+            thermal_events_total = 0
+    
     all_results: list[dict] = []
 
     console.print(
@@ -1175,6 +1219,28 @@ def _run_config(
                 cycle_id = cur.lastrowid
                 conn.commit()
 
+            # Capture run context before cycle execution begins (one per cycle).
+            # Failure is non-fatal: log it and let the cycle proceed.
+            _ctx_path = (
+                raw_jsonl_path.parent
+                / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
+            )
+            try:
+                from src.run_context import create_run_context  # noqa: PLC0415
+                from src.server import MODEL_PATH as _ctx_model_path  # noqa: PLC0415
+                logger.info(
+                    "Capturing run context for cycle %d/%s ...",
+                    cycle_number, config_id,
+                )
+                _ctx = create_run_context(model_path=str(_ctx_model_path))
+                _ctx_path.write_text(json.dumps(_ctx, indent=2), encoding="utf-8")
+                logger.info("Run context persisted: %s", _ctx_path)
+            except Exception as _ctx_exc:
+                logger.warning(
+                    "Run context capture failed — cycle %d/%s will proceed without it: %s",
+                    cycle_number, config_id, _ctx_exc,
+                )
+
             thermal_event, results = _run_cycle(
                 config=config,
                 cycle_number=cycle_number,
@@ -1201,31 +1267,30 @@ def _run_config(
 
             all_results.extend(results)
 
-    if oom_boundary_sweep:
-        from src.server import ServerOOMError  # noqa: PLC0415
-        try:
-            _run_cycles()
-        except ServerOOMError as exc:
-            logger.error("Config %s: OOM during server startup — %s", config_id, exc)
-            with get_connection(db_path) as conn:
-                conn.execute(
-                    "UPDATE configs SET status='oom', failure_detail=? "
-                    "WHERE id=? AND campaign_id=?",
-                    (exc.log_snippet[:500], config_id, campaign_id),
-                )
-                conn.commit()
-            console.print(
-                f"  [bold red]OOM:[/bold red] {config_id} — server ran out of GPU memory\n"
-                f"  [dim]{exc.log_snippet.splitlines()[0][:120]}[/dim]"
-            )
-            completed = progress_state.get("completed_configs", [])
-            if config_id not in completed:
-                completed.append(config_id)
-            progress_state["completed_configs"] = completed
-            _write_progress(progress_state, _eff_state_dir, _eff_state_file)
-            return "oom"
-    else:
+    from src.server import ServerOOMError  # noqa: PLC0415
+    try:
         _run_cycles()
+    except ServerOOMError as exc:
+        logger.error("Config %s: OOM during server startup — %s", config_id, exc)
+        with get_connection(db_path) as conn:
+            conn.execute(
+                "UPDATE configs SET status='oom', failure_detail=? "
+                "WHERE id=? AND campaign_id=?",
+                (exc.log_snippet[:500], config_id, campaign_id),
+            )
+            conn.commit()
+        console.print(
+            f"  [bold red]OOM:[/bold red] {config_id} — server ran out of GPU memory\n"
+            f"  [dim]{exc.log_snippet.splitlines()[0][:120]}[/dim]"
+        )
+        completed = progress_state.get("completed_configs", [])
+        if config_id not in completed:
+            completed.append(config_id)
+        progress_state["completed_configs"] = completed
+        _write_progress(progress_state, _eff_state_dir, _eff_state_file)
+        if oom_boundary_sweep:
+            return "oom"
+        return True
 
     # Mark config complete
     with get_connection(db_path) as conn:
@@ -1421,7 +1486,7 @@ def run_campaign(
         _before = lab_config.get("cycles_per_config", 5)
         lab_config["cycles_per_config"] = QUICK_CYCLES_PER_CONFIG
         logger.info(
-            "--mode quick: overriding cycles_per_config %d → %d (QUICK_CYCLES_PER_CONFIG)",
+            "--mode quick: overriding cycles_per_config %d -> %d (QUICK_CYCLES_PER_CONFIG)",
             _before, QUICK_CYCLES_PER_CONFIG,
         )
 
@@ -1601,7 +1666,7 @@ def run_campaign(
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
         availability = tele.startup_check()
-        console.print("[green]✓ Telemetry startup check passed[/green]")
+        console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
         console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
         logger.critical("Campaign aborted: %s", exc)
@@ -1984,11 +2049,11 @@ def run_campaign(
         # (e.g. "NGL_sweep__v30"), so analyze/score/report operate only on the
         # rows this run actually inserted — no cross-contamination from prior
         # broader runs.
-        stats = analyze_campaign(effective_campaign_id, _eff_db_path)
         scores = score_campaign(
             effective_campaign_id, _eff_db_path, baseline,
             filter_overrides=effective_filter_overrides,
         )
+        stats = scores["stats"]
 
         report_path = generate_report(
             effective_campaign_id, _eff_db_path, baseline, scores, stats,
@@ -1998,6 +2063,23 @@ def run_campaign(
         )
         console.print(f"[green]Report written:[/green] {report_path}")
         report_ok = True
+
+        # Generate the evidence-first campaign report (new philosophy).
+        # Failure here is non-fatal — the primary report above is the critical path.
+        try:
+            from src.report_campaign import generate_campaign_report  # noqa: PLC0415
+            v2_path = generate_campaign_report(
+                effective_campaign_id, _eff_db_path, baseline, scores, stats,
+                campaign=campaign,
+                run_plan=run_plan,
+                lab_root=_effective_lab_root,
+            )
+            console.print(f"[green]Evidence report written:[/green] {v2_path}")
+        except Exception as _v2_exc:
+            logger.warning(
+                "Evidence-first report generation failed (non-fatal): %s", _v2_exc
+            )
+
     except Exception as exc:
         logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
         console.print(

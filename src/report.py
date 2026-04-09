@@ -371,7 +371,10 @@ def _ngl_sweep_section(
                     continue
                 est_tokens = int((free_mb * 1024 * 1024) / bpt)
                 if est_tokens >= min_ctx:
-                    tg = float(stats.get(cfg_id_row, {}).get("warm_tg_median") or 0.0)
+                    tg = stats.get(cfg_id_row, {}).get("warm_tg_median")
+                    if tg is None:
+                        continue  # cannot sort by TG if absent
+                    tg = float(tg)
                     free_gb = free_mb / 1024
                     candidates.append((tg, ngl_val, est_tokens, free_gb, cfg_id_row))
 
@@ -436,10 +439,10 @@ def generate_report(
     Returns the path to the generated Markdown report.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
-    if stats is None:
-        stats = analyze_campaign(campaign_id, db_path)
     if scores_result is None:
         scores_result = score_campaign(campaign_id, db_path, baseline)
+    if stats is None:
+        stats = scores_result["stats"]
 
     report_dir = effective_lab_root / "results" / campaign_id
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -644,7 +647,12 @@ def _build_markdown(
 
     all_same = (winner == highest_tg and winner in pareto_frontier)
     if all_same and winner:
-        if _is_custom:
+        if len(passing) == 1:
+            sections.append(
+                f"> **Single Valid Result:** Only `{winner}` passed all elimination filters. "
+                "There is no competitive field to compare against."
+            )
+        elif _is_custom:
             sections.append(
                 f"> **Best tested config:** All three views agree on `{winner}` "
                 "as the top result among the tested subset."
@@ -690,9 +698,11 @@ def _build_markdown(
         sections.append(_config_stats_table(winner, w_stats, scores_df, ref))
         sm_flag = speed_medium_flags.get(winner, False)
         if sm_flag:
-            deg = w_stats.get("speed_medium_degradation_pct", 0) or 0
+            deg = w_stats.get("speed_medium_degradation_pct")
+            deg_disp = f"{deg:.1f}%" if deg is not None else "—"
             sections.append(
-                f"\n> ⚠️ **speed_medium flag:** This config shows {deg:.1f}% TG degradation "
+                f"\n> ⚠️ **speed_medium flag:** This config shows "
+                f"{deg_disp} TG degradation "
                 "on the 512-token request vs 256-token baseline. Review before using in production."
             )
     else:
@@ -720,17 +730,21 @@ def _build_markdown(
         sections.append("|--------|---------------|-----------------|----------------|----------|---------|-------|")
         for cid in pareto_frontier:
             s = passing.get(cid, {})
-            tg = s.get("warm_tg_median") or 0
-            ttft = s.get("warm_ttft_median_ms") or 0
-            outliers = s.get("outlier_count", 0)
-            thermal = s.get("thermal_events", 0)
-            tg_pct = s.get("warm_tg_vs_baseline_pct") or (
-                (tg - ref.get("warm_tg_median_ts", 8.18)) / ref.get("warm_tg_median_ts", 8.18) * 100
-                if tg else None
-            )
+            tg   = s.get("warm_tg_median")      # guaranteed non-None (rankable)
+            ttft = s.get("warm_ttft_median_ms")  # guaranteed non-None (rankable)
+            outliers = s.get("outlier_count")
+            thermal  = s.get("thermal_events")
+            tg_pct = None
             if scores_df is not None and cid in scores_df.index:
-                tg_pct = scores_df.loc[cid].get("warm_tg_vs_baseline_pct", tg_pct)
-            tg_pct_str = f"+{tg_pct:.1f}%" if tg_pct and tg_pct >= 0 else f"{tg_pct:.1f}%"
+                tg_pct = scores_df.loc[cid].get("warm_tg_vs_baseline_pct")
+            tg_pct_str = (
+                (f"+{tg_pct:.1f}%" if tg_pct >= 0 else f"{tg_pct:.1f}%")
+                if tg_pct is not None else "—"
+            )
+            tg_disp   = f"{tg:.2f} t/s"  if tg   is not None else "—"
+            ttft_disp = f"{ttft:.0f} ms" if ttft is not None else "—"
+            outliers_disp = str(outliers) if outliers is not None else "—"
+            thermal_disp  = str(thermal)  if thermal  is not None else "—"
             notes = ""
             if cid == winner:
                 if _is_custom:
@@ -742,8 +756,8 @@ def _build_markdown(
             elif cid == highest_tg:
                 notes = "← highest TG"
             sections.append(
-                f"| `{cid}` | {tg:.2f} t/s | {ttft:.0f} ms | {tg_pct_str} | "
-                f"{outliers} | {thermal} | {notes} |"
+                f"| `{cid}` | {tg_disp} | {ttft_disp} | {tg_pct_str} | "
+                f"{outliers_disp} | {thermal_disp} | {notes} |"
             )
     else:
         sections.append("*No passing configs for Pareto analysis.*")
@@ -798,31 +812,74 @@ def _build_markdown(
     for rank, config_id in sorted_passing:
         s = passing.get(config_id, stats.get(config_id, {}))
         score_val = scores_df.loc[config_id, "composite_score"] if scores_df is not None else None
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
         sections.append(
             f"| {rank} | `{config_id}` | "
-            f"{s.get('warm_tg_median') or 0:.2f} | "
-            f"{s.get('warm_tg_p10') or 0:.2f} | "
-            f"{s.get('warm_tg_cv') or 0:.3f} | "
-            f"{s.get('warm_ttft_median_ms') or 0:.0f}ms | "
-            f"{s.get('warm_ttft_p90_ms') or 0:.0f}ms | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
             f"{score_val:.4f} | "
-            f"{s.get('thermal_events', 0)} | "
-            f"{s.get('outlier_count', 0)} | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
             f"{'✓ PASS' if config_id in passing else 'FAIL'} |"
+        )
+
+    for config_id, missing in sorted(scores_result.get("unrankable", {}).items()):
+        s = stats.get(config_id, {})
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
+        missing_str = ", ".join(missing)
+        sections.append(
+            f"| — | `{config_id}` | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
+            f"— | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
+            f"❌ unrankable: missing {missing_str} |"
         )
 
     for config_id, reason in sorted(scores_result.get("eliminated", {}).items()):
         s = stats.get(config_id, {})
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
         sections.append(
             f"| — | `{config_id}` | "
-            f"{s.get('warm_tg_median') or 0:.2f} | "
-            f"{s.get('warm_tg_p10') or 0:.2f} | "
-            f"{s.get('warm_tg_cv') or 0:.3f} | "
-            f"{s.get('warm_ttft_median_ms') or 0:.0f}ms | "
-            f"{s.get('warm_ttft_p90_ms') or 0:.0f}ms | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
             f"— | "
-            f"{s.get('thermal_events', 0)} | "
-            f"{s.get('outlier_count', 0)} | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
             f"❌ {reason} |"
         )
     sections.append("")
@@ -830,7 +887,7 @@ def _build_markdown(
     # -------------------------------------------------------------------------
     # speed_medium flags
     # -------------------------------------------------------------------------
-    flagged = [(cid, stats[cid].get("speed_medium_degradation_pct", 0) or 0)
+    flagged = [(cid, stats[cid].get("speed_medium_degradation_pct"))
                for cid, flagged in speed_medium_flags.items() if flagged and cid in stats]
     if flagged:
         sections.append("## ⚠️ speed_medium Degradation Flags\n")
@@ -843,13 +900,16 @@ def _build_markdown(
         s0_tg = ref.get("warm_tg_median_ts", "?")
         sections.append("| Config | Degradation | S0-new TG | speed_short TG | speed_medium TG |")
         sections.append("|--------|-------------|-----------|---------------|-----------------|")
-        for cid, deg in sorted(flagged, key=lambda x: x[1], reverse=True):
+        for cid, deg in sorted(flagged, key=lambda x: x[1] if x[1] is not None else -999, reverse=True):
             s = stats[cid]
+            tg_val   = s.get('warm_tg_median')
+            med_val  = s.get('speed_medium_warm_tg_median')
+            deg_disp = f"{deg:.1f}%" if deg is not None else "—"
             sections.append(
-                f"| `{cid}` | {deg:.1f}% | "
+                f"| `{cid}` | {deg_disp} | "
                 f"{s0_tg} t/s | "
-                f"{s.get('warm_tg_median') or 0:.2f} t/s | "
-                f"{s.get('speed_medium_warm_tg_median') or 0:.2f} t/s |"
+                f"{f'{tg_val:.2f} t/s' if tg_val is not None else '—'} | "
+                f"{f'{med_val:.2f} t/s' if med_val is not None else '—'} |"
             )
         sections.append("")
 
@@ -895,7 +955,7 @@ def _build_markdown(
             f"{_fmt_tel(tel.get('avg_gpu_util'), '.1f')} | "
             f"{_fmt_tel(tel.get('avg_cpu_util'), '.1f')} | "
             f"{_fmt_tel(tel.get('avg_cpu_power'), '.1f')} | "
-            f"{tel.get('throttle_samples') or 0} | "
+            f"{_fmt_tel(tel.get('throttle_samples'), 'd')} | "
             f"{av_flag} | "
             f"{upd_flag} |"
         )
@@ -923,7 +983,8 @@ def _build_markdown(
 
     for config_id in all_config_ids:
         bg = get_background_interference_summary(campaign_id, config_id, db_path)
-        total_snaps = bg.get("total_snapshots") or 0
+        total_snaps = bg.get("total_snapshots")
+        total_snaps_disp = str(total_snaps) if total_snaps is not None else "—"
 
         def _bg_flag(count: int | None) -> str:
             """⚠️ N  /  ✓  /  ?  depending on count and data availability."""
@@ -932,7 +993,7 @@ def _build_markdown(
             return f"⚠️ {count}" if count > 0 else "✓"
 
         sections.append(
-            f"| `{config_id}` | {total_snaps} | "
+            f"| `{config_id}` | {total_snaps_disp} | "
             f"{_bg_flag(bg.get('av_scan_count'))} | "
             f"{_bg_flag(bg.get('defender_process_count'))} | "
             f"{_bg_flag(bg.get('update_active_count'))} | "
@@ -957,22 +1018,31 @@ def _build_markdown(
 
     if winner and winner in passing:
         w = passing[winner]
-        tg = w.get("warm_tg_median") or 0
-        tg_p10 = w.get("warm_tg_p10") or 0
-        ttft = w.get("warm_ttft_median_ms") or 0
-        cv = w.get("warm_tg_cv") or 0
-        thermal = w.get("thermal_events", 0)
-        outliers = w.get("outlier_count", 0)
-        n_warm = w.get("valid_warm_request_count", 0)
+        # All metrics are guaranteed non-None for ranked (passing) configs.
+        tg     = w.get("warm_tg_median")
+        tg_p10 = w.get("warm_tg_p10")
+        ttft   = w.get("warm_ttft_median_ms")
+        cv     = w.get("warm_tg_cv")
+        thermal  = w.get("thermal_events")  # may be None if no telemetry data
+        outliers = w.get("outlier_count")   # same
+        n_warm   = w.get("valid_warm_request_count", 0)
+        thermal_disp  = str(thermal)  if thermal  is not None else "N/A"
+        outliers_disp = str(outliers) if outliers is not None else "N/A"
 
         divergence_note = ""
         if highest_tg and highest_tg != winner:
             h = passing[highest_tg]
+            h_ttft = passing[highest_tg].get('warm_ttft_median_ms')
+            h_tg   = h.get('warm_tg_median')
+            ttft_disp   = f"{ttft:.0f}ms"  if ttft   is not None else "N/A"
+            h_ttft_disp = f"{h_ttft:.0f}ms" if h_ttft is not None else "N/A"
+            h_tg_disp   = f"{h_tg:.2f}"    if h_tg   is not None else "N/A"
+            tg_disp_w   = f"{tg:.2f}"      if tg     is not None else "N/A"
             divergence_note = (
                 f"\n\n**Note:** Best-scoring config (`{winner}`) and highest-TG config "
-                f"(`{highest_tg}`) differ. Best-scoring has better TTFT ({ttft:.0f}ms median vs "
-                f"{passing[highest_tg].get('warm_ttft_median_ms') or 0:.0f}ms) at the cost of "
-                f"slightly lower TG ({tg:.2f} vs {h.get('warm_tg_median') or 0:.2f} t/s). "
+                f"(`{highest_tg}`) differ. Best-scoring has better TTFT ({ttft_disp} median vs "
+                f"{h_ttft_disp}) at the cost of "
+                f"slightly lower TG ({tg_disp_w} vs {h_tg_disp} t/s). "
                 "For pure generation speed, use the highest-TG config."
             )
 
@@ -996,6 +1066,9 @@ def _build_markdown(
             _tested_n = len(_rp.selected_values)
             _total_n  = len(_rp.all_campaign_values)
             _untested  = _rp.untested_values
+            tg_str    = f"{tg:.2f} t/s"   if tg     is not None else "N/A"
+            tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
+            ttft_str  = f"{ttft:.0f}ms"    if ttft   is not None else "N/A"
             sections.append(
                 f'> **Custom Run — Scope Notice:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
@@ -1003,10 +1076,10 @@ def _build_markdown(
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the best-performing config among the {_tested_n} tested value(s) '
-                f'is `{winner}`, delivering **{tg:.2f} t/s** warm TG median '
-                f'(**{tg_p10:.2f} t/s** P10) and **{ttft:.0f}ms** warm TTFT median '
-                f'across **{n_warm}** warm request(s) with **{thermal}** thermal events '
-                f'and **{outliers}** outlier(s) on '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
                 f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
             )
             if _untested:
@@ -1030,10 +1103,10 @@ def _build_markdown(
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the top-performing config across all {_total_vals} campaign values '
                 f'under {_q_c} {_q_cw} (broad but shallow) '
-                f'is `{winner}`, delivering **{tg:.2f} t/s** warm TG median '
-                f'(**{tg_p10:.2f} t/s** P10) and **{ttft:.0f}ms** warm TTFT median '
-                f'across **{n_warm}** warm request(s) with **{thermal}** thermal events '
-                f'and **{outliers}** outlier(s) on '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
                 f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
             )
             sections.append(
@@ -1056,10 +1129,10 @@ def _build_markdown(
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the top-performing config across all {_total_vals} campaign values '
                 f'under reduced repetition ({_rp.cycles_per_config} cycles) '
-                f'is `{winner}`, delivering **{tg:.2f} t/s** warm TG median '
-                f'(**{tg_p10:.2f} t/s** P10) and **{ttft:.0f}ms** warm TTFT median '
-                f'across **{n_warm}** warm request(s) with **{thermal}** thermal events '
-                f'and **{outliers}** outlier(s) on '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
                 f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
             )
             sections.append(
@@ -1076,10 +1149,10 @@ def _build_markdown(
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the validated optimal single-user configuration is `{winner}`, '
-                f'delivering **{tg:.2f} t/s** warm TG median (**{tg_p10:.2f} t/s** P10) '
-                f'and **{ttft:.0f}ms** warm TTFT median, validated across '
-                f'**{n_warm}** warm requests with **{thermal}** thermal events and '
-                f'**{outliers}** outliers on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+                f'delivering **{tg_str}** warm TG median (**{tg_p10_str}** P10) '
+                f'and **{ttft_str}** warm TTFT median, validated across '
+                f'**{n_warm}** warm requests with **{thermal_disp}** thermal events and '
+                f'**{outliers_disp}** outliers on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
             )
         sections.append(divergence_note)
         sections.append("")
@@ -1387,42 +1460,62 @@ def _config_stats_table(
     scores_df: pd.DataFrame | None,
     ref: dict[str, Any],
 ) -> str:
-    """Generate a compact stats table for one config."""
+    """Generate a compact stats table for one config.
+
+    All metrics are rendered as '—' when None — absent data must never
+    appear as '0.00' or '0 ms' in the report.
+    """
     lines = []
     lines.append("| Metric | Value | vs S0-new Baseline |")
     lines.append("|--------|-------|--------------------|")
 
-    tg = s.get("warm_tg_median") or 0
-    tg_p10 = s.get("warm_tg_p10") or 0
-    tg_p90 = s.get("warm_tg_p90") or 0
-    cv = s.get("warm_tg_cv") or 0
-    ttft_med = s.get("warm_ttft_median_ms") or 0
-    ttft_p90 = s.get("warm_ttft_p90_ms") or 0
-    cold_ttft = s.get("cold_ttft_median_ms") or 0
-    pp = s.get("pp_median") or 0
-    thermal = s.get("thermal_events", 0)
-    outliers = s.get("outlier_count", 0)
+    tg     = s.get("warm_tg_median")
+    tg_p10 = s.get("warm_tg_p10")
+    tg_p90 = s.get("warm_tg_p90")
+    n_warm = s.get("valid_warm_request_count", 0)
+    cv     = s.get("warm_tg_cv")
+    cv_disp = f"{cv:.4f}" if (cv is not None and n_warm >= 3) else "N/A (N<3)"
 
-    ref_tg = ref.get("warm_tg_median_ts", 8.18)
-    ref_ttft = ref.get("warm_ttft_median_ms", 200.0)
+    ttft_med   = s.get("warm_ttft_median_ms")
+    ttft_p90   = s.get("warm_ttft_p90_ms")
+    cold_ttft  = s.get("cold_ttft_median_ms")
+    pp         = s.get("pp_median")
+    thermal    = s.get("thermal_events")
+    outliers   = s.get("outlier_count")
 
-    tg_delta = f"+{(tg - ref_tg) / ref_tg * 100:.1f}%" if ref_tg else "—"
-    ttft_delta = f"+{(ref_ttft - ttft_med) / ref_ttft * 100:.1f}%" if ref_ttft else "—"
+    # Baseline-relative deltas — only computed when reference values exist
+    # and the measured metric is present. Never fabricates a comparison.
+    ref_tg   = ref.get("warm_tg_median_ts")
+    ref_ttft = ref.get("warm_ttft_median_ms")
+    tg_delta   = (
+        f"+{(tg - ref_tg) / ref_tg * 100:.1f}%"
+        if (tg is not None and ref_tg)
+        else "—"
+    )
+    ttft_delta = (
+        f"+{(ref_ttft - ttft_med) / ref_ttft * 100:.1f}%"
+        if (ttft_med is not None and ref_ttft)
+        else "—"
+    )
 
     score_str = "—"
     if scores_df is not None and config_id in scores_df.index:
         score_str = f"{scores_df.loc[config_id, 'composite_score']:.4f}"
 
-    lines.append(f"| Warm TG Median | **{tg:.2f} t/s** | {tg_delta} |")
-    lines.append(f"| Warm TG P10 | {tg_p10:.2f} t/s | — |")
-    lines.append(f"| Warm TG P90 | {tg_p90:.2f} t/s | — |")
-    lines.append(f"| Warm TG CV | {cv:.4f} | — |")
-    lines.append(f"| Warm TTFT Median | {ttft_med:.0f} ms | {ttft_delta} |")
-    lines.append(f"| Warm TTFT P90 | {ttft_p90:.0f} ms | — |")
-    lines.append(f"| Cold TTFT Median | {cold_ttft:.0f} ms | — |")
-    lines.append(f"| PP Median | {pp:.1f} t/s | — |")
-    lines.append(f"| Thermal Events | {thermal} | — |")
-    lines.append(f"| Outliers | {outliers} | — |")
-    lines.append(f"| Composite Score | {score_str} | — |")
+    def _m(val: float | None, fmt: str) -> str:
+        """Format optional metric; return '—' for None."""
+        return format(val, fmt) if val is not None else "—"
+
+    lines.append(f"| Warm TG Median   | **{_m(tg, '.2f')} t/s** | {tg_delta} |")
+    lines.append(f"| Warm TG P10      | {_m(tg_p10, '.2f')} t/s | — |")
+    lines.append(f"| Warm TG P90      | {_m(tg_p90, '.2f')} t/s | — |")
+    lines.append(f"| Warm TG CV       | {cv_disp} | — |")
+    lines.append(f"| Warm TTFT Median | {_m(ttft_med, '.0f')} ms | {ttft_delta} |")
+    lines.append(f"| Warm TTFT P90    | {_m(ttft_p90, '.0f')} ms | — |")
+    lines.append(f"| Cold TTFT Median | {_m(cold_ttft, '.0f')} ms | — |")
+    lines.append(f"| PP Median        | {_m(pp, '.1f')} t/s | — |")
+    lines.append(f"| Thermal Events   | {thermal  if thermal  is not None else '—'} | — |")
+    lines.append(f"| Outliers         | {outliers if outliers is not None else '—'} | — |")
+    lines.append(f"| Composite Score  | {score_str} | — |")
 
     return "\n".join(lines)

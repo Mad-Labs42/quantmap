@@ -525,12 +525,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+class ClosingConnection(sqlite3.Connection):
+    """
+    SQLite connection that automatically closes itself when exiting a context manager.
+    Standard sqlite3.Connection only commits/rolls back on __exit__, which leaks
+    file descriptors and Windows file locks during long multi-step pipelines.
+    """
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """
     Return a new SQLite connection with recommended settings for the lab.
-    Caller is responsible for closing the connection.
+    Automatically closes when used as `with get_connection(...) as conn:`.
     """
-    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn = sqlite3.connect(db_path, timeout=30.0, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
