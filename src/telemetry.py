@@ -534,12 +534,9 @@ def startup_check() -> dict[str, Any]:
     if not hwinfo_ok:
         raise TelemetryStartupError(
             "ABORT: HWiNFO64 shared memory not accessible.\n\n"
-            "To fix:\n"
-            "  1. Open HWiNFO64\n"
-            "  2. Settings → Shared Memory Support → enable\n"
-            "  3. Restart HWiNFO64 (the setting takes effect on next start)\n\n"
-            "HWiNFO must be running during all campaigns. "
-            "cpu_temp_c (ABORT tier) is sourced from HWiNFO."
+            "HWiNFO must be running with 'Shared Memory Support' enabled.\n"
+            "Required for cpu_temp_c (ABORT tier).\n\n"
+            "If you do not have HWiNFO, you cannot run QuantMap campaigns safely."
         )
 
     # Confirm CPU Package temp is readable

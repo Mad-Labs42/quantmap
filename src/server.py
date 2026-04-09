@@ -381,7 +381,13 @@ def get_production_command(extra_args: list[str]) -> str:
     return " ".join(parts)
 
 
-def _log_path(campaign_id: str, config_id: str, cycle: int, attempt: int) -> Path:
+def _log_path(
+    campaign_id: str,
+    config_id: str,
+    cycle: int,
+    attempt: int,
+    logs_dir: Path | None = None,
+) -> Path:
     """
     Return the log file path for a given campaign / config / cycle / attempt.
 
@@ -390,9 +396,14 @@ def _log_path(campaign_id: str, config_id: str, cycle: int, attempt: int) -> Pat
     log correlation clean: all logs for a given config/cycle are co-located
     and sortable.
 
+    logs_dir: effective logs root — if None uses the module-level LOGS_DIR
+    (default baseline, backwards-compatible).  Pass the namespaced path from
+    runner.py when using --baseline.
+
     Creates parent directories if they do not exist.
     """
-    log_dir = LOGS_DIR / campaign_id
+    effective_logs_dir = logs_dir if logs_dir is not None else LOGS_DIR
+    log_dir = effective_logs_dir / campaign_id
     log_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return log_dir / f"server_{config_id}_cycle{cycle:02d}_attempt{attempt}_{ts}.log"
@@ -583,6 +594,7 @@ def start_server(
     port: int | None = None,
     bind_timeout_s: int = SERVER_BIND_TIMEOUT_S,
     ready_timeout_s: int = SERVER_READY_TIMEOUT_S,
+    logs_dir: Path | None = None,
 ):
     """
     Context manager that starts llama-server and yields connection info.
@@ -670,7 +682,7 @@ def start_server(
     # -- Attempt 1 (with warmup) --------------------------------------------
     attempt = 1
     no_warmup = False
-    log_file = _log_path(campaign_id, config_id, cycle, attempt)
+    log_file = _log_path(campaign_id, config_id, cycle, attempt, logs_dir=logs_dir)
     launch_ts = datetime.now(timezone.utc)
     process, log_handle = _launch_server(base_cmd, env, log_file)
     active_cmd = base_cmd
@@ -724,7 +736,7 @@ def start_server(
                     + ["--no-warmup"]
                 )
 
-                log_file = _log_path(campaign_id, config_id, cycle, attempt)
+                log_file = _log_path(campaign_id, config_id, cycle, attempt, logs_dir=logs_dir)
                 launch_ts = datetime.now(timezone.utc)
                 process, log_handle = _launch_server(no_warmup_cmd, env, log_file)
                 active_cmd = no_warmup_cmd

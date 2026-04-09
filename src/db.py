@@ -305,7 +305,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 5
+SCHEMA_VERSION: int = 6
 
 
 class SchemaVersionError(RuntimeError):
@@ -383,6 +383,16 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         [
             "ALTER TABLE background_snapshots RENAME COLUMN "
             "windows_defender_active TO defender_process_running",
+        ],
+    ),
+    (
+        6,
+        "Mode system foundation: add run_mode TEXT column to campaigns table. "
+        "Stores the resolved execution mode for each run: 'full' | 'custom' | 'standard' | 'quick'. "
+        "NULL means pre-v6 data (mode unknown). "
+        "Required for mode-aware reporting and the future cumulative master report.",
+        [
+            "ALTER TABLE campaigns ADD COLUMN run_mode TEXT",
         ],
     ),
 ]
@@ -473,14 +483,38 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             try:
                 conn.execute(sql)
             except sqlite3.OperationalError as exc:
+                err = str(exc).lower()
                 # "duplicate column name" fires when the DDL already created the
                 # column (new DB path) and the migration tries to ADD it again.
-                # Any other OperationalError is a real problem — re-raise it.
-                if "duplicate column name" in str(exc).lower():
+                if "duplicate column name" in err:
                     logger.debug(
                         "Migration v%d SQL skipped — column already exists: %s",
                         target_version, sql,
                     )
+                # "no such column" fires on RENAME COLUMN when the source column
+                # doesn't exist — happens on a fresh DB where _DDL already created
+                # the table with the post-rename column name.  Safe to skip only
+                # when the destination column is confirmed present.
+                elif "no such column" in err and "rename column" in sql.lower():
+                    # Extract destination column name: last token after " TO "
+                    dest_col = sql.upper().split(" TO ")[-1].strip().split()[0]
+                    # Identify the table being altered: token after "ALTER TABLE"
+                    tokens = sql.split()
+                    table_name = tokens[tokens.index("TABLE") + 1] if "TABLE" in [t.upper() for t in tokens] else None
+                    col_exists = False
+                    if table_name:
+                        col_exists = any(
+                            row[1].upper() == dest_col.upper()
+                            for row in conn.execute(f"PRAGMA table_info({table_name})")
+                        )
+                    if col_exists:
+                        logger.debug(
+                            "Migration v%d RENAME COLUMN skipped — destination column "
+                            "'%s' already exists in '%s' (fresh DB, DDL already current): %s",
+                            target_version, dest_col, table_name, sql,
+                        )
+                    else:
+                        raise  # source missing AND dest missing — real schema problem
                 else:
                     raise
         logger.info("Schema migration v%d applied.", target_version)
@@ -491,12 +525,24 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+class ClosingConnection(sqlite3.Connection):
+    """
+    SQLite connection that automatically closes itself when exiting a context manager.
+    Standard sqlite3.Connection only commits/rolls back on __exit__, which leaks
+    file descriptors and Windows file locks during long multi-step pipelines.
+    """
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            super().__exit__(exc_type, exc_val, exc_tb)
+        finally:
+            self.close()
+
 def get_connection(db_path: Path) -> sqlite3.Connection:
     """
     Return a new SQLite connection with recommended settings for the lab.
-    Caller is responsible for closing the connection.
+    Automatically closes when used as `with get_connection(...) as conn:`.
     """
-    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn = sqlite3.connect(db_path, timeout=30.0, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")

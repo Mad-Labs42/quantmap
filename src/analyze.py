@@ -89,11 +89,12 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
         )
 
         # All config IDs (including those with no valid requests)
-        all_configs = pd.read_sql_query(
-            "SELECT id FROM configs WHERE campaign_id = ?",
+        all_configs_df = pd.read_sql_query(
+            "SELECT id, status, failure_detail FROM configs WHERE campaign_id = ?",
             conn,
             params=(campaign_id,),
-        )["id"].tolist()
+        )
+        all_configs = all_configs_df.to_dict("records")
 
         # Request counts per config: total attempted and successful.
         # Previously fetched one-at-a-time inside the loop (2 queries × N configs);
@@ -120,8 +121,23 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
 
     stats: dict[str, dict[str, Any]] = {}
 
-    for config_id in all_configs:
+    for cfg_row in all_configs:
+        config_id = cfg_row["id"]
+        status = cfg_row["status"]
+        failure_detail = cfg_row["failure_detail"]
+
         cfg_df = df[df["config_id"] == config_id]
+        
+        # If the config failed to even generate requests (e.g. OOM, bad config),
+        # return a dummy struct so it isn't completely erased from the report.
+        if len(cfg_df) == 0 and status in ("oom", "skipped_oom", "failed"):
+            stats[config_id] = {
+                "valid_warm_request_count": 0,
+                "config_status": status,
+                "failure_detail": failure_detail,
+                "success_rate": None,
+            }
+            continue
 
         # Separate warm/cold and request types
         warm_short = cfg_df[
@@ -155,7 +171,12 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
         # the numerator while counting them in the denominator, causing systematic
         # underreporting of success_rate. (Fixed in analyze.py previously.)
         total_attempted, total_success = counts_by_config.get(config_id, (0, 0))
-        success_rate = total_success / total_attempted if total_attempted > 0 else 0.0
+        # None signals no complete-cycle requests at all — structurally different
+        # from observed failures (which produce a real rate in [0.0, 1.0)).
+        # _check_filters() branches on None to emit a distinct elimination reason.
+        success_rate = (
+            total_success / total_attempted if total_attempted > 0 else None
+        )
 
         # Compute outliers (IQR method on warm TG)
         outlier_count = 0
@@ -192,6 +213,8 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
                         )
 
         stats[config_id] = {
+            "config_status": status,
+            "failure_detail": failure_detail,
             # Warm TG stats
             "warm_tg_median": float(np.median(warm_tg)) if len(warm_tg) > 0 else None,
             "warm_tg_p10": float(np.percentile(warm_tg, 10)) if len(warm_tg) > 0 else None,

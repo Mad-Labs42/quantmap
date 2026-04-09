@@ -35,6 +35,7 @@ import pandas as pd
 from src.db import get_connection
 from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
 from src.score import score_campaign
+from src.run_plan import RunPlan
 
 
 def _fmt_tel(val: float | int | None, fmt: str) -> str:
@@ -113,6 +114,9 @@ def _config_to_server_args_for_report(config: dict) -> list[str]:
 
 logger = logging.getLogger(__name__)
 
+# LAB_ROOT is kept here as a module-level fallback so that tools calling
+# generate_report() without a lab_root kwarg (e.g. rescore.py) continue to
+# work unchanged. The canonical path is injected by runner.py via lab_root=.
 LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
 
 
@@ -164,6 +168,9 @@ def _ngl_sweep_section(
     scores_result: dict,
     stats: dict,
     db_path: Path,
+    is_custom: bool = False,
+    is_standard: bool = False,
+    is_quick: bool = False,
 ) -> list[str]:
     """
     Build the 'GPU Layer Sweep — Throughput vs. VRAM' section for NGL campaigns.
@@ -285,16 +292,27 @@ def _ngl_sweep_section(
         elif status == "complete" and not model_params_available:
             est_ctx_str = "N/A"
 
-        # TG and score
-        tg_str = f"{cfg_stats.get('warm_tg_median', 0):.2f}" if status == "complete" else "—"
-        p10_str = f"{cfg_stats.get('warm_tg_p10', 0):.2f}" if status == "complete" else "—"
+        # TG and score — use explicit None check so that configs whose
+        # warm_tg_median/warm_tg_p10 is stored as None (e.g. a Custom run where
+        # the single warm slot was consumed by speed_medium, leaving 0 valid
+        # warm speed_short results) render as "—" rather than crashing
+        # with "unsupported format string passed to NoneType.__format__".
+        _tg_val = cfg_stats.get("warm_tg_median")
+        tg_str = f"{_tg_val:.2f}" if (status == "complete" and _tg_val is not None) else "—"
+        _p10_val = cfg_stats.get("warm_tg_p10")
+        p10_str = f"{_p10_val:.2f}" if (status == "complete" and _p10_val is not None) else "—"
         score_val = cfg_score_row.get("composite_score")
         score_str = f"{score_val:.3f}" if (status == "complete" and score_val is not None) else "—"
 
         # Notes
         notes_parts: list[str] = []
         if cfg_id_row == score_winner_id:
-            notes_parts.append("★ score winner")
+            if is_custom:
+                notes_parts.append("★ best tested")
+            elif is_standard or is_quick:
+                notes_parts.append("★ top config")
+            else:
+                notes_parts.append("★ score winner")
         if diminishing_ngl is not None and ngl_val == diminishing_ngl:
             notes_parts.append("← diminishing returns beyond this point")
         if status == "oom":
@@ -353,7 +371,10 @@ def _ngl_sweep_section(
                     continue
                 est_tokens = int((free_mb * 1024 * 1024) / bpt)
                 if est_tokens >= min_ctx:
-                    tg = float(stats.get(cfg_id_row, {}).get("warm_tg_median") or 0.0)
+                    tg = stats.get(cfg_id_row, {}).get("warm_tg_median")
+                    if tg is None:
+                        continue  # cannot sort by TG if absent
+                    tg = float(tg)
                     free_gb = free_mb / 1024
                     candidates.append((tg, ngl_val, est_tokens, free_gb, cfg_id_row))
 
@@ -362,11 +383,20 @@ def _ngl_sweep_section(
                 best_tg, best_ngl, best_ctx, best_free, _ = candidates[0]
                 ctx_label = f"{best_ctx // 1000}K" if best_ctx >= 1000 else str(best_ctx)
                 min_label = f"{min_ctx // 1000}K" if min_ctx >= 1000 else str(min_ctx)
+                if is_custom:
+                    _scope_note = " Among tested values only — run Full to confirm across all NGL values."
+                elif is_quick:
+                    _scope_note = " Quick run (1 cycle, broad but shallow) — run Standard or Full to confirm with higher-confidence statistics."
+                elif is_standard:
+                    _scope_note = " Standard run (development-grade) — run Full to confirm with higher-confidence statistics."
+                else:
+                    _scope_note = ""
                 sections.append(
                     f"> **For your stated minimum of {min_label} context:** NGL={best_ngl} "
                     f"(TG median {best_tg:.2f} t/s, est. max context {ctx_label}, "
                     f"{best_free:.1f} GB VRAM free). "
-                    f"This is the fastest config that meets your context requirement.\n"
+                    f"This is the fastest tested config that meets your context requirement."
+                    f"{_scope_note}\n"
                 )
             else:
                 min_label = f"{min_ctx // 1000}K" if min_ctx >= 1000 else str(min_ctx)
@@ -391,6 +421,8 @@ def generate_report(
     scores_result: dict[str, Any] | None = None,
     stats: dict[str, dict[str, Any]] | None = None,
     campaign: dict | None = None,
+    lab_root: Path | None = None,
+    run_plan: RunPlan | None = None,
 ) -> Path:
     """
     Generate Markdown + CSV reports for a completed campaign.
@@ -398,14 +430,21 @@ def generate_report(
     If scores_result and stats are provided (from score_campaign()), they are
     used directly. Otherwise, analysis is re-run from the database.
 
+    lab_root:  effective lab root to write reports under. If None, falls back to
+               the module-level LAB_ROOT (default baseline, backwards-compatible).
+    run_plan:  resolved execution plan. When provided, the report reflects the
+               run mode, scope, and confidence language correctly. If None (e.g.
+               rescore.py), the report is generated without mode-aware sections.
+
     Returns the path to the generated Markdown report.
     """
-    if stats is None:
-        stats = analyze_campaign(campaign_id, db_path)
+    effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
     if scores_result is None:
         scores_result = score_campaign(campaign_id, db_path, baseline)
+    if stats is None:
+        stats = scores_result["stats"]
 
-    report_dir = LAB_ROOT / "results" / campaign_id
+    report_dir = effective_lab_root / "results" / campaign_id
     report_dir.mkdir(parents=True, exist_ok=True)
 
     md_path = report_dir / "report.md"
@@ -434,7 +473,10 @@ def generate_report(
         logger.info("Scores CSV written: %s", csv_path)
 
     # Generate Markdown
-    md = _build_markdown(campaign_id, db_path, baseline, scores_result, stats, campaign=campaign)
+    md = _build_markdown(
+        campaign_id, db_path, baseline, scores_result, stats,
+        campaign=campaign, run_plan=run_plan,
+    )
     md_path.write_text(md, encoding="utf-8")
     logger.info("Report written: %s", md_path)
 
@@ -448,6 +490,7 @@ def _build_markdown(
     scores_result: dict[str, Any],
     stats: dict[str, dict[str, Any]],
     campaign: dict | None = None,
+    run_plan: RunPlan | None = None,
 ) -> str:
     """Build the full Markdown report as a string."""
     sections: list[str] = []
@@ -475,10 +518,21 @@ def _build_markdown(
     sections.append(f"# QuantMap Campaign Report — {campaign_id}")
     sections.append(f"\nGenerated: {now}\n")
 
+    # ── Mode badge ────────────────────────────────────────────────────────────
+    if run_plan is not None:
+        sections.append(
+            f"> **Mode:** {run_plan.mode_label} — {run_plan.mode_description}"
+        )
+        sections.append("")
+
     sections.append("## Campaign Metadata\n")
     sections.append("| Field | Value |")
     sections.append("|-------|-------|")
     sections.append(f"| Campaign ID | `{campaign_id}` |")
+    _db_run_mode = camp.get("run_mode") or (run_plan.run_mode if run_plan else None)
+    if _db_run_mode:
+        from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
+        sections.append(f"| Run mode | {_ML.get(_db_run_mode, _db_run_mode.title())} |")
     sections.append(f"| Variable | `{camp.get('variable', 'unknown')}` |")
     sections.append(f"| Type | {camp.get('campaign_type', 'unknown')} |")
     sections.append(f"| Status | {camp.get('status', 'unknown')} |")
@@ -522,6 +576,60 @@ def _build_markdown(
     sections.append("")
 
     # -------------------------------------------------------------------------
+    # Run Scope — shown for all modes; essential for Custom
+    # -------------------------------------------------------------------------
+    if run_plan is not None:
+        sections.append("## Run Scope\n")
+        sections.append("| Field | Value |")
+        sections.append("|-------|-------|")
+        sections.append(f"| Mode | {run_plan.mode_label} — {run_plan.mode_description} |")
+        if run_plan.effective_campaign_id != run_plan.parent_campaign_id:
+            sections.append(f"| Parent campaign | `{run_plan.parent_campaign_id}` |")
+            sections.append(f"| Effective run ID | `{run_plan.effective_campaign_id}` |")
+        sections.append(f"| Variable | `{run_plan.variable}` |")
+        _tested_str = ", ".join(str(v) for v in run_plan.selected_values)
+        _total = len(run_plan.all_campaign_values)
+        _tested_n = len(run_plan.selected_values)
+        sections.append(f"| Tested values | {_tested_str} |")
+        sections.append(f"| Coverage | {_tested_n} of {_total} campaign values ({run_plan.coverage_fraction:.0%}) |")
+        if run_plan.untested_values:
+            _skip_str = ", ".join(str(v) for v in run_plan.untested_values)
+            sections.append(f"| Skipped values | {_skip_str} |")
+        sections.append(f"| Configs tested | {len(run_plan.selected_configs)} |")
+        sections.append(f"| Cycles per config | {run_plan.cycles_per_config} |")
+        sections.append(f"| Requests per cycle | {run_plan.requests_per_cycle} (1 cold + {run_plan.requests_per_cycle - 1} warm) |")
+        sections.append(f"| Warm samples per config | {run_plan.warm_samples_per_config} |")
+        if run_plan.filter_overrides:
+            sections.append(f"| Filter overrides | {run_plan.filter_overrides} |")
+        sections.append("")
+
+        if run_plan.is_custom:
+            sections.append(
+                "> ⚠️ **Custom run** — user-directed scope. "
+                f"Only {_tested_n} of {_total} campaign values were tested. "
+                "Results reflect the best among tested configs only. "
+                "Untested values may outperform this result. "
+                "Do not treat this as a full campaign recommendation."
+            )
+            sections.append("")
+        elif run_plan.is_standard:
+            sections.append(
+                "> ℹ️ **Standard run** — complete value coverage, reduced repetition. "
+                f"All {_total} campaign values tested with {run_plan.cycles_per_config} cycles per config. "
+                "Development-grade result. Run Full for highest-confidence recommendation."
+            )
+            sections.append("")
+        elif run_plan.is_quick:
+            _q_cycles = run_plan.cycles_per_config
+            _q_cycle_word = "cycle" if _q_cycles == 1 else "cycles"
+            sections.append(
+                f"> ⚡ **Quick run** — complete value coverage, {_q_cycles} {_q_cycle_word} per config. "
+                f"All {_total} campaign values tested — broad but shallow. "
+                "Lowest-confidence full-coverage result. Use Standard or Full for deeper confirmation."
+            )
+            sections.append("")
+
+    # -------------------------------------------------------------------------
     # Three required result views
     # -------------------------------------------------------------------------
     winner = scores_result.get("winner")
@@ -533,35 +641,77 @@ def _build_markdown(
 
     sections.append("## Results — Three Required Views\n")
 
+    _is_custom = run_plan is not None and run_plan.is_custom
+    _is_standard = run_plan is not None and run_plan.is_standard
+    _is_quick = run_plan is not None and run_plan.is_quick
+
     all_same = (winner == highest_tg and winner in pareto_frontier)
     if all_same and winner:
-        sections.append(
-            f"> **Strong evidence:** All three views agree on the same winner: `{winner}`. "
-            "Score winner, Pareto frontier, and highest raw TG are identical."
-        )
+        if len(passing) == 1:
+            sections.append(
+                f"> **Single Valid Result:** Only `{winner}` passed all elimination filters. "
+                "There is no competitive field to compare against."
+            )
+        elif _is_custom:
+            sections.append(
+                f"> **Best tested config:** All three views agree on `{winner}` "
+                "as the top result among the tested subset."
+            )
+        elif _is_quick:
+            sections.append(
+                f"> **Consistent result:** All three views agree on `{winner}` "
+                "across all campaign values. Quick run — broad but shallow, lowest-confidence full-coverage."
+            )
+        elif _is_standard:
+            sections.append(
+                f"> **Consistent result:** All three views agree on `{winner}` "
+                "across all campaign values. Standard run — development-grade confidence."
+            )
+        else:
+            sections.append(
+                f"> **Strong evidence:** All three views agree on the same winner: `{winner}`. "
+                "Score winner, Pareto frontier, and highest raw TG are identical."
+            )
     elif winner:
+        if _is_custom:
+            _decl_section = "Custom Run Summary"
+        elif _is_quick:
+            _decl_section = "Quick Run Summary"
+        elif _is_standard:
+            _decl_section = "Standard Run Summary"
+        else:
+            _decl_section = "Winner Declaration"
         sections.append(
-            "> **Views diverge.** See tradeoff explanation in the Winner Declaration section."
+            f"> **Views diverge.** See tradeoff explanation in the {_decl_section} section."
         )
     else:
         sections.append("> **WARNING: No configs passed all elimination filters.**")
     sections.append("")
 
-    # View 1: Score winner
-    sections.append("### View 1 — Score Winner (Composite Score)\n")
+    # View 1: Score winner (or best-tested-config for Custom)
+    _v1_header = "### View 1 — Best Tested Config (Composite Score)\n" if _is_custom else "### View 1 — Score Winner (Composite Score)\n"
+    sections.append(_v1_header)
     if winner and winner in passing:
         w_stats = passing[winner]
-        sections.append(f"**Winner: `{winner}`**\n")
+        _winner_label = "Best tested config" if _is_custom else ("Top config" if (_is_standard or _is_quick) else "Winner")
+        sections.append(f"**{_winner_label}: `{winner}`**\n")
         sections.append(_config_stats_table(winner, w_stats, scores_df, ref))
         sm_flag = speed_medium_flags.get(winner, False)
         if sm_flag:
-            deg = w_stats.get("speed_medium_degradation_pct", 0) or 0
+            deg = w_stats.get("speed_medium_degradation_pct")
+            deg_disp = f"{deg:.1f}%" if deg is not None else "—"
             sections.append(
-                f"\n> ⚠️ **speed_medium flag:** This config shows {deg:.1f}% TG degradation "
+                f"\n> ⚠️ **speed_medium flag:** This config shows "
+                f"{deg_disp} TG degradation "
                 "on the 512-token request vs 256-token baseline. Review before using in production."
             )
     else:
-        sections.append("*No winner — all configs eliminated.*")
+        if _is_custom:
+            sections.append("*No best tested config — all tested configs eliminated.*")
+        elif _is_quick or _is_standard:
+            sections.append("*No top config — all configs eliminated.*")
+        else:
+            sections.append("*No winner — all configs eliminated.*")
     sections.append("")
 
     # View 2: Pareto frontier
@@ -580,25 +730,34 @@ def _build_markdown(
         sections.append("|--------|---------------|-----------------|----------------|----------|---------|-------|")
         for cid in pareto_frontier:
             s = passing.get(cid, {})
-            tg = s.get("warm_tg_median") or 0
-            ttft = s.get("warm_ttft_median_ms") or 0
-            outliers = s.get("outlier_count", 0)
-            thermal = s.get("thermal_events", 0)
-            tg_pct = s.get("warm_tg_vs_baseline_pct") or (
-                (tg - ref.get("warm_tg_median_ts", 8.18)) / ref.get("warm_tg_median_ts", 8.18) * 100
-                if tg else None
-            )
+            tg   = s.get("warm_tg_median")      # guaranteed non-None (rankable)
+            ttft = s.get("warm_ttft_median_ms")  # guaranteed non-None (rankable)
+            outliers = s.get("outlier_count")
+            thermal  = s.get("thermal_events")
+            tg_pct = None
             if scores_df is not None and cid in scores_df.index:
-                tg_pct = scores_df.loc[cid].get("warm_tg_vs_baseline_pct", tg_pct)
-            tg_pct_str = f"+{tg_pct:.1f}%" if tg_pct and tg_pct >= 0 else f"{tg_pct:.1f}%"
+                tg_pct = scores_df.loc[cid].get("warm_tg_vs_baseline_pct")
+            tg_pct_str = (
+                (f"+{tg_pct:.1f}%" if tg_pct >= 0 else f"{tg_pct:.1f}%")
+                if tg_pct is not None else "—"
+            )
+            tg_disp   = f"{tg:.2f} t/s"  if tg   is not None else "—"
+            ttft_disp = f"{ttft:.0f} ms" if ttft is not None else "—"
+            outliers_disp = str(outliers) if outliers is not None else "—"
+            thermal_disp  = str(thermal)  if thermal  is not None else "—"
             notes = ""
             if cid == winner:
-                notes = "← score winner"
+                if _is_custom:
+                    notes = "← best tested"
+                elif _is_quick or _is_standard:
+                    notes = "← top config"
+                else:
+                    notes = "← score winner"
             elif cid == highest_tg:
                 notes = "← highest TG"
             sections.append(
-                f"| `{cid}` | {tg:.2f} t/s | {ttft:.0f} ms | {tg_pct_str} | "
-                f"{outliers} | {thermal} | {notes} |"
+                f"| `{cid}` | {tg_disp} | {ttft_disp} | {tg_pct_str} | "
+                f"{outliers_disp} | {thermal_disp} | {notes} |"
             )
     else:
         sections.append("*No passing configs for Pareto analysis.*")
@@ -609,16 +768,27 @@ def _build_markdown(
     if highest_tg and highest_tg in passing:
         h_stats = passing[highest_tg]
         sections.append(f"**Highest TG Config: `{highest_tg}`**\n")
+        if _is_custom:
+            _best_label = "best tested config"
+        elif _is_quick or _is_standard:
+            _best_label = "top config"
+        else:
+            _best_label = "score winner"
         if highest_tg == winner:
-            sections.append("*Same as score winner.*")
+            sections.append(f"*Same as {_best_label}.*")
         else:
             sections.append(
-                "_Differs from score winner. Useful if generation speed is the only priority "
+                f"_Differs from {_best_label}. Useful if generation speed is the only priority "
                 "and TTFT is not a concern._"
             )
             sections.append(_config_stats_table(highest_tg, h_stats, scores_df, ref))
     else:
-        sections.append("*Same as score winner or no passing configs.*")
+        if _is_custom:
+            sections.append("*Same as best tested config or no passing configs.*")
+        elif _is_quick or _is_standard:
+            sections.append("*Same as top config or no passing configs.*")
+        else:
+            sections.append("*Same as score winner or no passing configs.*")
     sections.append("")
 
     # -------------------------------------------------------------------------
@@ -642,31 +812,74 @@ def _build_markdown(
     for rank, config_id in sorted_passing:
         s = passing.get(config_id, stats.get(config_id, {}))
         score_val = scores_df.loc[config_id, "composite_score"] if scores_df is not None else None
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
         sections.append(
             f"| {rank} | `{config_id}` | "
-            f"{s.get('warm_tg_median') or 0:.2f} | "
-            f"{s.get('warm_tg_p10') or 0:.2f} | "
-            f"{s.get('warm_tg_cv') or 0:.3f} | "
-            f"{s.get('warm_ttft_median_ms') or 0:.0f}ms | "
-            f"{s.get('warm_ttft_p90_ms') or 0:.0f}ms | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
             f"{score_val:.4f} | "
-            f"{s.get('thermal_events', 0)} | "
-            f"{s.get('outlier_count', 0)} | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
             f"{'✓ PASS' if config_id in passing else 'FAIL'} |"
+        )
+
+    for config_id, missing in sorted(scores_result.get("unrankable", {}).items()):
+        s = stats.get(config_id, {})
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
+        missing_str = ", ".join(missing)
+        sections.append(
+            f"| — | `{config_id}` | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
+            f"— | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
+            f"❌ unrankable: missing {missing_str} |"
         )
 
     for config_id, reason in sorted(scores_result.get("eliminated", {}).items()):
         s = stats.get(config_id, {})
+        cv_val = s.get('warm_tg_cv')
+        cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
+        tg_disp   = f"{s.get('warm_tg_median'):.2f}"    if s.get('warm_tg_median')    is not None else "—"
+        tgp10_disp= f"{s.get('warm_tg_p10'):.2f}"      if s.get('warm_tg_p10')        is not None else "—"
+        ttft_disp = f"{s.get('warm_ttft_median_ms'):.0f}ms" if s.get('warm_ttft_median_ms') is not None else "—"
+        ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
+        thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
+        outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+
         sections.append(
             f"| — | `{config_id}` | "
-            f"{s.get('warm_tg_median') or 0:.2f} | "
-            f"{s.get('warm_tg_p10') or 0:.2f} | "
-            f"{s.get('warm_tg_cv') or 0:.3f} | "
-            f"{s.get('warm_ttft_median_ms') or 0:.0f}ms | "
-            f"{s.get('warm_ttft_p90_ms') or 0:.0f}ms | "
+            f"{tg_disp} | "
+            f"{tgp10_disp} | "
+            f"{cv_disp} | "
+            f"{ttft_disp} | "
+            f"{ttftp_disp} | "
             f"— | "
-            f"{s.get('thermal_events', 0)} | "
-            f"{s.get('outlier_count', 0)} | "
+            f"{thermal_disp} | "
+            f"{outlier_disp} | "
             f"❌ {reason} |"
         )
     sections.append("")
@@ -674,7 +887,7 @@ def _build_markdown(
     # -------------------------------------------------------------------------
     # speed_medium flags
     # -------------------------------------------------------------------------
-    flagged = [(cid, stats[cid].get("speed_medium_degradation_pct", 0) or 0)
+    flagged = [(cid, stats[cid].get("speed_medium_degradation_pct"))
                for cid, flagged in speed_medium_flags.items() if flagged and cid in stats]
     if flagged:
         sections.append("## ⚠️ speed_medium Degradation Flags\n")
@@ -687,13 +900,16 @@ def _build_markdown(
         s0_tg = ref.get("warm_tg_median_ts", "?")
         sections.append("| Config | Degradation | S0-new TG | speed_short TG | speed_medium TG |")
         sections.append("|--------|-------------|-----------|---------------|-----------------|")
-        for cid, deg in sorted(flagged, key=lambda x: x[1], reverse=True):
+        for cid, deg in sorted(flagged, key=lambda x: x[1] if x[1] is not None else -999, reverse=True):
             s = stats[cid]
+            tg_val   = s.get('warm_tg_median')
+            med_val  = s.get('speed_medium_warm_tg_median')
+            deg_disp = f"{deg:.1f}%" if deg is not None else "—"
             sections.append(
-                f"| `{cid}` | {deg:.1f}% | "
+                f"| `{cid}` | {deg_disp} | "
                 f"{s0_tg} t/s | "
-                f"{s.get('warm_tg_median') or 0:.2f} t/s | "
-                f"{s.get('speed_medium_warm_tg_median') or 0:.2f} t/s |"
+                f"{f'{tg_val:.2f} t/s' if tg_val is not None else '—'} | "
+                f"{f'{med_val:.2f} t/s' if med_val is not None else '—'} |"
             )
         sections.append("")
 
@@ -739,7 +955,7 @@ def _build_markdown(
             f"{_fmt_tel(tel.get('avg_gpu_util'), '.1f')} | "
             f"{_fmt_tel(tel.get('avg_cpu_util'), '.1f')} | "
             f"{_fmt_tel(tel.get('avg_cpu_power'), '.1f')} | "
-            f"{tel.get('throttle_samples') or 0} | "
+            f"{_fmt_tel(tel.get('throttle_samples'), 'd')} | "
             f"{av_flag} | "
             f"{upd_flag} |"
         )
@@ -767,7 +983,8 @@ def _build_markdown(
 
     for config_id in all_config_ids:
         bg = get_background_interference_summary(campaign_id, config_id, db_path)
-        total_snaps = bg.get("total_snapshots") or 0
+        total_snaps = bg.get("total_snapshots")
+        total_snaps_disp = str(total_snaps) if total_snaps is not None else "—"
 
         def _bg_flag(count: int | None) -> str:
             """⚠️ N  /  ✓  /  ?  depending on count and data availability."""
@@ -776,7 +993,7 @@ def _build_markdown(
             return f"⚠️ {count}" if count > 0 else "✓"
 
         sections.append(
-            f"| `{config_id}` | {total_snaps} | "
+            f"| `{config_id}` | {total_snaps_disp} | "
             f"{_bg_flag(bg.get('av_scan_count'))} | "
             f"{_bg_flag(bg.get('defender_process_count'))} | "
             f"{_bg_flag(bg.get('update_active_count'))} | "
@@ -787,38 +1004,51 @@ def _build_markdown(
     sections.append("")
 
     # -------------------------------------------------------------------------
-    # Winner Declaration and Confidence Statement
+    # Winner Declaration / Quick Run Summary / Standard Run Summary / Custom Run Summary
     # -------------------------------------------------------------------------
-    sections.append("## Winner Declaration\n")
+    if _is_custom:
+        _decl_header = "## Custom Run Summary\n"
+    elif _is_quick:
+        _decl_header = "## Quick Run Summary\n"
+    elif _is_standard:
+        _decl_header = "## Standard Run Summary\n"
+    else:
+        _decl_header = "## Winner Declaration\n"
+    sections.append(_decl_header)
 
     if winner and winner in passing:
         w = passing[winner]
-        tg = w.get("warm_tg_median") or 0
-        tg_p10 = w.get("warm_tg_p10") or 0
-        ttft = w.get("warm_ttft_median_ms") or 0
-        cv = w.get("warm_tg_cv") or 0
-        thermal = w.get("thermal_events", 0)
-        outliers = w.get("outlier_count", 0)
-        n_warm = w.get("valid_warm_request_count", 0)
+        # All metrics are guaranteed non-None for ranked (passing) configs.
+        tg     = w.get("warm_tg_median")
+        tg_p10 = w.get("warm_tg_p10")
+        ttft   = w.get("warm_ttft_median_ms")
+        cv     = w.get("warm_tg_cv")
+        thermal  = w.get("thermal_events")  # may be None if no telemetry data
+        outliers = w.get("outlier_count")   # same
+        n_warm   = w.get("valid_warm_request_count", 0)
+        thermal_disp  = str(thermal)  if thermal  is not None else "N/A"
+        outliers_disp = str(outliers) if outliers is not None else "N/A"
 
         divergence_note = ""
         if highest_tg and highest_tg != winner:
             h = passing[highest_tg]
+            h_ttft = passing[highest_tg].get('warm_ttft_median_ms')
+            h_tg   = h.get('warm_tg_median')
+            ttft_disp   = f"{ttft:.0f}ms"  if ttft   is not None else "N/A"
+            h_ttft_disp = f"{h_ttft:.0f}ms" if h_ttft is not None else "N/A"
+            h_tg_disp   = f"{h_tg:.2f}"    if h_tg   is not None else "N/A"
+            tg_disp_w   = f"{tg:.2f}"      if tg     is not None else "N/A"
             divergence_note = (
-                f"\n\n**Note:** Score winner (`{winner}`) and highest-TG config (`{highest_tg}`) "
-                f"differ. Winner has better TTFT ({ttft:.0f}ms median vs "
-                f"{passing[highest_tg].get('warm_ttft_median_ms') or 0:.0f}ms) at the cost of "
-                f"slightly lower TG ({tg:.2f} vs {h.get('warm_tg_median') or 0:.2f} t/s). "
+                f"\n\n**Note:** Best-scoring config (`{winner}`) and highest-TG config "
+                f"(`{highest_tg}`) differ. Best-scoring has better TTFT ({ttft_disp} median vs "
+                f"{h_ttft_disp}) at the cost of "
+                f"slightly lower TG ({tg_disp_w} vs {h_tg_disp} t/s). "
                 "For pure generation speed, use the highest-TG config."
             )
 
         snap_bios = (
             f"BIOS: {bios.get('pl1_w','?')}W/−{abs(bios.get('vcore_offset_v',0))*1000:.0f}mV/"
             f"Gear{bios.get('gear_mode','?')}/XMP{bios.get('xmp_profile','?')}"
-        )
-        machine_str = (
-            f"{machine.get('cpu','unknown')} + {machine.get('gpu','unknown').split()[0:4]} "
-            f"+ {machine.get('ram','unknown')}"
         )
 
         # R5: pull model identity and build commit from baseline/snapshot rather
@@ -829,18 +1059,101 @@ def _build_markdown(
         model_label = model_cfg.get("name", "unknown model")
         build_commit = snap.get("build_commit") or runtime.get("build_commit") or "unknown"
 
-        sections.append(
-            f'> **Confidence Statement:**\n>\n'
-            f'> "On {machine.get("name","DEEP THOUGHT")} '
-            f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
-            f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
-            f'running {model_label} via llama.cpp build {build_commit}, '
-            f'the validated optimal single-user configuration is `{winner}`, '
-            f'delivering **{tg:.2f} t/s** warm TG median (**{tg_p10:.2f} t/s** P10) '
-            f'and **{ttft:.0f}ms** warm TTFT median, validated across '
-            f'**{n_warm}** warm requests with **{thermal}** thermal events and '
-            f'**{outliers}** outliers on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
-        )
+        if _is_custom:
+            # Custom mode: honest scope-limited language.
+            # Never claims "validated optimal" — only "best among tested".
+            _rp = run_plan  # type: ignore[union-attr]  # _is_custom guarantees non-None
+            _tested_n = len(_rp.selected_values)
+            _total_n  = len(_rp.all_campaign_values)
+            _untested  = _rp.untested_values
+            tg_str    = f"{tg:.2f} t/s"   if tg     is not None else "N/A"
+            tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
+            ttft_str  = f"{ttft:.0f}ms"    if ttft   is not None else "N/A"
+            sections.append(
+                f'> **Custom Run — Scope Notice:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the best-performing config among the {_tested_n} tested value(s) '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
+                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
+            if _untested:
+                sections.append(
+                    f'>\n> ⚠️ **Untested values:** {", ".join(str(v) for v in _untested)}. '
+                    "These were not measured in this run. The true optimum may lie "
+                    "elsewhere. Run Full to measure all campaign values."
+                )
+        elif _is_quick:
+            # Quick mode: complete coverage, 1 cycle, broad but shallow.
+            # Not "validated optimal" — lowest-confidence full-coverage result.
+            _rp = run_plan  # type: ignore[union-attr]  # _is_quick guarantees non-None
+            _total_vals = len(_rp.all_campaign_values)
+            _q_c = _rp.cycles_per_config
+            _q_cw = "cycle" if _q_c == 1 else "cycles"
+            sections.append(
+                f'> **Quick Run — Broad Coverage Result:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the top-performing config across all {_total_vals} campaign values '
+                f'under {_q_c} {_q_cw} (broad but shallow) '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
+                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
+            sections.append(
+                f'>\n> ⚡ **Broad but shallow:** Quick mode uses {_q_c} {_q_cw} per config '
+                f'({_rp.warm_samples_per_config} warm request slots). '
+                'Useful for plumbing checks, bug-finding, and first-look identification. '
+                'Run Standard or Full to confirm with higher-confidence statistics before '
+                'treating this as a production recommendation.'
+            )
+        elif _is_standard:
+            # Standard mode: complete coverage, reduced repetition, development-grade.
+            # Not "validated optimal" — development-grade, confirm with Full.
+            _rp = run_plan  # type: ignore[union-attr]  # _is_standard guarantees non-None
+            _total_vals = len(_rp.all_campaign_values)
+            sections.append(
+                f'> **Standard Run — Development-Grade Result:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the top-performing config across all {_total_vals} campaign values '
+                f'under reduced repetition ({_rp.cycles_per_config} cycles) '
+                f'is `{winner}`, delivering **{tg_str}** warm TG median '
+                f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
+                f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
+                f'and **{outliers_disp}** outlier(s) on '
+                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
+            sections.append(
+                f'>\n> ℹ️ **Development-grade:** Standard mode uses {_rp.cycles_per_config} cycles per config '
+                '(reduced repetition). This result identifies the leading config across the full '
+                'value space. Run Full to confirm with highest-confidence statistics before '
+                'treating this as a production recommendation.'
+            )
+        else:
+            sections.append(
+                f'> **Confidence Statement:**\n>\n'
+                f'> "On {machine.get("name","DEEP THOUGHT")} '
+                f'({machine.get("cpu","unknown")} + {machine.get("gpu","unknown")}, '
+                f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
+                f'running {model_label} via llama.cpp build {build_commit}, '
+                f'the validated optimal single-user configuration is `{winner}`, '
+                f'delivering **{tg_str}** warm TG median (**{tg_p10_str}** P10) '
+                f'and **{ttft_str}** warm TTFT median, validated across '
+                f'**{n_warm}** warm requests with **{thermal_disp}** thermal events and '
+                f'**{outliers_disp}** outliers on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+            )
         sections.append(divergence_note)
         sections.append("")
 
@@ -849,7 +1162,26 @@ def _build_markdown(
         # -----------------------------------------------------------------------
         sections.append("## Production Command\n")
         from src.config import DEFAULT_HOST, PRODUCTION_PORT  # noqa: PLC0415
-        sections.append(f"Copy-paste ready. Host {DEFAULT_HOST}, port {PRODUCTION_PORT}.\n")
+        if _is_custom:
+            sections.append(
+                f"Command for `{winner}` — best tested config in this Custom run. "
+                f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
+                "Validate with a Full run before deploying as a permanent config.\n"
+            )
+        elif _is_quick:
+            sections.append(
+                f"Command for `{winner}` — top config in this Quick run. "
+                f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
+                "Quick run (1 cycle, broad but shallow) — run Standard or Full to confirm before deploying.\n"
+            )
+        elif _is_standard:
+            sections.append(
+                f"Command for `{winner}` — top config in this Standard run. "
+                f"Host {DEFAULT_HOST}, port {PRODUCTION_PORT}. "
+                "Development-grade — run Full for highest-confidence confirmation before deploying.\n"
+            )
+        else:
+            sections.append(f"Copy-paste ready. Host {DEFAULT_HOST}, port {PRODUCTION_PORT}.\n")
 
         with get_connection(db_path) as conn:
             cmd_row = conn.execute(
@@ -865,12 +1197,24 @@ def _build_markdown(
             model_path = "<QUANTMAP_MODEL_PATH not set — copy .env.example to .env>"
         build_commit = snap.get("build_commit", runtime.get("build_commit", "afa6bfe4f"))
 
+        if _is_custom:
+            _cmd_label = "QuantMap — Custom Run — Best Tested Config"
+        elif _is_standard:
+            _cmd_label = "QuantMap — Standard Run — Development-Grade"
+        else:
+            _cmd_label = "QuantMap — Validated Production Config"
         sections.append("```batch")
-        sections.append(f"rem QuantMap — Validated Production Config")
-        sections.append(f"rem Campaign: {campaign_id} | Winner: {winner}")
-        sections.append(f"rem Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} | Validated: {n_warm} warm requests")
+        sections.append(f"rem {_cmd_label}")
+        sections.append(f"rem Campaign: {campaign_id} | Config: {winner}")
+        sections.append(f"rem Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} | Warm requests: {n_warm}")
         sections.append(f"rem Warm TG P10: {tg_p10:.2f} t/s | CV: {cv:.3f} | Thermal events: {thermal}")
         sections.append(f"rem Machine: {machine.get('name','DEEP THOUGHT')} ({machine.get('cpu','i9-12900K')} + {machine.get('gpu','RTX 3090')} + {machine.get('ram','128GB DDR4-3200')})")
+        if _is_custom and run_plan is not None:
+            sections.append(f"rem Mode: Custom | Tested: {len(run_plan.selected_values)} of {len(run_plan.all_campaign_values)} values")
+        elif _is_quick and run_plan is not None:
+            sections.append(f"rem Mode: Quick | All {len(run_plan.all_campaign_values)} values | {run_plan.cycles_per_config} cycle per config (broad but shallow)")
+        elif _is_standard and run_plan is not None:
+            sections.append(f"rem Mode: Standard | All {len(run_plan.all_campaign_values)} values | {run_plan.cycles_per_config} cycles per config")
         sections.append("")
 
         # Rebuild the winning command with --port 8000
@@ -956,14 +1300,53 @@ def _build_markdown(
 
         sections.append("```")
     else:
-        sections.append(
-            "**No winner declared.** All configs failed elimination filters. "
-            "Review the elimination reasons in the Full Config Ranking table.\n"
-        )
-        sections.append("Possible causes:")
-        sections.append("- High CV (>5%): thermal interference, background processes")
-        sections.append("- Thermal events: check BIOS settings and cooling")
-        sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these params")
+        if _is_custom:
+            sections.append(
+                "**No result declared.** All tested configs failed elimination filters. "
+                "Check the Full Config Ranking table for the specific elimination reason per config.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference or background processes during the run")
+            sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
+            sections.append("- Low sample count: if fewer cycles than usual, add `--cycles N` and re-run")
+        elif _is_quick:
+            sections.append(
+                "**No result declared.** All configs failed elimination filters. "
+                "Check the Full Config Ranking table for the specific elimination reason per config.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference or background processes during the run")
+            sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
+            _q_c_nw = run_plan.cycles_per_config if run_plan is not None else 1
+            _q_cw_nw = "cycle" if _q_c_nw == 1 else "cycles"
+            sections.append(
+                f"- Low sample count: Quick uses {_q_c_nw} {_q_cw_nw} per config (lowest-confidence). "
+                "Re-run with `--mode standard` or `--mode full` for higher-confidence results."
+            )
+        elif _is_standard:
+            sections.append(
+                "**No result declared.** All configs failed elimination filters. "
+                "Check the Full Config Ranking table for the specific elimination reason per config.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference or background processes during the run")
+            sections.append("- Thermal events: check GPU/CPU thermals and BIOS power limits")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these parameter values")
+            sections.append(
+                "- Low sample count: Standard uses reduced repetition. "
+                "Add `--cycles N` to increase or re-run with `--mode full` for higher confidence."
+            )
+        else:
+            sections.append(
+                "**No winner declared.** All configs failed elimination filters. "
+                "Review the elimination reasons in the Full Config Ranking table.\n"
+            )
+            sections.append("Possible causes:")
+            sections.append("- High CV (>5%): thermal interference, background processes")
+            sections.append("- Thermal events: check BIOS settings and cooling")
+            sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these params")
         sections.append("")
 
     # -------------------------------------------------------------------------
@@ -971,17 +1354,46 @@ def _build_markdown(
     # -------------------------------------------------------------------------
     sections.append("## Methodology\n")
     lab = baseline.get("lab", {})
-    # Resolve effective values: campaign YAML overrides baseline defaults
-    eff_cycles = lab.get("cycles_per_config", 3)
-    eff_reqs = lab.get("requests_per_cycle", 6)
-    if campaign:
-        if "cycles_per_config" in campaign:
-            eff_cycles = campaign["cycles_per_config"]
-        if "requests_per_cycle" in campaign:
-            eff_reqs = campaign["requests_per_cycle"]
+    # RunPlan has the authoritative resolved schedule when available;
+    # fall back to campaign YAML → baseline for backwards-compat (rescore.py).
+    if run_plan is not None:
+        eff_cycles = run_plan.cycles_per_config
+        eff_reqs   = run_plan.requests_per_cycle
+    else:
+        eff_cycles = lab.get("cycles_per_config", 3)
+        eff_reqs   = lab.get("requests_per_cycle", 6)
+        if campaign:
+            if "cycles_per_config" in campaign:
+                eff_cycles = campaign["cycles_per_config"]
+            if "requests_per_cycle" in campaign:
+                eff_reqs = campaign["requests_per_cycle"]
     warm_per_cycle = eff_reqs - 1
     warm_samples = eff_cycles * warm_per_cycle
     last_cycle = eff_cycles
+
+    if _is_custom and run_plan is not None:
+        _rp = run_plan
+        sections.append(
+            f"**Run mode:** Custom — user-directed. "
+            f"{len(_rp.selected_values)} of {len(_rp.all_campaign_values)} campaign values tested deliberately. "
+            "Sparse data is intentional; results are valid for comparison within the tested subset only.\n"
+        )
+    elif _is_quick and run_plan is not None:
+        _rp = run_plan
+        _q_c = _rp.cycles_per_config
+        _q_cw = "cycle" if _q_c == 1 else "cycles"
+        sections.append(
+            f"**Run mode:** Quick — complete value coverage, {_q_c} {_q_cw} per config. "
+            f"All {len(_rp.all_campaign_values)} campaign values tested — broad but shallow. "
+            "Lowest-confidence full-coverage mode; run Standard or Full for higher-confidence confirmation.\n"
+        )
+    elif _is_standard and run_plan is not None:
+        _rp = run_plan
+        sections.append(
+            f"**Run mode:** Standard — complete value coverage, reduced repetition. "
+            f"All {len(_rp.all_campaign_values)} campaign values tested with {_rp.cycles_per_config} cycles per config. "
+            "Development-grade result; run Full for highest-confidence confirmation.\n"
+        )
 
     sections.append(
         f"- **Cycles per config:** {eff_cycles} "
@@ -999,11 +1411,30 @@ def _build_markdown(
         f"- **Seed:** 42 (stabilizes sampling, does not guarantee output identity)\n"
     )
     if warm_samples < 20:
-        sections.append(
-            f"> **Note:** {warm_samples} warm samples per config — "
-            f"detectable difference ~0.4 t/s at 95% confidence. "
-            f"For narrower confidence intervals, re-run with `--cycles {max(eff_cycles + 1, 4)}`.\n"
-        )
+        if _is_custom:
+            sections.append(
+                f"> **Note:** {warm_samples} warm sample(s) per config — intentionally sparse "
+                f"(Custom run). Results are statistically valid within the tested scope. "
+                f"Run Full to measure all campaign values and extend coverage.\n"
+            )
+        elif _is_quick:
+            sections.append(
+                f"> **Note:** {warm_samples} warm request slot(s) per config — Quick run "
+                f"({eff_cycles} cycle, broad but shallow). Lowest-confidence full-coverage result. "
+                f"Run Standard or Full for higher-confidence statistics.\n"
+            )
+        elif _is_standard:
+            sections.append(
+                f"> **Note:** {warm_samples} warm sample(s) per config — Standard run "
+                f"(reduced repetition). Development-grade result across all campaign values. "
+                f"Run Full for higher-confidence statistics.\n"
+            )
+        else:
+            sections.append(
+                f"> **Note:** {warm_samples} warm samples per config — "
+                f"detectable difference ~0.4 t/s at 95% confidence. "
+                f"For narrower confidence intervals, re-run with `--cycles {max(eff_cycles + 1, 4)}`.\n"
+            )
 
     # NGL sweep section — only for n_gpu_layers campaigns
     if campaign is not None and campaign.get("variable") == "n_gpu_layers":
@@ -1014,6 +1445,9 @@ def _build_markdown(
             scores_result=scores_result,
             stats=stats,
             db_path=db_path,
+            is_custom=_is_custom,
+            is_standard=_is_standard,
+            is_quick=_is_quick,
         )
         sections.extend(ngl_lines)
 
@@ -1026,42 +1460,62 @@ def _config_stats_table(
     scores_df: pd.DataFrame | None,
     ref: dict[str, Any],
 ) -> str:
-    """Generate a compact stats table for one config."""
+    """Generate a compact stats table for one config.
+
+    All metrics are rendered as '—' when None — absent data must never
+    appear as '0.00' or '0 ms' in the report.
+    """
     lines = []
     lines.append("| Metric | Value | vs S0-new Baseline |")
     lines.append("|--------|-------|--------------------|")
 
-    tg = s.get("warm_tg_median") or 0
-    tg_p10 = s.get("warm_tg_p10") or 0
-    tg_p90 = s.get("warm_tg_p90") or 0
-    cv = s.get("warm_tg_cv") or 0
-    ttft_med = s.get("warm_ttft_median_ms") or 0
-    ttft_p90 = s.get("warm_ttft_p90_ms") or 0
-    cold_ttft = s.get("cold_ttft_median_ms") or 0
-    pp = s.get("pp_median") or 0
-    thermal = s.get("thermal_events", 0)
-    outliers = s.get("outlier_count", 0)
+    tg     = s.get("warm_tg_median")
+    tg_p10 = s.get("warm_tg_p10")
+    tg_p90 = s.get("warm_tg_p90")
+    n_warm = s.get("valid_warm_request_count", 0)
+    cv     = s.get("warm_tg_cv")
+    cv_disp = f"{cv:.4f}" if (cv is not None and n_warm >= 3) else "N/A (N<3)"
 
-    ref_tg = ref.get("warm_tg_median_ts", 8.18)
-    ref_ttft = ref.get("warm_ttft_median_ms", 200.0)
+    ttft_med   = s.get("warm_ttft_median_ms")
+    ttft_p90   = s.get("warm_ttft_p90_ms")
+    cold_ttft  = s.get("cold_ttft_median_ms")
+    pp         = s.get("pp_median")
+    thermal    = s.get("thermal_events")
+    outliers   = s.get("outlier_count")
 
-    tg_delta = f"+{(tg - ref_tg) / ref_tg * 100:.1f}%" if ref_tg else "—"
-    ttft_delta = f"+{(ref_ttft - ttft_med) / ref_ttft * 100:.1f}%" if ref_ttft else "—"
+    # Baseline-relative deltas — only computed when reference values exist
+    # and the measured metric is present. Never fabricates a comparison.
+    ref_tg   = ref.get("warm_tg_median_ts")
+    ref_ttft = ref.get("warm_ttft_median_ms")
+    tg_delta   = (
+        f"+{(tg - ref_tg) / ref_tg * 100:.1f}%"
+        if (tg is not None and ref_tg)
+        else "—"
+    )
+    ttft_delta = (
+        f"+{(ref_ttft - ttft_med) / ref_ttft * 100:.1f}%"
+        if (ttft_med is not None and ref_ttft)
+        else "—"
+    )
 
     score_str = "—"
     if scores_df is not None and config_id in scores_df.index:
         score_str = f"{scores_df.loc[config_id, 'composite_score']:.4f}"
 
-    lines.append(f"| Warm TG Median | **{tg:.2f} t/s** | {tg_delta} |")
-    lines.append(f"| Warm TG P10 | {tg_p10:.2f} t/s | — |")
-    lines.append(f"| Warm TG P90 | {tg_p90:.2f} t/s | — |")
-    lines.append(f"| Warm TG CV | {cv:.4f} | — |")
-    lines.append(f"| Warm TTFT Median | {ttft_med:.0f} ms | {ttft_delta} |")
-    lines.append(f"| Warm TTFT P90 | {ttft_p90:.0f} ms | — |")
-    lines.append(f"| Cold TTFT Median | {cold_ttft:.0f} ms | — |")
-    lines.append(f"| PP Median | {pp:.1f} t/s | — |")
-    lines.append(f"| Thermal Events | {thermal} | — |")
-    lines.append(f"| Outliers | {outliers} | — |")
-    lines.append(f"| Composite Score | {score_str} | — |")
+    def _m(val: float | None, fmt: str) -> str:
+        """Format optional metric; return '—' for None."""
+        return format(val, fmt) if val is not None else "—"
+
+    lines.append(f"| Warm TG Median   | **{_m(tg, '.2f')} t/s** | {tg_delta} |")
+    lines.append(f"| Warm TG P10      | {_m(tg_p10, '.2f')} t/s | — |")
+    lines.append(f"| Warm TG P90      | {_m(tg_p90, '.2f')} t/s | — |")
+    lines.append(f"| Warm TG CV       | {cv_disp} | — |")
+    lines.append(f"| Warm TTFT Median | {_m(ttft_med, '.0f')} ms | {ttft_delta} |")
+    lines.append(f"| Warm TTFT P90    | {_m(ttft_p90, '.0f')} ms | — |")
+    lines.append(f"| Cold TTFT Median | {_m(cold_ttft, '.0f')} ms | — |")
+    lines.append(f"| PP Median        | {_m(pp, '.1f')} t/s | — |")
+    lines.append(f"| Thermal Events   | {thermal  if thermal  is not None else '—'} | — |")
+    lines.append(f"| Outliers         | {outliers if outliers is not None else '—'} | — |")
+    lines.append(f"| Composite Score  | {score_str} | — |")
 
     return "\n".join(lines)

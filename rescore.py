@@ -44,7 +44,7 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     from src.analyze import analyze_campaign
     from src.score import score_campaign, ELIMINATION_FILTERS
     from src.report import generate_report
-    from src.db import init_db
+    from src.db import init_db, get_connection
 
     logger.info("=" * 60)
     logger.info("Re-scoring campaign: %s", campaign_id)
@@ -58,22 +58,40 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     # against a DB created by an older QuantMap version that predates schema
     # versioning; init_db() handles the forward migration safely.
     init_db(DB_PATH)
+    
+    # Load campaign-level run_mode from DB to reconstruct mode overrides
+    conn = get_connection(DB_PATH)
+    try:
+        camp_row = conn.execute("SELECT run_mode FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    finally:
+        conn.close()
+        
+    run_mode = camp_row["run_mode"] if camp_row else "full"
+
+    mode_filter_overrides = {}
+    if run_mode in ("custom", "quick"):
+        mode_filter_overrides = {"min_valid_warm_count": 1}
+    elif run_mode == "standard":
+        mode_filter_overrides = {"min_valid_warm_count": 3}
+
+    filter_overrides = dict(mode_filter_overrides)
 
     # Load campaign-level elimination_overrides from the YAML if present.
     # This ensures rescore produces the same result as a live run would:
     # if the campaign YAML overrides a filter threshold, that override is
     # respected here too rather than falling back to global defaults. (L6 fix)
-    filter_overrides: dict | None = None
     campaign_yaml_path = CONFIGS_DIR / "campaigns" / f"{campaign_id}.yaml"
     if campaign_yaml_path.exists():
         try:
             with open(campaign_yaml_path, encoding="utf-8") as f:
                 campaign_data = yaml.safe_load(f)
-            filter_overrides = campaign_data.get("elimination_overrides") or None
-            if filter_overrides:
+            yaml_filter_overrides = campaign_data.get("elimination_overrides") or {}
+            
+            if yaml_filter_overrides or filter_overrides:
+                filter_overrides = {**filter_overrides, **yaml_filter_overrides}
                 logger.info(
-                    "Campaign-level filter overrides loaded from %s: %s",
-                    campaign_yaml_path.name, filter_overrides,
+                    "Effective filter overrides for %s mode: %s",
+                    run_mode, filter_overrides,
                 )
         except Exception as exc:
             logger.warning(
@@ -86,12 +104,14 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
         )
 
     try:
-        stats = analyze_campaign(campaign_id, DB_PATH)
+        # Avoid double-analysis — score_campaign runs analyze internally
+        scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides or None)
+        stats = scores.get("stats", {})
+        
         if not stats:
             logger.error("No stats returned — campaign may not be in database: %s", campaign_id)
             return False
 
-        scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides)
         report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats)
 
         logger.info("Report written: %s", report_path)
