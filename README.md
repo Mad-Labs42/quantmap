@@ -1,31 +1,84 @@
 # QuantMap
 
+![Status](https://img.shields.io/badge/status-MVP%20%2F%20Active%20Development-orange)
+
 **Stop guessing your inference settings. Measure them.**
 
-QuantMap is a measurement-driven optimization lab for local LLM inference. It runs structured campaigns that sweep server parameters (thread counts, batch sizes, GPU layer splits), collects statistically rigorous telemetry, and tells you exactly which configuration is best for your hardware — with proof.
+QuantMap is a high-rigor measurement and reporting system for local LLM inference benchmarking. It runs structured campaigns that sweep server parameters (thread counts, batch sizes, GPU layer splits) and collects structured telemetry for statistically honest analysis and reporting
 
-No vibes. No "try 30 layers and see what happens." No copying someone else's settings from Reddit and hoping your rig behaves the same. QuantMap gives you a statistically validated answer for *your* machine, *your* model, *your* workload.
+Instead of guessing settings or copying configurations without context, QuantMap provides a controlled experiment framework to evaluate and compare configurations with structured, evidence-based reporting.
+
+---
+
+## Project Status
+
+QuantMap is currently in **active development (MVP stage)**.
+
+Core benchmarking, validation, and reporting systems are functional, but:
+- interfaces and workflows may change
+- some analysis features are intentionally conservative or incomplete
+- edge-case handling and reporting clarity are still being refined
+
+QuantMap prioritizes **correctness and trustworthiness over completeness**, so some features may appear limited although the underlying system is stabilized.
+
+This is not yet a finished product.
+
+### What to Expect
+
+- Results are **accurate within current constraints**, but may be limited in scope
+- Some reports may be **intentionally conservative or incomplete**
+- Not all edge cases are fully automated yet
+- Output formats and scoring behavior may evolve
+
+If something appears missing or cautious, it is more than likely **intentional rather than an oversight**.
+
+---
+
+## What QuantMap Is (And Is Not)
+
+**QuantMap is:**
+- A controlled experiment framework.
+- A data collection and validation system.
+- A traceable reporting engine.
+
+**QuantMap is NOT:**
+- A magic optimizer or a guaranteed "best config finder".
+- A system that guarantees a conclusive winner for every campaign.
+- A tool that automatically fixes bad data or hides uncertainty behind artificially clean outputs.
+- A system that implies why something happened without evidentiary proof.
+
+QuantMap is being built incrementally, with features introduced only when they can meet the system's standards for correctness and traceability.
 
 ---
 
 ## Why This Exists
 
-Every local LLM user hits the same wall: you download a model, start a server with default settings, and wonder if you're leaving performance on the table. You probably are. But finding the optimal config means manually testing dozens of parameter combinations, eyeballing throughput numbers, and hoping you controlled for thermal throttling, background processes, and cold-start effects.
+Every local LLM user hits the same wall: you download a model, start a server with default settings, and then begin the process of manually testing dozens of parameter variations, eyeballing throughput numbers, and hoping you controlled for thermal throttling, background processes, and cold-start effects. This process is unreliable and time consuming.
 
-QuantMap automates that entire process. Define what you want to sweep, run a campaign, get a winner.
+QuantMap automates measurement and validation. It runs structured campaigns that test variables against one another across repeated trials, helping you define a sweep, execute it consistently, and determine whether the available evidence supports a valid comparison and a top-performing configuration.
 
 ---
 
 ## What It Does
 
 - **Structured campaigns** — Define parameter sweeps in YAML. QuantMap generates all configs, runs them sequentially with controlled cooldowns, and collects measurements under consistent conditions.
-- **Statistical elimination** — Configs are filtered by success rate, outlier count, coefficient of variation, and thermal events. Survivors are ranked by a composite score (throughput, latency, stability). No config passes on vibes alone.
+- **Statistical validation** — Configs are filtered by success rate, outlier count, coefficient of variation, and thermal events. Survivors are ranked by observed performance metrics (throughput, latency, stability) (Ranking and elimination logic are campaign-configurable and intentionally conservative)
 - **Full telemetry** — GPU temp, GPU utilization, CPU utilization, VRAM usage, RAM committed, CPU power draw, background interference (Defender, Windows Update, Search Indexer, AV scans), all sampled continuously and stored per-request.
-- **Reproducible results** — Every campaign stores the exact server launch command, runtime environment variables (including ambient `CUDA_VISIBLE_DEVICES`), campaign YAML snapshot (with SHA-256), and schema-versioned SQLite database. You can reproduce any run or share results with full context.
-- **Separation of collection and analysis** — Raw data is immutable. Scoring thresholds can be adjusted and results re-scored in seconds without re-running hours of measurements. The `rescore.py` utility exists for exactly this.
+- **Traceability and Reproducibility** — Every result is tied back to data. The schema-versioned SQLite database serves as the authoritative source of truth, and a `raw.jsonl` append-only trace preserves raw measurements. You can reproduce any run or share results with full context.
+- **Separation of data and interpretation** — Raw data is immutable. Failures, invalid configs, and edge cases remain visible in the record rather than being silently dropped. Scoring thresholds can be adjusted and results re-scored in seconds without re-running hours of measurements.
 - **Campaign-configurable thresholds** — Override elimination filters (`min_success_rate`, `max_outliers`, `max_cv`, `max_thermal_events`) per campaign in YAML. Different workloads have different stability requirements.
-- **Pre-flight validation** — `--validate` checks your entire setup before a campaign runs: server binary existence and size, model file integrity, request file presence, baseline configuration, and Defender exclusion status.
-- **Resume support** — Campaigns that crash or get interrupted (Ctrl+C) preserve all completed data. `--resume` picks up from the next incomplete config.
+- **Pre-flight validation** — `--validate` checks your entire setup before a campaign runs: server binary existence, model file integrity, request file presence, baseline configuration, and Defender exclusion status.
+- **Robust execution** — Handles crashes, OOM errors, and instability. Campaigns that crash or get interrupted (Ctrl+C) preserve all completed data. `--resume` picks up from the next incomplete config.
+
+---
+
+## Interpreting Results & Confidence
+
+Evaluating inference configurations is inherently noisy. When reading QuantMap reports:
+- **Top-performing doesn't imply absolute:** A configuration may score highest among tested variants, but this is bounded by the limited comparison cases and parameter ranges provided. "Winners" may not always emerge if data is sparse or statistical differences are negligible.
+- **Failures are features:** Crashes, OOM errors, and thermal events are captured and surfaced, not hidden. A failed config is a valuable data point.
+- **Confidence reflects evidence:** Statistical confidence is tied to sample size and variance. Small samples carry higher uncertainty. Ensure minimum sample requirements (requests per cycle, cycle counts) are adequate before drawing firm conclusions.
+- **Data ≠ Interpretation:** Do not assume causality unless proven. The system reports what was measured, not necessarily *why* a configuration performed as it did.
 
 ---
 
@@ -123,7 +176,7 @@ python -m src.runner [OPTIONS]
 | `--no-resume` | Start fresh, ignoring crash recovery state |
 | `--cycles N` | Override cycles_per_config for this run |
 | `--requests-per-cycle N` | Override requests_per_cycle for this run |
-| `--list` | Show all campaigns with status, winner, and report path |
+| `--list` | Show all campaigns with status, top config, and report path |
 
 ### Rescoring
 ```bash
@@ -136,10 +189,10 @@ python rescore.py --all
 
 ### Campaign generation
 ```bash
-# Generate C08 interaction campaign from C01-C07 winners
+# Generate C08 interaction campaign from C01-C07 top configurations
 python -m src.score --generate-c08
 
-# Generate Finalist validation campaign from C08 winner
+# Generate Finalist validation campaign from C08 top configuration
 python -m src.score --generate-finalist
 ```
 
@@ -164,7 +217,7 @@ Elimination Filtering   →  remove configs that fail stability thresholds
     ↓
 Composite Scoring       →  rank survivors by throughput + latency + stability
     ↓
-Report Generation       →  markdown report with winner, Pareto frontier, and full data
+Report Generation       →  markdown report with highest observed config, Pareto frontier, and full data
 ```
 
 ### Elimination Filters (defaults, overridable per campaign)
@@ -224,9 +277,9 @@ Cycles and requests are configurable at three levels (highest priority wins):
 
 Each campaign generates `results/{campaign_id}/report.md` containing:
 
-- **Winner** — best config with composite score breakdown
-- **Full config ranking** — all configs with pass/fail status and metrics
-- **Pareto frontier** — configs that aren't dominated on any metric (includes outlier count and thermal events for stability context)
+- **Highest Scoring Configuration** — top performing configuration based on observed metrics
+- **Full config ranking** — all configs with their pass/fail status and measured metrics
+- **Pareto frontier** — configs that aren't strictly outclassed on any measured metric (includes outlier count and thermal events for stability context)
 - **Telemetry summary** — GPU util, CPU util, RAM, VRAM, CPU power, background interference per config
 - **Background interference detail** — Defender/AV/Update/Indexer activity per config with snapshot counts
 - **Speed degradation analysis** — flags configs where throughput dropped significantly from baseline
@@ -276,13 +329,13 @@ QuantMap/
 
 **Interpreting results:**
 - **CV (coefficient of variation)** is your stability indicator. Below 1% is excellent. Below 5% is acceptable. Above 5% means something is introducing variance — thermal throttling, background interference, or an unstable parameter combination.
-- **Outlier count** tells you how many individual measurements deviated significantly. A config with high throughput but 3+ outliers is less reliable than a slightly slower config with zero outliers.
-- **The Pareto frontier** shows configs that aren't strictly worse than any other on all metrics simultaneously. If the winner and the Pareto leader differ, the Pareto leader trades throughput for stability or vice versa — and the table now shows outlier count and thermal events so you can see the tradeoff.
-- **The production command** in the report is your final answer. Copy it, paste it, run it. It includes the full environment setup.
+- **Outlier count** tells you how many individual measurements deviated significantly. A config with high throughput but 3+ outliers is statistically weaker than a slightly slower config with zero outliers.
+- **The Pareto frontier** shows configs that aren't strictly outclassed by any other on all metrics simultaneously. If the top-scoring config and the Pareto leader differ, it indicates a tradeoff between throughput and stability — and the table now shows outlier count and thermal events so you can see the tradeoff.
+- **The production command** in the report represents the strongest observed configuration under tested conditions. Copy it, paste it, run it. It includes the full environment setup.
 
 **Campaign design:**
 - Sweep one variable at a time. QuantMap's elimination pipeline assumes single-variable campaigns where the baseline anchors everything else.
-- Start with thread counts (`--threads`, `--threads-batch`, `--threads-http`) — they're fast to sweep and have the biggest impact on most setups.
+- Start with thread counts (`--threads`, `--threads-batch`, `--threads-http`) — they're fast to sweep and have an observable impact on most setups.
 - Use `--dry-run` to verify the measurement budget before committing to a long campaign. A 10-config × 3-cycle campaign at 6 requests per cycle is 180 total requests. Use `--cycles 5` for higher statistical confidence when needed.
 
 ---
@@ -291,9 +344,9 @@ QuantMap/
 
 ### v1.0 (current)
 - Single-variable parameter sweep campaigns
-- Thread count, batch size optimization
+- Thread count, batch size measurement
 - Full telemetry with background interference tracking
-- Statistical elimination and composite scoring
+- Statistical evaluation and composite scoring
 - Campaign-configurable thresholds
 - Pre-flight validation and dry-run
 - Resume support for interrupted campaigns
@@ -302,8 +355,8 @@ QuantMap/
 - **Context length degradation** — throughput curves across escalating context depths
 - **KV cache quantization + flash attention sweep** — combinatorial parameter exploration
 - **Stress/soak test** — sustained load over time to validate thermal stability
-- **Preset campaign library** — predefined campaign templates for common optimization scenarios
-- **Actionable recommendations** — synthesized, copy-pasteable optimal server configuration with explanatory notes
+- **Preset campaign library** — predefined campaign templates for common parameter sweeps
+- **Actionable reporting** — synthesized observation summary with explanatory notes
 - **Cross-platform support** — Linux and macOS
 
 ### v2.0 (future)
@@ -325,13 +378,13 @@ A: Not yet. The codebase is structured for cross-platform support (platform-spec
 A: Depends on the model, config count, and cycle count. A typical 5-config × 3-cycle campaign takes 10–30 minutes including cooldowns. Use `--dry-run` to see the exact measurement budget before committing.
 
 **Q: Can I re-score results without re-running the campaign?**
-A: Yes — that's what `rescore.py` is for. Raw measurement data is immutable. You can adjust elimination thresholds and re-score in seconds.
+A: Yes — that's what `rescore.py` is for. Raw measurement data is immutable. You can adjust performance thresholds and re-score in seconds.
 
 **Q: What inference backends are supported?**
 A: Currently llama.cpp (`llama-server`) only. The architecture is designed for backend-agnostic expansion (vLLM, Ollama, exllamav2) in a future release.
 
 **Q: My campaign shows 0 passing configs. What happened?**
-A: Usually means the elimination thresholds are too strict for your data. Run `rescore.py` with relaxed `elimination_overrides` in your campaign YAML, or check the report for which filter eliminated each config. Common causes: a single transient failure pushing success rate below threshold, or borderline CV from background interference.
+A: Usually means the elimination thresholds are too strict for your data, or the tested conditions are heavily unstable. Run `rescore.py` with relaxed `elimination_overrides` in your campaign YAML, or check the report for which filter eliminated each config. Common causes: a single transient failure pushing success rate below threshold, or borderline CV from background interference.
 
 ---
 
