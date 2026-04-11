@@ -69,8 +69,10 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     run_mode = camp_row["run_mode"] if camp_row else "full"
 
     mode_filter_overrides = {}
-    if run_mode in ("custom", "quick"):
+    if run_mode == "custom":
         mode_filter_overrides = {"min_valid_warm_count": 1}
+    elif run_mode == "quick":
+        mode_filter_overrides = {"min_valid_warm_count": 3}
     elif run_mode == "standard":
         mode_filter_overrides = {"min_valid_warm_count": 3}
 

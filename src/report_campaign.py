@@ -33,10 +33,9 @@ from pathlib import Path
 from typing import Any
 
 from src.db import get_connection
+from src.config import LAB_ROOT
 
 logger = logging.getLogger(__name__)
-
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +256,7 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     overall_confidence: str
     if confidence_counts.get("low", 0) > 0:
         overall_confidence = "low"
-    elif confidence_counts.get("medium", 0) > total // 2:
+    elif confidence_counts.get("medium", 0) >= 1:
         overall_confidence = "medium"
     else:
         overall_confidence = "high"
@@ -265,10 +264,9 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     # Per-config assessment confidence: worst-case for that config's cycles
     config_confidences: dict[str, str] = {}
     for cid, counts in config_confidence_counts.items():
-        total_cid = sum(counts.values())
         if counts.get("low", 0) > 0:
             config_confidences[cid] = "low"
-        elif counts.get("medium", 0) > total_cid // 2:
+        elif counts.get("medium", 0) >= 1:
             config_confidences[cid] = "medium"
         else:
             config_confidences[cid] = "high"
@@ -293,8 +291,6 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_probe_names":      sorted(failed_probe_names),
         "missing_capability_names": sorted(missing_cap_names),
         "inapplicable_capability_names": sorted(inapplicable_cap_names),
-        "top_interferers":         top_interferers[:5],
-        "top_reasons":             top_reasons[:8],
     }
 
 # ---------------------------------------------------------------------------
@@ -1204,7 +1200,7 @@ def _section_concerns_and_warnings(
         )
     # ── Missing expected capabilities (Low/Moderate) ───────────────────────────
     missing_names = (
-        env_agg.get("missing_capabilities", []) if env_agg.get("available") else []
+        env_agg.get("missing_capability_names", []) if env_agg.get("available") else []
     )
     if missing_names:
         low.append(
@@ -1216,7 +1212,7 @@ def _section_concerns_and_warnings(
 
     # ── Inapplicable capabilities (Low) ────────────────────────────────────────
     inapplicable_names = (
-        env_agg.get("inapplicable_capabilities", []) if env_agg.get("available") else []
+        env_agg.get("inapplicable_capability_names", []) if env_agg.get("available") else []
     )
     if inapplicable_names:
         low.append(

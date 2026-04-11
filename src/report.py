@@ -32,6 +32,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.config import LAB_ROOT
 from src.db import get_connection
 from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
 from src.score import score_campaign
@@ -113,11 +114,6 @@ def _config_to_server_args_for_report(config: dict) -> list[str]:
     return args
 
 logger = logging.getLogger(__name__)
-
-# LAB_ROOT is kept here as a module-level fallback so that tools calling
-# generate_report() without a lab_root kwarg (e.g. rescore.py) continue to
-# work unchanged. The canonical path is injected by runner.py via lab_root=.
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
 
 
 # ---------------------------------------------------------------------------
@@ -828,7 +824,7 @@ def _build_markdown(
             f"{cv_disp} | "
             f"{ttft_disp} | "
             f"{ttftp_disp} | "
-            f"{score_val:.4f} | "
+            f"{score_val:.4f} | " if score_val is not None else "— | "
             f"{thermal_disp} | "
             f"{outlier_disp} | "
             f"{'✓ PASS' if config_id in passing else 'FAIL'} |"

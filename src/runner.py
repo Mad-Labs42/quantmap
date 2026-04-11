@@ -1008,15 +1008,6 @@ def _run_cycle(
         # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
         if not is_oom:
             try:
-                server_log = Path(request_files.get("speed_short")).parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
-                # actually srv["log_file"] was defined inside the `with` block, we might not have it.
-                # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
-                pass
-            except Exception:
-                pass
-            
-            # Use `server_log` if it is in locals and exists
-            try:
                 if 'server_log' in locals() and server_log and server_log.is_file():
                     tail = server_log.read_text(encoding="utf-8", errors="replace")[-3000:].lower()
                     if "out of memory" in tail:

@@ -380,10 +380,6 @@ def compute_scores(
 
         # Pareto frontier: not dominated on BOTH warm_tg_median AND warm_ttft
         # A config is Pareto-dominated if another config is better on BOTH metrics.
-        # We restore original warm_ttft for Pareto calculation.
-        for metric, weight in SCORE_WEIGHTS.items():
-            pass  # already done above
-
         # Pareto frontier: read directly from the scored DataFrame.
         # All configs in df passed _split_by_rankability(), so warm_tg_median
         # and warm_ttft_median are guaranteed non-None — no coercion needed.

@@ -59,7 +59,7 @@ for name in names_to_try:
                 # Read full header
                 (sig2, version, revision, poll_time,
                  off_sensor, sz_sensor, num_sensor,
-                 off_reading, sz_reading, num_reading) = struct.unpack("<IIIQIIIIII", raw)
+                 off_reading, sz_reading, num_reading) = struct.unpack("<IIIqIIIIII", raw)
                 print(f"  Sensors: {num_sensor}  Readings: {num_reading}")
                 print(f"  sz_sensor={sz_sensor}  sz_reading={sz_reading}")
                 print(f"  Total size needed: {off_reading + sz_reading * num_reading} bytes")

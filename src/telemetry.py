@@ -35,13 +35,13 @@ SETUP:
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
 import io
 import json
 import logging
 import os
 import sqlite3
 import struct
+import sys
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -165,17 +165,21 @@ class HWiNFOUnavailable(RuntimeError):
     """Raised when HWiNFO shared memory cannot be opened."""
 
 
-# Win32 type setup (done once at module level)
-_k32 = ctypes.windll.kernel32
-_k32.OpenFileMappingW.restype  = ctypes.wintypes.HANDLE
-_k32.OpenFileMappingW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
-_k32.MapViewOfFile.restype     = ctypes.c_void_p
-_k32.MapViewOfFile.argtypes    = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
-                                   ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_size_t]
-_k32.UnmapViewOfFile.restype   = ctypes.wintypes.BOOL
-_k32.UnmapViewOfFile.argtypes  = [ctypes.c_void_p]
-_k32.CloseHandle.restype       = ctypes.wintypes.BOOL
-_k32.CloseHandle.argtypes      = [ctypes.wintypes.HANDLE]
+# Win32 type setup (done once at module level, Windows only)
+if sys.platform == "win32":
+    import ctypes.wintypes
+    _k32 = ctypes.windll.kernel32
+    _k32.OpenFileMappingW.restype  = ctypes.wintypes.HANDLE
+    _k32.OpenFileMappingW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+    _k32.MapViewOfFile.restype     = ctypes.c_void_p
+    _k32.MapViewOfFile.argtypes    = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
+                                       ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_size_t]
+    _k32.UnmapViewOfFile.restype   = ctypes.wintypes.BOOL
+    _k32.UnmapViewOfFile.argtypes  = [ctypes.c_void_p]
+    _k32.CloseHandle.restype       = ctypes.wintypes.BOOL
+    _k32.CloseHandle.argtypes      = [ctypes.wintypes.HANDLE]
+else:
+    _k32 = None  # type: ignore[assignment]
 
 _FILE_MAP_READ = 0x0004
 
@@ -1337,7 +1341,7 @@ class TelemetryCollector:
                 )
                 conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write telemetry SQLite: %s", exc)
+            logger.warning("Failed to write telemetry SQLite: %s", exc)
 
     def _write_snapshot(self, snap: BackgroundSnapshot) -> None:
         row = asdict(snap)
@@ -1351,7 +1355,7 @@ class TelemetryCollector:
                 )
                 conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write background snapshot: %s", exc)
+            logger.warning("Failed to write background snapshot: %s", exc)
 
 
 # ---------------------------------------------------------------------------

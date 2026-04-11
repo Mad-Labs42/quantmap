@@ -245,11 +245,11 @@ def _first_content_chunk(chunk: dict) -> bool:
     delta = choices[0].get("delta", {})
 
     content = delta.get("content")
-    if content and len(content) > 0:
+    if content:
         return True
 
     reasoning = delta.get("reasoning_content")
-    if reasoning and len(reasoning) > 0:
+    if reasoning:
         return True
 
     return False
