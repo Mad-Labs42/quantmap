@@ -37,6 +37,22 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Statistics Helpers
+# ---------------------------------------------------------------------------
+
+def _winsorize(data: np.ndarray, fraction: float = 0.10) -> np.ndarray:
+    """
+    True Winsorization (Section 7.5 of Design Memo).
+    Clips values at the [fraction, 1-fraction] percentiles.
+    """
+    if data.size == 0:
+        return data
+    lower = np.percentile(data, fraction * 100)
+    upper = np.percentile(data, (1 - fraction) * 100)
+    return np.clip(data, lower, upper)
+
+
+# ---------------------------------------------------------------------------
 # Core analysis function
 # ---------------------------------------------------------------------------
 
@@ -74,15 +90,18 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             params=(campaign_id,),
         )
 
-        # Thermal events per config
+        # Thermal events per config: consider all attempted cycles (Fix 3).
+        # We capture hardware stress even if it caused the cycle to fail/invalidate.
         thermal_df = pd.read_sql_query(
             """
-            SELECT config_id,
+            SELECT t.config_id,
                    COUNT(*) as event_count
-            FROM telemetry
-            WHERE campaign_id = ?
-              AND (power_limit_throttling = 1 OR cpu_temp_c >= 100.0)
-            GROUP BY config_id
+            FROM telemetry t
+            INNER JOIN cycles c ON t.cycle_id = c.id
+            WHERE t.campaign_id = ?
+              AND c.status IN ('complete', 'invalid')
+              AND (t.power_limit_throttling = 1 OR t.cpu_temp_c >= 100.0)
+            GROUP BY t.config_id
             """,
             conn,
             params=(campaign_id,),
@@ -101,12 +120,29 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
         # now loaded in a single GROUP BY query before the loop. (HIGH-3 fix)
         counts_df = pd.read_sql_query(
             """
-            SELECT config_id,
+            SELECT r.config_id,
                    COUNT(*)                                           AS total_attempted,
-                   SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS total_success
-            FROM requests
+                   SUM(CASE WHEN r.outcome = 'success' THEN 1 ELSE 0 END) AS total_success
+            FROM requests r
+            JOIN cycles c ON r.cycle_id = c.id
+            WHERE r.campaign_id = ?
+              AND r.cycle_status = 'complete'
+              AND c.status = 'complete'
+            GROUP BY r.config_id
+            """,
+            conn,
+            params=(campaign_id,),
+        )
+
+        # Cycle counts per config (for cycle_success_rate - Fix 2)
+        cycle_counts_df = pd.read_sql_query(
+            """
+            SELECT config_id,
+                   COUNT(*) AS attempted_cycles,
+                   SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END) AS completed_cycles
+            FROM cycles
             WHERE campaign_id = ?
-              AND cycle_status = 'complete'
+              AND status IN ('complete', 'invalid')
             GROUP BY config_id
             """,
             conn,
@@ -117,6 +153,10 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
     counts_by_config: dict[str, tuple[int, int]] = {
         row.config_id: (int(row.total_attempted), int(row.total_success))
         for _, row in counts_df.iterrows()
+    }
+    cycle_counts_by_config: dict[str, tuple[int, int]] = {
+        row.config_id: (int(row.attempted_cycles), int(row.completed_cycles))
+        for _, row in cycle_counts_df.iterrows()
     }
 
     stats: dict[str, dict[str, Any]] = {}
@@ -136,6 +176,7 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
                 "config_status": status,
                 "failure_detail": failure_detail,
                 "success_rate": None,
+                "cycle_success_rate": 0.0,
             }
             continue
 
@@ -178,14 +219,46 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             total_success / total_attempted if total_attempted > 0 else None
         )
 
-        # Compute outliers (IQR method on warm TG)
-        outlier_count = 0
+        # Cycle success rate (Fix 2)
+        att_cycles, comp_cycles = cycle_counts_by_config.get(config_id, (0, 0))
+        cycle_success_rate = (
+            comp_cycles / att_cycles if att_cycles > 0 else 0.0
+        )
+
+        # Compute outliers (Symmetric IQR method - Phase 3.2)
+        outlier_count_low = 0
+        outlier_count_high = 0
         if len(warm_tg) >= 4:
             q1 = np.percentile(warm_tg, 25)
             q3 = np.percentile(warm_tg, 75)
             iqr = q3 - q1
+            
+            # Significance floor to prevent IQR collapse (HIGH-4)
+            # If the distribution is extremely tight, even minor noise is seen as outliers.
+            iqr_floor = 0.05 * np.abs(np.percentile(warm_tg, 50))
+            iqr = max(iqr, iqr_floor)
+
             lower_fence = q1 - 1.5 * iqr
-            outlier_count = int(np.sum(warm_tg < lower_fence))
+            upper_fence = q3 + 1.5 * iqr
+            outlier_count_low = int(np.sum(warm_tg < lower_fence))
+            outlier_count_high = int(np.sum(warm_tg > upper_fence))
+
+        # Winsorized Stats (Phase 3.2)
+        w_warm_tg = _winsorize(warm_tg, 0.10)
+        w_warm_ttft = _winsorize(warm_ttft, 0.10)
+        w_pp = _winsorize(pp, 0.10)
+
+        # Cycle-level stats (Preferred LCB Method - Phase 3.2)
+        # We aggregate canonical metric estimates per cycle_id for hand-off to score.py
+        cycle_groups = warm_short.groupby("cycle_id")
+        cycle_stats = []
+        for cycle_id, cycle_df in cycle_groups:
+            cycle_stats.append({
+                "cycle_id": int(cycle_id),
+                "warm_tg_median": float(cycle_df["predicted_per_second"].median()) if not cycle_df["predicted_per_second"].empty else None,
+                "warm_ttft_median_ms": float(cycle_df["ttft_ms"].median()) if not cycle_df["ttft_ms"].empty else None,
+                "pp_median": float(cycle_df["prompt_per_second"].median()) if not cycle_df["prompt_per_second"].empty else None,
+            })
 
         # Coefficient of variation (std/mean).
         # Uses ddof=1 (sample std) throughout — warm_tg values are a sample drawn
@@ -222,11 +295,14 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             "warm_tg_mean": float(np.mean(warm_tg)) if len(warm_tg) > 0 else None,
             "warm_tg_std": float(np.std(warm_tg, ddof=1)) if len(warm_tg) >= 2 else None,
             "warm_tg_cv": warm_tg_cv,
+            "warm_tg_winsorized_mean": float(np.mean(w_warm_tg)) if len(w_warm_tg) > 0 else None,
+            "warm_tg_winsorized_std": float(np.std(w_warm_tg, ddof=1)) if len(w_warm_tg) >= 2 else None,
 
             # Warm TTFT stats
             "warm_ttft_median_ms": float(np.median(warm_ttft)) if len(warm_ttft) > 0 else None,
             "warm_ttft_p90_ms": float(np.percentile(warm_ttft, 90)) if len(warm_ttft) > 0 else None,
             "warm_ttft_p10_ms": float(np.percentile(warm_ttft, 10)) if len(warm_ttft) > 0 else None,
+            "warm_ttft_winsorized_mean": float(np.mean(w_warm_ttft)) if len(w_warm_ttft) > 0 else None,
 
             # Cold TTFT stats
             "cold_ttft_median_ms": float(np.median(cold_ttft)) if len(cold_ttft) > 0 else None,
@@ -236,11 +312,15 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             "pp_median": float(np.median(pp)) if len(pp) > 0 else None,
             "pp_p10": float(np.percentile(pp, 10)) if len(pp) > 0 else None,
             "pp_p90": float(np.percentile(pp, 90)) if len(pp) > 0 else None,
+            "pp_winsorized_mean": float(np.mean(w_pp)) if len(w_pp) > 0 else None,
 
             # Reliability
             "thermal_events": thermal_by_config.get(config_id, 0),
-            "outlier_count": outlier_count,
+            "outlier_count": outlier_count_low + outlier_count_high,
+            "outlier_count_low": outlier_count_low,
+            "outlier_count_high": outlier_count_high,
             "success_rate": success_rate,
+            "cycle_success_rate": cycle_success_rate,
             "valid_warm_request_count": valid_warm_count,
             "valid_cold_request_count": valid_cold_count,
             "total_attempted": total_attempted,
@@ -248,6 +328,9 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             # speed_medium
             "speed_medium_warm_tg_median": speed_medium_tg,
             "speed_medium_degradation_pct": speed_medium_degradation_pct,
+
+            # Cycle-level hand-off (Phase 3.2)
+            "cycle_stats": cycle_stats,
         }
 
         logger.info(

@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS telemetry (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id              TEXT NOT NULL,
     config_id                TEXT NOT NULL,
+    cycle_id                 INTEGER,   -- NULL for legacy rows; required for new runs
     timestamp                TEXT NOT NULL,
     -- ABORT tier
     cpu_temp_c               REAL,
@@ -208,6 +209,7 @@ CREATE TABLE IF NOT EXISTS background_snapshots (
     id                            INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id                   TEXT NOT NULL,
     config_id                     TEXT NOT NULL,
+    cycle_id                      INTEGER,   -- NULL for legacy rows; required for new runs
     timestamp                     TEXT NOT NULL,
     top_cpu_procs_json            TEXT NOT NULL DEFAULT '[]',
     top_ram_procs_json            TEXT NOT NULL DEFAULT '[]',
@@ -220,7 +222,10 @@ CREATE TABLE IF NOT EXISTS background_snapshots (
     network_active_connections    INTEGER NOT NULL DEFAULT 0,
     network_established_connections INTEGER NOT NULL DEFAULT 0,
     power_plan                    TEXT DEFAULT '',
-    high_cpu_process_count        INTEGER NOT NULL DEFAULT 0
+    high_cpu_process_count        INTEGER NOT NULL DEFAULT 0,
+    -- Per-process GPU VRAM usage (JSON list of {name, pid, used_vram_mb}).
+    -- NULL = NVML unavailable or query failed at collection time (never faked).
+    gpu_proc_vram_json            TEXT DEFAULT NULL
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -305,7 +310,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 6
+SCHEMA_VERSION: int = 8
 
 
 class SchemaVersionError(RuntimeError):
@@ -393,6 +398,29 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "Required for mode-aware reporting and the future cumulative master report.",
         [
             "ALTER TABLE campaigns ADD COLUMN run_mode TEXT",
+        ],
+    ),
+    (
+        7,
+        "Telemetry visibility: add gpu_proc_vram_json to background_snapshots. "
+        "Stores per-process GPU VRAM usage as a JSON list collected via "
+        "nvmlDeviceGetComputeRunningProcesses(). NULL when NVML is unavailable or "
+        "the query failed (never faked). Enables power-user inspection of which "
+        "processes were consuming VRAM alongside llama-server during a campaign.",
+        [
+            "ALTER TABLE background_snapshots ADD COLUMN gpu_proc_vram_json TEXT DEFAULT NULL",
+        ],
+    ),
+    (
+        8,
+        "Atomic cycle recovery system: add cycle_id to telemetry and "
+        "background_snapshots.  Enables strictly cycle-scoped cleanup during "
+        "resumed runs (DELETE BY cycle_id) and protects truth in analysis by "
+        "permitting INNER JOINs to only complete cycles. Legacy data defaults to "
+        "NULL and is naturally excluded from the new verified-cycle joins.",
+        [
+            "ALTER TABLE telemetry ADD COLUMN cycle_id INTEGER DEFAULT NULL",
+            "ALTER TABLE background_snapshots ADD COLUMN cycle_id INTEGER DEFAULT NULL",
         ],
     ),
 ]
@@ -572,3 +600,16 @@ def write_raw_jsonl(jsonl_path: Path, record: dict) -> None:
     import json
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+
+
+def write_jsonl_marker(jsonl_path: Path, marker_type: str, details: dict[str, Any]) -> None:
+    """
+    Append a metadata marker to a JSONL file.
+    Preserves forensic history by avoiding rewrites while providing clear boundaries.
+    """
+    marker = {
+        "meta": marker_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **details,
+    }
+    write_raw_jsonl(jsonl_path, marker)

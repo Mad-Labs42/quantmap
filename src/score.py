@@ -22,9 +22,9 @@ SCORING (Option A — min-max normalization, MDD §12.2 + fix):
     Weights:
         warm_tg_median      0.35    Primary metric
         warm_tg_p10         0.20    Worst-case floor
-        warm_ttft_median    0.20    Typical responsiveness (inverted)
-        warm_ttft_p90       0.10    Worst-case responsiveness (inverted)
-        cold_ttft_median    0.10    First impression (inverted)
+        warm_ttft_median_ms 0.20    Typical responsiveness (inverted)
+        warm_ttft_p90_ms    0.10    Worst-case responsiveness (inverted)
+        cold_ttft_median_ms 0.10    First impression (inverted)
         pp_median           0.05    Prompt throughput
 
     NOTE: The original MDD formula mixed raw t/s values with pp_median (~100 t/s),
@@ -46,7 +46,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -56,34 +56,44 @@ import yaml
 
 from src.db import get_connection
 from src.analyze import analyze_campaign
+from src import governance
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Elimination filter thresholds — LOCKED before any data is seen
+# Elimination filter thresholds — Governed by the Experiment Profile
 # ---------------------------------------------------------------------------
-ELIMINATION_FILTERS: dict[str, float] = {
-    "max_cv":                   0.05,
-    "max_thermal_events":       0,
-    "max_outliers":             3,       # raised from 2: 3/25 = 12% of warm samples is acceptable
-    "max_warm_ttft_p90_ms":     500.0,
-    "min_success_rate":         0.90,    # lowered from 1.0: allows ~3 transient failures per 30 requests
-    "min_warm_tg_p10":          7.0,
-    "min_valid_warm_count":     3,       # Lowered to 3 to act as an absolute floor for statistical functions (e.g. IQR). min_success_rate handles relative pass/fail.
-}
+ELIMINATION_FILTERS: dict[str, float] = governance.get_legacy_elimination_filters()
 
-# Scoring weights — sum to 1.0
-SCORE_WEIGHTS: dict[str, float] = {
-    "warm_tg_median":    0.35,
-    "warm_tg_p10":       0.20,
-    "warm_ttft_median":  0.20,   # inverted before normalization
-    "warm_ttft_p90":     0.10,   # inverted before normalization
-    "cold_ttft_median":  0.10,   # inverted before normalization
-    "pp_median":         0.05,
-}
+# Scoring weights — Governed by the Experiment Profile
+SCORE_WEIGHTS: dict[str, float] = governance.get_legacy_score_weights()
+
+# Dimension Audit Safeguards (Phase 2 Refinements)
+DIMENSION_FAILURE_MIN_CONFIGS = 3    # Only collapse if at least this many configs were tested
+DIMENSION_WARNING_THRESHOLD   = 0.5  # Warn if > 50% NaN but not collapsed
 
 # speed_medium degradation flag threshold
 SPEED_MEDIUM_DEGRADATION_THRESHOLD = 5.0  # percent
+
+_METHODOLOGY_HEADER = """
+================================================================================
+QuantMap Governance Methodology v1.0 (Stable)
+Absolute-Reference Normalization Active
+================================================================================
+"""
+
+
+def rank_overall(passing_dict: dict[str, dict[str, Any]]) -> pd.DataFrame:
+    """
+    Convenience wrapper for compute_scores used primarily by determinism tests.
+    Takes a dict of config stats and returns the ranked DataFrame.
+    """
+    scores_df, _, _, _ = compute_scores(
+        passing_dict, {}, passing_dict,
+        governance.DEFAULT_PROFILE,
+        governance.BUILTIN_REGISTRY,
+    )
+    return scores_df
 
 
 # ---------------------------------------------------------------------------
@@ -138,12 +148,13 @@ def apply_elimination_filters(
 def _check_filters(config_id: str, s: dict[str, Any], f: dict[str, float]) -> str | None:
     """Return elimination reason string, or None if the config passes all filters."""
 
-    # Fatal startup errors (OOMs, crashes)
+    # Fatal startup errors (OOMs, crashes) or instrumentation degradation (Severity B)
     status = s.get("config_status")
-    if status in ("oom", "skipped_oom", "failed"):
-        detail = s.get("failure_detail")
+    if status in ("oom", "skipped_oom", "failed", "degraded"):
+        detail = s.get("failure_detail") or s.get("elimination_reason")
         short_detail = str(detail).split('\n')[0][:60] if detail else "unknown"
-        return f"fatal_error: {status} ({short_detail})"
+        category = "fatal_error" if status != "degraded" else "instrumentation_degraded"
+        return f"{category}: {status} ({short_detail})"
 
     # Insufficient data — cannot score
     valid_warm = s.get("valid_warm_request_count", 0)
@@ -203,24 +214,16 @@ def _check_filters(config_id: str, s: dict[str, Any], f: dict[str, float]) -> st
 
 # Metrics whose absence on a passing config indicates a data integrity defect.
 # These values must exist if min_valid_warm_count was satisfied.
-_PRIMARY_SCORE_METRICS: frozenset[str] = frozenset({
-    "warm_tg_median",
-    "warm_tg_p10",
-})
+_PRIMARY_SCORE_METRICS: frozenset[str] = governance.get_legacy_primary_score_metrics()
 
-# Metrics that may legitimately be absent in edge cases (e.g. all cold requests
-# failed, or no prompt_per_second was returned). Absence makes the config
-# unrankable but not eliminated — it passed all quality filters.
-_SECONDARY_SCORE_METRICS: tuple[str, ...] = (
-    "warm_ttft_median_ms",
-    "warm_ttft_p90_ms",
-    "cold_ttft_median_ms",
-    "pp_median",
-)
+# Metrics that may legitimately be absent in edge cases.
+# Absence makes the config unrankable but not eliminated.
+_SECONDARY_SCORE_METRICS: tuple[str, ...] = governance.get_legacy_secondary_score_metrics()
 
 
 def _split_by_rankability(
     passing: dict[str, dict[str, Any]],
+    registry: governance.MetricRegistry,
 ) -> tuple[
     dict[str, dict[str, Any]],   # rankable: all scoring metrics present
     dict[str, str],              # integrity_failures: primary metric(s) missing
@@ -255,10 +258,13 @@ def _split_by_rankability(
     integrity_failures:  dict[str, str]            = {}
     unrankable:          dict[str, list[str]]       = {}
 
+    primary_metrics = registry.get_required_score_metrics()
+    secondary_metrics = registry.get_optional_score_metrics()
+
     for config_id, s in passing.items():
         # --- Primary (TG) metrics: absence = data integrity failure ----------
         missing_primary = [
-            key for key in _PRIMARY_SCORE_METRICS
+            key for key in primary_metrics
             if s.get(key) is None
         ]
         if missing_primary:
@@ -270,7 +276,7 @@ def _split_by_rankability(
 
         # --- Secondary metrics: absence = unrankable (not eliminated) ---------
         missing_secondary = [
-            key for key in _SECONDARY_SCORE_METRICS
+            key for key in secondary_metrics
             if s.get(key) is None
         ]
         if missing_secondary:
@@ -283,137 +289,359 @@ def _split_by_rankability(
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.2: Statistical Hardening Utilities
+# ---------------------------------------------------------------------------
+
+def _apply_utility_transform(
+    value: float | None,
+    metric_name: str,
+    rankable_stats: dict[str, dict[str, Any]],
+    registry: governance.MetricRegistry,
+    provided_reference: float | None = None,
+) -> float:
+    """
+    Apply the Registry-governed transform to map raw metrics into [0, 1] utility space.
+    """
+    if value is None or np.isnan(value):
+        return 0.0
+
+    mdef = registry.get(metric_name)
+    transform = mdef.default_transform
+    params = mdef.transform_params or {}
+    direction = mdef.objective_direction  # maximize | minimize
+
+    if transform == governance.TransformFamily.raw:
+        return float(value)
+
+    if transform == governance.TransformFamily.reference_based:
+        # Phase 3.3: Tiered Reference Lookup
+        # 1. Use provided_reference (Registry or Baseline YAML)
+        # 2. Fall back to best-in-batch (Cohort-Relative)
+        anchor = provided_reference
+        if anchor is None:
+            all_vals = [s.get(metric_name) for s in rankable_stats.values() if s.get(metric_name) is not None]
+            if not all_vals:
+                return 0.0
+            anchor = max(all_vals) if direction == governance.ObjectiveDirection.maximize else min(all_vals)
+
+        if direction == governance.ObjectiveDirection.maximize:
+            return float(value / anchor) if anchor > 0 else 0.0
+        else:
+            return float(anchor / value) if value > 0 else 0.0
+
+    if transform == governance.TransformFamily.threshold_utility:
+        threshold = params.get("threshold", 500.0)
+        if direction == governance.ObjectiveDirection.minimize:
+            return 1.0 if value <= threshold else 0.0
+        else:
+            return 1.0 if value >= threshold else 0.0
+
+    if transform == governance.TransformFamily.saturating_utility:
+        # Piecewise linear implementation (Phase 3.2 Locked Decision)
+        if params.get("curve_type") == "piecewise_linear":
+            x_sat = params.get("x_saturated", 100.0 if "cold" in metric_name else 50.0)
+            x_zero = params.get("x_zero", 2500.0 if "cold" in metric_name else 500.0)
+            
+            if direction == governance.ObjectiveDirection.minimize:
+                if value <= x_sat: return 1.0
+                if value >= x_zero: return 0.0
+                return float(1.0 - (value - x_sat) / (x_zero - x_sat))
+            else:
+                if value >= x_sat: return 1.0
+                if value <= x_zero: return 0.0
+                return float((value - x_zero) / (x_sat - x_zero))
+
+    # Warning: No specific transform matched. 
+    # Must NOT return raw value as it corrupts composite scores.
+    logger.warning("No utility transform matched for %s (type: %s). Defaulting to 1.0 (optimistic)", metric_name, transform)
+    return 1.0
+
+
+def _compute_config_lcb(
+    config_id: str,
+    full_stats: dict[str, dict[str, Any]],
+    rankable_stats: dict[str, dict[str, Any]],
+    profile: governance.ExperimentProfile,
+    registry: governance.MetricRegistry,
+    provided_references: dict[str, float],
+) -> tuple[float, float, str]:
+    """
+    Compute LCB composite score using either the Preferred (Cycle-Level)
+    or Fallback (Metric-SE) method.
+    
+    Returns: (lcb_score, composite_se, method_label)
+    """
+    s = full_stats[config_id]
+    cycles = s.get("cycle_stats", [])
+    k = 1.0 if profile.confidence_policy == governance.ConfidencePolicy.lcb_k1 else 2.0
+    weights = profile.weights
+
+    # --- Preferred Method: Cycle-Level Empirical Distribution ---
+    if cycles and len(cycles) >= 2:
+        cycle_composites = []
+        for cyc in cycles:
+            comp = 0.0
+            for m_name, w in weights.items():
+                val = cyc.get(m_name)
+                # Preferred method (cycle-level empirical) iterates over providing_references correctly
+                u = _apply_utility_transform(val, m_name, rankable_stats, registry, provided_references.get(m_name))
+                comp += u * w
+            cycle_composites.append(comp)
+        
+        mean_comp = np.mean(cycle_composites)
+        se_comp = np.std(cycle_composites, ddof=1) / np.sqrt(len(cycle_composites))
+        lcb = mean_comp - k * se_comp
+        return float(lcb), float(se_comp), "preferred (cycle-level empirical)"
+
+    # --- Fallback Method: Per-Metric SE Aggregation ---
+    # SE_comp = sqrt( sum( (w_i * SE_i)^2 ) )
+    var_sum = 0.0
+    point_est_comp = 0.0
+    for m_name, w in weights.items():
+        # Point estimate (Winsorized Mean for 3.2 rank-bearing metrics)
+        val = s.get(f"{m_name}_winsorized_mean") or s.get(m_name)
+        ref_val = provided_references.get(m_name)
+        u = _apply_utility_transform(val, m_name, rankable_stats, registry, ref_val)
+        point_est_comp += u * w
+        
+        # Standard Error of the metric
+        # We need the std of the estimator. For mean, SE = std / sqrt(N)
+        std_val = s.get(f"{m_name}_winsorized_std") or s.get(f"{m_name.replace('_median', '_std')}") or 0.0
+        # Wait, if it's a p10, SE is complex. Fallback uses mean SE as proxy.
+        n = s.get("valid_warm_request_count", 1)
+        se_m = std_val / np.sqrt(n) if n > 0 else 0.0
+        
+        # Uncertainty (SE) propagation — Phase 3.2 Refinement
+        # Scale raw SE by the transform sensitivity to get utility SE.
+        mdef = registry.get(m_name)
+        if mdef.default_transform == governance.TransformFamily.reference_based:
+            # Anchor lookup must match point-estimate anchor for internal consistency
+            anchor = ref_val
+            if anchor is None:
+                all_vals = [st.get(m_name) for st in rankable_stats.values() if st.get(m_name) is not None]
+                anchor = max(all_vals) if mdef.objective_direction == governance.ObjectiveDirection.maximize else min(all_vals)
+            
+            u_se = se_m / anchor if anchor and anchor > 0 else 0.0
+        elif mdef.default_transform == governance.TransformFamily.saturating_utility:
+            params = mdef.transform_params or {}
+            x_sat = params.get("x_saturated", 100.0 if "cold" in m_name else 50.0)
+            x_zero = params.get("x_zero", 2500.0 if "cold" in m_name else 500.0)
+            u_se = se_m / abs(x_zero - x_sat) if x_zero != x_sat else 0.0
+        else:
+            u_se = 0.0
+            
+        var_sum += (w * u_se) ** 2
+        
+    se_comp = np.sqrt(var_sum)
+    lcb = point_est_comp - k * se_comp
+    logger.debug("LCB Result for %s: point=%f, se=%f, lcb=%f", config_id, point_est_comp, se_comp, lcb)
+    return float(lcb), float(se_comp), "fallback (per-metric aggregation)"
+
+
+# ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
 def compute_scores(
-    passing: dict[str, dict[str, Any]],
+    rankable_stats:    dict[str, dict[str, Any]],
+    unrankable_id_map: dict[str, list[str]],
+    full_stats:         dict[str, dict[str, Any]],
+    profile:           governance.ExperimentProfile,
+    registry:          governance.MetricRegistry,
+    provided_references: dict[str, float],
 ) -> pd.DataFrame:
     """
-    Compute composite scores for passing configs using min-max normalization.
+    Compute composite scores for rankable configs and identify performance
+    leaders across the full evidence set (rankable + unrankable).
 
-    Each metric is scaled to [0,1] range across the passing candidate set.
-    For latency metrics (TTFT), values are negated (-1.0 * ms) before
-    normalization so that lower latency maps to a higher (less negative) value
-    and therefore a higher normalized score.
+    - Recommendation Set: rankable_stats. Config IDs that passed all gates.
+      Receives composite_score and rank_overall.
+    - Evidence Set: rankable + configs in unrankable_id_map.
+      Used to compute absolute Highest TG and Pareto non-dominance.
 
-    If only one config passes, it receives score=1.0 on all metrics.
-
-    Returns a DataFrame with one row per passing config, sorted by composite score.
+    Returns:
+        tuple[pd.DataFrame, list[str], list[str], list[str]]:
+            - final_df containing all rankable + unrankable configs
+            - collapsed_dimensions: list of metrics with 100% NaN (meeting min_configs)
+            - high_nan_warnings: list of metrics exceeding DIMENSION_WARNING_THRESHOLD
+            - nan_invalid_ids: configs excluded due to NaNs in surviving dimensions
     """
-    if not passing:
-        return pd.DataFrame()
-
-    rows = []
-    for config_id, s in passing.items():
-        # All six metrics are guaranteed non-None by _split_by_rankability().
-        # Accessing via .get() with no default — if None reaches here, it is a
-        # caller bug and the resulting NaN will propagate visibly rather than
-        # silently corrupting the composite rank.
-        rows.append({
+    # 1. Build rankable dataframe for recommendation metrics
+    rankable_rows = []
+    for config_id, s in rankable_stats.items():
+        rankable_rows.append({
             "config_id":        config_id,
             "warm_tg_median":   s.get("warm_tg_median"),
             "warm_tg_p10":      s.get("warm_tg_p10"),
-            "warm_ttft_median": s.get("warm_ttft_median_ms"),
-            "warm_ttft_p90":    s.get("warm_ttft_p90_ms"),
-            "cold_ttft_median": s.get("cold_ttft_median_ms"),
+            "warm_ttft_median_ms": s.get("warm_ttft_median_ms"),
+            "warm_ttft_p90_ms":    s.get("warm_ttft_p90_ms"),
+            "cold_ttft_median_ms": s.get("cold_ttft_median_ms"),
             "pp_median":        s.get("pp_median"),
         })
 
-    df = pd.DataFrame(rows).set_index("config_id")
+    if not rankable_rows:
+        df_rankable = pd.DataFrame(columns=["config_id"])
+    else:
+        df_rankable = pd.DataFrame(rankable_rows).set_index("config_id")
 
-    # Invert latency metrics linearly: -1 * latency so higher is better
-    for col in ("warm_ttft_median", "warm_ttft_p90", "cold_ttft_median"):
-        df[col] = -1.0 * df[col]
+    # --- Phase 2: Pre-solver Dimension Audit ---
+    # Identify dimensions where EVERY config is NaN (Sensor Collapse)
+    surviving_dimensions = []
+    collapsed_dimensions = []
+    high_nan_warnings = []
+    total_configs = len(df_rankable)
 
-    # Min-max normalize each metric to [0, 1]
-    # If all values are identical, all configs get 1.0 (tied on this metric)
-    score_series = pd.Series(0.0, index=df.index)
-    normalized_cols: dict[str, pd.Series] = {}
-
-    for metric, weight in SCORE_WEIGHTS.items():
-        col = df[metric]
+    for metric in SCORE_WEIGHTS.keys():
+        if metric not in df_rankable.columns: continue
+        nan_count = df_rankable[metric].isnull().sum()
         
-        # Robust scaling: Use IQR to prevent extreme outliers from compressing the field
-        q1 = col.quantile(0.25)
-        q3 = col.quantile(0.75)
-        iqr = q3 - q1
-
-        if iqr > 0:
-            scale_min = max(col.min(), q1 - 1.5 * iqr)
-            scale_max = min(col.max(), q3 + 1.5 * iqr)
+        # Collapse rule: 100% NaN AND reaching minimum config sample size
+        if nan_count == total_configs and total_configs >= DIMENSION_FAILURE_MIN_CONFIGS:
+            collapsed_dimensions.append(metric)
+            logger.warning("SENSOR COLLAPSE: Dimension '%s' is 100%% NaN. Excluded from scoring.", metric)
         else:
-            scale_min = col.min()
-            scale_max = col.max()
+            surviving_dimensions.append(metric)
+            # Warning rule: High NaN rate but not collapsed
+            if total_configs > 0 and (nan_count / total_configs) >= DIMENSION_WARNING_THRESHOLD:
+                high_nan_warnings.append(metric)
+                logger.info("DIMENSION WARNING: Metric '%s' has high NaN rate (%.1f%%)",
+                            metric, (nan_count / total_configs) * 100.0)
+
+    # Hard NaN Guard: Exclude configs that have NaNs in any SURVIVING dimension.
+    # These configs are truth-invalidated for composite comparison.
+    is_nan_invalid = df_rankable[surviving_dimensions].isnull().any(axis=1)
+    nan_invalid_ids = df_rankable.index[is_nan_invalid].tolist()
+    if nan_invalid_ids:
+        logger.warning(
+            "COMPOSITE EXCLUSION: %d configs excluded from ranking due to NaNs in surviving dimensions: %s",
+            len(nan_invalid_ids), nan_invalid_ids
+        )
+
+    # The clean set for scoring and Pareto
+    df_clean = df_rankable[~is_nan_invalid].copy()
             
-        if scale_max <= scale_min:
-            scale_min = col.min()
-            scale_max = col.max()
+    if not df_clean.empty:
+        # Phase 3.2 Confidence-Aware Scoring (LCB)
+        lcb_series = pd.Series(0.0, index=df_clean.index)
+        se_series = pd.Series(0.0, index=df_clean.index)
+        method_series = pd.Series("", index=df_clean.index)
+        
+        for cid in df_clean.index:
+            lcb, se, method = _compute_config_lcb(cid, full_stats, rankable_stats, profile, registry, provided_references)
+            lcb_series[cid] = lcb
+            se_series[cid] = se
+            method_series[cid] = method
+            
+        df_clean["composite_score"] = lcb_series
+        df_clean["composite_se"] = se_series
+        df_clean["lcb_method"] = method_series
+        df_clean = df_clean.sort_values(["composite_score", "config_id"], ascending=[False, True])
+        df_clean["rank_overall"] = range(1, len(df_clean) + 1)
+        df_clean["is_score_winner"] = False
+        df_clean.at[df_clean.index[0], "is_score_winner"] = True
+    else:
+        # If no clean configs, we still need column structure for reindex
+        df_clean["composite_score"] = pd.Series(dtype=float)
+        df_clean["rank_overall"] = pd.Series(dtype=float)
+        df_clean["is_score_winner"] = pd.Series(dtype=bool)
 
-        if scale_max == scale_min:
-            # All configs identical on this metric — each gets full weight
-            normalized = pd.Series(1.0, index=df.index)
+    # 3. EVIDENCE SET: rankable + unrankable
+    evidence_ids = list(rankable_stats.keys()) + list(unrankable_id_map.keys())
+    df_evidence = pd.DataFrame(index=evidence_ids, columns=["is_highest_tg", "pareto_dominated"])
+    df_evidence["is_highest_tg"] = False
+    df_evidence["pareto_dominated"] = False
+
+    if evidence_ids:
+        # Build evidence dataframe for absolute leaders
+        evidence_rows = []
+        for cid in evidence_ids:
+            s = full_stats[cid]
+            evidence_rows.append({
+                "config_id": cid,
+                "warm_tg_median": s["warm_tg_median"],
+                "warm_ttft_median_ms": s["warm_ttft_median_ms"],
+            })
+        df_evidence_inner = pd.DataFrame(evidence_rows).set_index("config_id")
+        df_evidence.update(df_evidence_inner)
+
+        # Phase 2: Pareto NaN Exclusion (Truthfulness Gate)
+        # Any config with NaN in TG or TTFT median is excluded from the Pareto set entirely.
+        # It is neither dominator nor dominated; it is mathematically invisible to ranking.
+        valid_pareto_mask = df_evidence_inner["warm_tg_median"].notnull() & df_evidence_inner["warm_ttft_median_ms"].notnull()
+        df_valid_pareto = df_evidence_inner[valid_pareto_mask]
+
+        if not df_valid_pareto.empty:
+            # Highest raw TG (among valid configs)
+            tg_sorted = df_valid_pareto.sort_values(["warm_tg_median", "config_id"], ascending=[False, True])
+            df_evidence.at[tg_sorted.index[0], "is_highest_tg"] = True
+
+            # Pareto frontier calculation over the valid subset
+            tg_vals   = df_valid_pareto["warm_tg_median"]
+            ttft_vals = df_valid_pareto["warm_ttft_median_ms"]
+            
+            for cid in df_valid_pareto.index:
+                tg = tg_vals[cid]
+                ttft = ttft_vals[cid]
+                
+                dominated = False
+                for other in df_valid_pareto.index:
+                    if other == cid:
+                        continue
+                    
+                    otg = tg_vals[other]
+                    ottft = ttft_vals[other]
+                    
+                    # Hard NaN guards in dominance logic (Phase 2)
+                    if not (np.isfinite(otg) and np.isfinite(ottft) and np.isfinite(tg) and np.isfinite(ttft)):
+                        continue
+
+                    # Hybrid tolerance checks
+                    is_tg_near = np.isclose(otg, tg, atol=1e-9, rtol=1e-4)
+                    is_ttft_near = np.isclose(ottft, ttft, atol=1e-9, rtol=1e-4)
+                    
+                    be_tg = (otg >= tg) or is_tg_near
+                    be_ttft = (ottft <= ttft) or is_ttft_near
+                    sb_tg = (otg > tg) and not is_tg_near
+                    sb_ttft = (ottft < ttft) and not is_ttft_near
+                    
+                    if be_tg and be_ttft and (sb_tg or sb_ttft):
+                        dominated = True
+                        break
+                        
+                df_evidence.at[cid, "pareto_dominated"] = dominated
         else:
-            # Clip limits normalization exactly between [0, 1] for out-of-bounds outliers
-            normalized = ((col - scale_min) / (scale_max - scale_min)).clip(0.0, 1.0)
+            logger.warning("Truthfulness Leak: No configs have finite TG/TTFT metrics for Pareto calculation.")
 
-        normalized_cols[metric] = normalized
-        score_series += normalized * weight
+    # 4. UNIFY results into a single DataFrame for the reporter
+    # rankable clean configs have scores/ranks; others (unrankable/NaN-invalid) have NaNs.
+    final_df = df_clean.reindex(evidence_ids)
+    final_df["is_highest_tg"]    = df_evidence["is_highest_tg"]
+    final_df["pareto_dominated"] = df_evidence["pareto_dominated"]
+    # Re-fill is_score_winner for unrankables as False
+    final_df["is_score_winner"]  = final_df["is_score_winner"].fillna(False).astype(bool)
+    
+    # Add back warm metrics into final_df for those that were unrankable and thus NaN'd by reindex
+    for cid in unrankable_id_map:
+        final_df.at[cid, "warm_tg_median"] = full_stats[cid]["warm_tg_median"]
+        final_df.at[cid, "warm_ttft_median_ms"] = full_stats[cid]["warm_ttft_median_ms"]
 
-    df["composite_score"] = score_series
-    df = df.sort_values(["composite_score", "config_id"], ascending=[False, True])
-    df["rank_overall"] = range(1, len(df) + 1)
-
-    # Mark report views
-    df["is_score_winner"] = False
-    df["is_highest_tg"] = False
-    df["pareto_dominated"] = False
-
-    if len(df) > 0:
-        df.at[df.index[0], "is_score_winner"] = True
-
-        # Highest raw TG (may differ from score winner)
-        # Explicit tie-breaker: sort by warm_tg_median descending, config_id ascending
-        tg_sorted = df.sort_values(["warm_tg_median", "config_id"], ascending=[False, True])
-        highest_tg_idx = tg_sorted.index[0]
-        df.at[highest_tg_idx, "is_highest_tg"] = True
-
-        # Pareto frontier: not dominated on BOTH warm_tg_median AND warm_ttft
-        # A config is Pareto-dominated if another config is better on BOTH metrics.
-        # We restore original warm_ttft for Pareto calculation.
-        for metric, weight in SCORE_WEIGHTS.items():
-            pass  # already done above
-
-        # Pareto frontier: read directly from the scored DataFrame.
-        # All configs in df passed _split_by_rankability(), so warm_tg_median
-        # and warm_ttft_median are guaranteed non-None — no coercion needed.
-        # Using the pre-inversion column values directly from `passing` is no
-        # longer necessary; df still holds the original (pre-inversion) values
-        # because we only mutate the column in place below for TTFT metrics.
-        # Use the original stats from `passing` for clarity and correctness.
-        tg_vals   = pd.Series({cid: passing[cid]["warm_tg_median"]   for cid in df.index})
-        ttft_vals = pd.Series({cid: passing[cid]["warm_ttft_median_ms"] for cid in df.index})
-
-        for config_id in df.index:
-            tg   = tg_vals[config_id]
-            ttft = ttft_vals[config_id]
-            # Dominated if any other config is strictly better on BOTH metrics.
-            dominated = any(
-                tg_vals[other] > tg and ttft_vals[other] < ttft
-                for other in df.index
-                if other != config_id
-            )
-            df.at[config_id, "pareto_dominated"] = dominated
-
-    logger.info(
-        "Scoring complete. Winner: %s (score=%.4f). Highest TG: %s. Pareto non-dominated: %d",
-        df.index[0] if len(df) > 0 else "none",
-        df["composite_score"].iloc[0] if len(df) > 0 else 0,
-        df[df["is_highest_tg"]].index[0] if df["is_highest_tg"].any() else "none",
-        int((~df["pareto_dominated"]).sum()),
+    # Final sort to ensure deterministic row order in the report/database
+    # Rankable configs first (by rank), ties or unrankables by config_id
+    final_df = final_df.sort_values(
+        ["rank_overall", "config_id"], 
+        ascending=[True, True], 
+        na_position="last"
     )
 
-    return df
+    logger.info(
+        "Scoring complete. Evidence set: %d config(s). Winner: %s. Highest TG: %s. Pareto non-dominated: %d",
+        len(evidence_ids),
+        final_df.index[0] if not final_df.empty else "none",
+        final_df[final_df["is_highest_tg"]].index[0] if not final_df.empty and final_df["is_highest_tg"].any() else "none",
+        int((~final_df["pareto_dominated"]).sum()) if not final_df.empty else 0,
+    )
+
+    return final_df, collapsed_dimensions, high_nan_warnings, nan_invalid_ids
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +677,10 @@ def score_campaign(
     campaign_id: str,
     db_path: Path,
     baseline: dict[str, Any],
+    campaign: dict[str, Any] | None = None,
     filter_overrides: dict[str, float] | None = None,
+    profile_name: str | None = None,
+    force_new_anchors: bool = False,
 ) -> dict[str, Any]:
     """
     Run the full analysis + scoring pipeline for a completed campaign.
@@ -483,29 +714,117 @@ def score_campaign(
         pareto_frontier    — list of config_ids on Pareto frontier
         effective_filters  — the actual filter thresholds applied (for report audit)
     """
+    # Phase 3.2: Governance loading
+    registry = governance.BUILTIN_REGISTRY
+    profile = governance.DEFAULT_PROFILE
+    if profile_name:
+        profile = governance.load_profile(profile_name)
+        governance.validate_profile_against_registry(profile, registry)
+        
+    print(_METHODOLOGY_HEADER)
+    logger.info("Governance: %s v%s", profile.name, profile.version)
+
     # Build effective filter thresholds — defaults merged with any campaign overrides
-    effective_filters: dict[str, float] = {**ELIMINATION_FILTERS, **(filter_overrides or {})}
+    # Note: Phase 3.2 uses profile-defined gates
+    effective_filters: dict[str, float] = {**profile.gate_overrides, **(filter_overrides or {})}
     if filter_overrides:
         logger.info(
             "Campaign elimination overrides applied for %s: %s",
             campaign_id, filter_overrides,
         )
 
-    # Get reference values for baseline comparison.
-    # If baseline.yaml has no reference: block, both fall back to None so
-    # downstream code can detect missing reference and skip pct computation.
-    ref = baseline.get("reference", {})
-    ref_warm_tg   = ref.get("warm_tg_median_ts")   # None = not configured
-    ref_warm_ttft = ref.get("warm_ttft_median_ms")  # None = not configured
-    if ref_warm_tg is None or ref_warm_ttft is None:
-        logger.warning(
-            "baseline.yaml has no reference: block (or missing warm_tg_median_ts / "
-            "warm_ttft_median_ms). Baseline-relative improvement percentages will be "
-            "omitted from the scores table and report."
-        )
+    # --- Methodology Governance (Anchor Stability & Migration) -----------
+    # 1. Check for existing snapshot in DB
+    existing_methodology = _load_methodology_snapshot(campaign_id, db_path)
+    
+    # 2. Decide whether to use existing anchors or build new ones
+    use_existing = (existing_methodology is not None and not force_new_anchors)
+    
+    provided_references: dict[str, float] = {}
+    ref_snapshot: dict[str, dict[str, Any]] = {}
+
+    if use_existing:
+        logger.info("Governance: Preserving original methodology anchors (v%s)", existing_methodology.get("version", "unknown"))
+        refs = existing_methodology.get("references", {})
+        for m_name, ref in refs.items():
+            val = ref.get("value")
+            if val is not None:
+                provided_references[m_name] = val
+            ref_snapshot[m_name] = ref
+    else:
+        if existing_methodology and force_new_anchors:
+            logger.warning("METHODOLOGY MIGRATION: Force-updating references for %s to current Registry/Baseline", campaign_id)
+            
+        # Build the tier-1 references (Registry > Baseline YAML > Fallback)
+        # 1. Registry Tier (authoritative)
+        # 2. Baseline YAML Tier (controlled override)
+        baseline_ref = baseline.get("reference", {})
+        
+        # Map from metrics.yaml names to internal baseline keys
+        key_map = {
+            "warm_tg_median": "warm_tg_median_ts",
+            "warm_ttft_median_ms": "warm_ttft_median_ms"
+        }
+        
+        for m_name in profile.weights.keys():
+            mdef = registry.get(m_name)
+            ref_val = None
+            source = "best-in-batch"
+            provenance = "cohort-relative"
+            
+            # Priority 1: Registry
+            if mdef.fixed_reference_value is not None:
+                ref_val = mdef.fixed_reference_value
+                source = "registry"
+                provenance = mdef.reference_provenance or "registry:generation_1"
+                
+            # Priority 2: Baseline YAML Override
+            yaml_key = key_map.get(m_name)
+            if yaml_key and baseline_ref.get(yaml_key) is not None:
+                ref_val = baseline_ref[yaml_key]
+                # If we're overriding the registry, make it loud.
+                if source == "registry":
+                    logger.warning("METHODOLOGY OVERRIDE: Baseline YAML superseding Registry for %s", m_name)
+                source = "baseline_yaml"
+                provenance = f"override:{baseline.get('name', 'unknown')}"
+                
+            # If no fixed reference found, we record the fallback
+            if ref_val is not None:
+                provided_references[m_name] = ref_val
+                
+            ref_snapshot[m_name] = {
+                "value": ref_val,
+                "source": source,
+                "provenance": provenance
+            }
+
+        # Persist the Methodology Snapshot to DB (namespaced)
+        _persist_methodology_snapshot(campaign_id, ref_snapshot, db_path)
+    
+    # Legacy ref vars for report logic (kept for backward compatibility with return dict/display)
+    ref_warm_tg = provided_references.get("warm_tg_median")
+    ref_warm_ttft = provided_references.get("warm_ttft_median_ms")
 
     # Compute stats
     stats = analyze_campaign(campaign_id, db_path)
+
+    # Identify abandoned configs (in DB but not in current YAML)
+    # Rule: configs in DB that are missing from the YAML's generated IDs.
+    active_ids: set[str] = set()
+    abandoned_ids: set[str] = set()
+    if campaign:
+        try:
+            from src.runner import build_config_list  # noqa: PLC0415
+            active_configs = build_config_list(baseline, campaign)
+            active_ids = {c["config_id"] for c in active_configs}
+            abandoned_ids = set(stats.keys()) - active_ids
+            if abandoned_ids:
+                logger.info(
+                    "Identified %d abandoned configs (in DB but missing from current YAML)",
+                    len(abandoned_ids)
+                )
+        except Exception as exc:
+            logger.warning("Could not identify abandoned configs: %s", exc)
 
     # Compute speed_medium flags (before elimination — flagged passing configs get noted)
     speed_medium_flags = check_speed_medium_flags(stats)
@@ -522,7 +841,7 @@ def score_campaign(
     # Composite scores are only valid when every config in the comparison set
     # is scored on the same metric basis.  Missing data must not enter scoring
     # space as a fabricated value.
-    rankable, integrity_failures, unrankable = _split_by_rankability(passing)
+    rankable, integrity_failures, unrankable = _split_by_rankability(passing, registry)
 
     # Integrity failures are treated as eliminations with a distinct reason.
     for config_id, reason in integrity_failures.items():
@@ -532,19 +851,28 @@ def score_campaign(
             config_id, reason,
         )
 
-    # Narrow `passing` to only rankable configs.
+    # Narrow `passing` to only rankable configs for legacy compatibility in return dict.
     # Unrankable configs are tracked in `unrankable`; they are NOT in `passing`
     # because they cannot receive a composite score or participate in ranking.
     passing = rankable
 
-    # Score only the rankable configs
-    scores_df = compute_scores(passing)
+    # Score only the rankable configs, but compute evidence flags over evidence set
+    scores_df, collapsed_dims, high_nan_warns, nan_invalid_ids = compute_scores(
+        rankable, 
+        unrankable, 
+        stats,
+        profile,
+        registry,
+        provided_references,
+    )
 
     # Compute baseline-relative improvement for each rankable config.
     # Skipped entirely when reference values are absent — do not fabricate
     # percentages against a default that may belong to a different model.
     if not scores_df.empty and ref_warm_tg is not None and ref_warm_ttft is not None:
         for config_id in scores_df.index:
+            if config_id not in passing:
+                continue
             s = passing[config_id]
             tg   = s.get("warm_tg_median")      # guaranteed non-None (rankable)
             ttft = s.get("warm_ttft_median_ms")  # guaranteed non-None (rankable)
@@ -573,20 +901,96 @@ def score_campaign(
     )
 
     result = {
+        "campaign_id":        campaign_id,
         "stats":              stats,
         "passing":            passing,       # rankable only
-        "eliminated":         eliminated,    # filter failures + integrity failures
-        "unrankable":         unrankable,    # passed filters, secondary metric absent
+        "unrankable":         unrankable,
+        "eliminated":         eliminated,
+        "abandoned":          list(abandoned_ids),
         "scores_df":          scores_df,
-        "speed_medium_flags": speed_medium_flags,
         "winner":             winner,
         "highest_tg":         highest_tg,
         "pareto_frontier":    pareto_frontier,
-        "effective_filters":  effective_filters,
+        "collapsed_dimensions": collapsed_dims,
+        "high_nan_warnings":  high_nan_warns,
+        "nan_invalid_ids":    nan_invalid_ids,
+        "governance_methodology": ref_snapshot,
+        "provided_references": provided_references,
+        "scoring_profile":    profile,
+        "registry":           registry,
     }
 
     _log_summary(campaign_id, result)
     return result
+
+
+def _load_methodology_snapshot(
+    campaign_id: str,
+    db_path: Path
+) -> dict[str, Any] | None:
+    """
+    Load the existing governance methodology snapshot from the campaigns table.
+    Returns the snapshot dict if found, else None.
+    """
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    try:
+        with conn:
+            curr = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+            if curr and curr[0]:
+                try:
+                    notes = json.loads(curr[0])
+                    return notes.get("governance_methodology")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return None
+    finally:
+        conn.close()
+
+
+def _persist_methodology_snapshot(
+    campaign_id: str,
+    snapshot: dict[str, Any],
+    db_path: Path
+) -> None:
+    """
+    Persist the Phase 3.3 Reference Methodology Snapshot to the campaigns table.
+    Ensures historical traceability of the score normalization anchors.
+    """
+    conn = sqlite3.connect(db_path, timeout=30.0)
+    try:
+        with conn:
+            # Ensure the campaign row exists (UPSERT-lite)
+            # Need to provide NOT NULL columns: name, created_at
+            now_str = str(pd.Timestamp.utcnow())
+            conn.execute(
+                "INSERT OR IGNORE INTO campaigns (id, name, created_at, run_mode) VALUES (?, ?, ?, 'standard')", 
+                (campaign_id, campaign_id, now_str)
+            )
+            
+            # Load existing notes
+            curr = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+            notes = {}
+            if curr and curr[0]:
+                try:
+                    notes = json.loads(curr[0])
+                except (json.JSONDecodeError, TypeError):
+                    notes = {"legacy_notes": curr[0]}
+            
+            # Merge snapshot into a namespaced block
+            notes["governance_methodology"] = {
+                "version": "1.0",
+                "snapshot_at_utc": str(pd.Timestamp.utcnow()),
+                "references": snapshot
+            }
+            
+            conn.execute(
+                "UPDATE campaigns SET notes_json=? WHERE id=?",
+                (json.dumps(notes), campaign_id)
+            )
+        logger.info("Persisted governance methodology snapshot for %s", campaign_id)
+    finally:
+        conn.close()
 
 
 def _write_scores_to_db(
@@ -612,6 +1016,14 @@ def _write_scores_to_db(
     preserves the distinction between 'measured zero' and 'no data'.
     """
     with get_connection(db_path) as conn:
+        # Delete ALL prior score rows for this campaign before writing new ones.
+        # Without this, configs removed from the YAML between runs retain stale
+        # winner/pareto flags in the DB.  generate_c08() queries
+        # "is_score_winner=1" — a ghost winner from a prior run would corrupt the
+        # C08 config.  The DELETE is inside the same connection as the INSERTs so
+        # both succeed or both fail atomically.
+        conn.execute("DELETE FROM scores WHERE campaign_id=?", (campaign_id,))
+
         for config_id, s in stats.items():
             # Score data from DataFrame — None for configs not in scores_df.
             composite_score  = None

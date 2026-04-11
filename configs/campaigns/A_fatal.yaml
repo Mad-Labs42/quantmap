@@ -1,0 +1,4 @@
+campaign_id: A_fatal
+values:
+- 1048576
+variable: context_size

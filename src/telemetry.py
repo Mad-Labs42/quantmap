@@ -421,6 +421,7 @@ class TelemetrySample:
     # Identity
     campaign_id: str
     config_id: str
+    cycle_id: int | None
     timestamp: str  # ISO8601 UTC
 
     # --- ABORT tier ---
@@ -481,12 +482,20 @@ class BackgroundSnapshot:
 
     campaign_id: str
     config_id: str
+    cycle_id: int | None
     timestamp: str
 
     top_cpu_procs_json: str = "[]"
     top_ram_procs_json: str = "[]"
     top_disk_procs_json: str = "[]"
     all_notable_procs_json: str = "[]"
+
+    # Per-process GPU VRAM usage, serialized as JSON list of
+    # {"name": str, "pid": int, "used_vram_mb": float}.
+    # Populated via nvmlDeviceGetComputeRunningProcesses() when NVML is
+    # available; null (JSON 'null') when NVML is not initialized or the
+    # query fails.  Never faked — absence is explicit.
+    gpu_proc_vram_json: str | None = None
 
     defender_process_running: bool = False
     windows_update_active: bool = False
@@ -785,6 +794,7 @@ def collect_sample(
     campaign_id: str,
     config_id: str,
     server_pid: int | None = None,
+    cycle_id: int | None = None,
 ) -> TelemetrySample:
     """
     Collect one telemetry sample. Safe to call from background thread.
@@ -1042,6 +1052,7 @@ def collect_sample(
     return TelemetrySample(
         campaign_id=campaign_id,
         config_id=config_id,
+        cycle_id=cycle_id,
         timestamp=ts,
         # ABORT
         cpu_temp_c=cpu_temp_c,
@@ -1114,6 +1125,7 @@ def _get_active_power_plan() -> str:
 def collect_background_snapshot(
     campaign_id: str,
     config_id: str,
+    cycle_id: int | None = None,
 ) -> BackgroundSnapshot:
     """
     Collect a background activity snapshot. Records what other processes
@@ -1127,6 +1139,33 @@ def collect_background_snapshot(
     antivirus_scan_active = False
     proc_data: list[dict] = []
 
+    # PROCESS CAPTURE THRESHOLD — EXPLICIT DESIGN BOUNDARY
+    #
+    # This loop captures processes with cpu_pct > 0.5% OR rss_mb > 50 MB.
+    # Processes below BOTH thresholds are NOT recorded in all_notable_procs_json.
+    #
+    # This is a collection boundary, not a summary filter.
+    # "Full process data" in QuantMap means: all processes above these thresholds.
+    # The 50 MB RAM threshold is intentionally conservative to capture
+    # "death by a thousand cuts" scenarios where multiple mid-sized processes
+    # (e.g. 10 × 60 MB = 600 MB aggregate) create pressure not visible
+    # from any single process's CPU usage alone.
+    #
+    # This threshold is also documented in:
+    #   - report_campaign.py: _section_background_interference()
+    #   - Any report section referencing captured process data
+    #
+    # To adjust, change _BG_CPU_THRESHOLD_PCT and _BG_RAM_THRESHOLD_MB below.
+    # Both thresholds apply per-process; a process is captured if it exceeds
+    # EITHER threshold (OR logic, not AND).
+    _BG_CPU_THRESHOLD_PCT = 0.5
+    _BG_RAM_THRESHOLD_MB  = 50.0
+
+    # Note: psutil.process_iter may return AccessDenied for elevated/protected
+    # processes (e.g. antimalware PPL-protected processes on Windows). Those are
+    # silently skipped. The named-process flags (defender_process_running etc.)
+    # are set by name-match before the RAM/CPU filter, so they are reliable
+    # even when the process is inaccessible for detailed stats.
     try:
         for proc in psutil.process_iter(
             ["pid", "name", "cpu_percent", "memory_info", "io_counters"]
@@ -1150,7 +1189,7 @@ def collect_background_snapshot(
                     if cpu > 0.5:
                         search_indexer_active = True
 
-                if cpu > 0.5 or rss_mb > 100:
+                if cpu > _BG_CPU_THRESHOLD_PCT or rss_mb > _BG_RAM_THRESHOLD_MB:
                     io = info.get("io_counters")
                     proc_data.append({
                         "name": name,
@@ -1170,6 +1209,41 @@ def collect_background_snapshot(
     by_disk = sorted(proc_data, key=lambda x: x["read_mb"] + x["write_mb"], reverse=True)
     high_cpu_count = sum(1 for p in proc_data if p["cpu_pct"] > 1.0)
 
+    # Per-process GPU VRAM — collected only when NVML is initialized.
+    # nvmlDeviceGetComputeRunningProcesses() returns used VRAM per process.
+    # GPU compute % per-process is NOT available via any user-space NVML API;
+    # only VRAM usage is tracked.  The field is null (not []) when unavailable.
+    gpu_proc_vram_json: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE is not None:
+        try:
+            gpu_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(_NVML_HANDLE)
+            gpu_proc_list = [
+                {
+                    "pid":          int(gp.pid),
+                    "used_vram_mb": round(gp.usedGpuMemory / (1024 * 1024), 1)
+                    if gp.usedGpuMemory is not None else None,
+                }
+                for gp in gpu_procs
+            ]
+            # Enrich with process name from proc_data where known (by PID),
+            # or from psutil for processes not in proc_data.
+            pid_to_name: dict[int, str] = {p["pid"]: p["name"] for p in proc_data}
+            for entry in gpu_proc_list:
+                pid = entry["pid"]
+                if pid in pid_to_name:
+                    entry["name"] = pid_to_name[pid]
+                else:
+                    # Try a quick psutil lookup for processes below the CPU/RAM
+                    # threshold (they may still use VRAM).
+                    try:
+                        entry["name"] = psutil.Process(pid).name()
+                    except Exception:
+                        entry["name"] = f"pid:{pid}"
+            gpu_proc_vram_json = json.dumps(gpu_proc_list)
+        except Exception as exc:
+            logger.debug("nvml per-process VRAM query failed: %s", exc)
+            gpu_proc_vram_json = None  # explicit: unavailable, not empty
+
     total_conns = established_conns = 0
     try:
         conns = psutil.net_connections()
@@ -1181,11 +1255,13 @@ def collect_background_snapshot(
     return BackgroundSnapshot(
         campaign_id=campaign_id,
         config_id=config_id,
+        cycle_id=cycle_id,
         timestamp=ts,
         top_cpu_procs_json=json.dumps(by_cpu[:10]),
         top_ram_procs_json=json.dumps(by_ram[:10]),
         top_disk_procs_json=json.dumps(by_disk[:10]),
         all_notable_procs_json=json.dumps(proc_data),
+        gpu_proc_vram_json=gpu_proc_vram_json,
         defender_process_running=defender_process_running,
         windows_update_active=windows_update_active,
         search_indexer_active=search_indexer_active,
@@ -1227,19 +1303,25 @@ class TelemetryCollector:
         self._campaign_id: str = ""
         self._config_id: str = ""
         self._server_pid: int | None = None
+        self._conn: sqlite3.Connection | None = None  # Scoped reuse (Phase 2)
 
     def start(
         self,
         campaign_id: str,
         config_id: str,
         server_pid: int | None = None,
+        cycle_id: int | None = None,
     ) -> None:
         if self._thread is not None and self._thread.is_alive():
-            self.stop()
+            raise RuntimeError(
+                "TelemetryCollector: thread still alive after 15s | "
+                "likely blocked on DB/IO | refusing to start a second collector"
+            )
 
         self._campaign_id = campaign_id
         self._config_id = config_id
         self._server_pid = server_pid
+        self._cycle_id = cycle_id
         self._stop_event.clear()
 
         with self._lock:
@@ -1273,7 +1355,19 @@ class TelemetryCollector:
         if self._thread is not None:
             self._thread.join(timeout=15)
             if self._thread.is_alive():
-                logger.warning("TelemetryCollector thread did not stop within 15s")
+                raise RuntimeError(
+                    "TelemetryCollector: thread still alive after 15s | "
+                    "likely blocked on DB/IO | refusing to start a second collector"
+                )
+        
+        # Phase 2: Close scoped connection safely
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
         self._thread = None
 
         with self._lock:
@@ -1289,6 +1383,14 @@ class TelemetryCollector:
     def _run(self) -> None:
         last_snapshot_time = 0.0
 
+        # Phase 2: Open scoped connection for this thread
+        from src.db import get_connection
+        try:
+            self._conn = get_connection(self._db_path)
+        except Exception as exc:
+            logger.error("TelemetryCollector failed to open DB connection: %s", exc)
+            return
+
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
@@ -1297,6 +1399,7 @@ class TelemetryCollector:
                     self._campaign_id,
                     self._config_id,
                     self._server_pid,
+                    self._cycle_id,
                 )
                 with self._lock:
                     self._samples.append(sample)
@@ -1307,7 +1410,7 @@ class TelemetryCollector:
             now = time.monotonic()
             if now - last_snapshot_time >= self.SNAPSHOT_INTERVAL_S:
                 try:
-                    snap = collect_background_snapshot(self._campaign_id, self._config_id)
+                    snap = collect_background_snapshot(self._campaign_id, self._config_id, self._cycle_id)
                     with self._lock:
                         self._snapshots.append(snap)
                     self._write_snapshot(snap)
@@ -1328,30 +1431,59 @@ class TelemetryCollector:
             logger.warning("Failed to write telemetry JSONL: %s", exc)
 
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            if self._conn:
                 cols = ", ".join(row.keys())
                 placeholders = ", ".join("?" for _ in row)
-                conn.execute(
+                self._conn.execute(
                     f"INSERT INTO telemetry ({cols}) VALUES ({placeholders})",
                     list(row.values()),
                 )
-                conn.commit()
+                self._conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write telemetry SQLite: %s", exc)
+            # Severity B (Invalidating) escalation (Phase 2)
+            logger.error("Severity B: Failed to write telemetry SQLite for %s: %s", self._config_id, exc)
+            self._handle_severity_b(f"[INSTRUMENTATION_FAILURE] sqlite_write_error: {exc}")
 
     def _write_snapshot(self, snap: BackgroundSnapshot) -> None:
         row = asdict(snap)
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            if self._conn:
                 cols = ", ".join(row.keys())
                 placeholders = ", ".join("?" for _ in row)
-                conn.execute(
+                self._conn.execute(
                     f"INSERT INTO background_snapshots ({cols}) VALUES ({placeholders})",
                     list(row.values()),
                 )
-                conn.commit()
+                self._conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write background snapshot: %s", exc)
+            # Severity B (Invalidating) escalation (Phase 2)
+            logger.error("Severity B: Failed to write background snapshot SQLite for %s: %s", self._config_id, exc)
+            self._handle_severity_b(f"[INSTRUMENTATION_FAILURE] snapshot_sqlite_write_error: {exc}")
+
+    def _handle_severity_b(self, reason: str) -> None:
+        """
+        Escalate a non-fatal but truth-invalidating failure (Severity B) to the DB.
+        Marks the configuration as 'degraded' with a structured reason. (Phase 2)
+        """
+        if not self._conn or not self._config_id:
+            return
+
+        # Structured cause: [CONFIG] [CATEGORY] [REASON]
+        # (Distinction: config-level instrumentation or contract failure)
+        full_reason = f"[CONFIG] {reason}"
+        
+        try:
+            self._conn.execute(
+                "UPDATE configs SET status='degraded', elimination_reason=? WHERE id=?",
+                (full_reason, self._config_id),
+            )
+            self._conn.commit()
+            logger.info("Severity B: Config %s marked degraded (Reason: %s)", self._config_id, full_reason)
+        except Exception as exc:
+            # If we cannot update even the status, the DB might be fully unresponsive.
+            # This is essentially promoted to Severity A by the Runner eventually.
+            logger.error("CRITICAL: Failed to persist Severity B status to DB: %s", exc)
+
 
 
 # ---------------------------------------------------------------------------

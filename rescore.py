@@ -25,6 +25,10 @@ from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
 
+from src import ui
+
+console = ui.get_console()
+
 from src.config import CONFIGS_DIR, LAB_ROOT  # noqa: E402
 
 # Paths derived from shared constants (src.config is the single source of truth)
@@ -39,16 +43,18 @@ logging.basicConfig(
 logger = logging.getLogger("rescore")
 
 
-def rescore(campaign_id: str, baseline: dict) -> bool:
+def rescore(campaign_id: str, baseline: dict, force_new_anchors: bool = False) -> bool:
     """Re-run analysis + scoring + report for one campaign. Returns True on success."""
     from src.analyze import analyze_campaign
     from src.score import score_campaign, ELIMINATION_FILTERS
     from src.report import generate_report
+    from src.report_campaign import generate_campaign_report
     from src.db import init_db, get_connection
 
     logger.info("=" * 60)
     logger.info("Re-scoring campaign: %s", campaign_id)
-    logger.info("Active thresholds: %s", ELIMINATION_FILTERS)
+    if force_new_anchors:
+        logger.warning("METHODOLOGY MIGRATION: Re-anchoring to current Registry/Baseline references")
 
     if not DB_PATH.exists():
         logger.error("Database not found: %s", DB_PATH)
@@ -69,9 +75,14 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     run_mode = camp_row["run_mode"] if camp_row else "full"
 
     mode_filter_overrides = {}
-    if run_mode in ("custom", "quick"):
+    if run_mode == "custom":
+        # custom: single user-suppliced values, absolute floor of 1 warm sample.
         mode_filter_overrides = {"min_valid_warm_count": 1}
-    elif run_mode == "standard":
+    elif run_mode in ("quick", "standard"):
+        # quick and standard both run full value coverage; quick uses 1 cycle
+        # per config (runner.py line 1525-1528 → 3-sample floor for statistical
+        # functions).  Must match runner.py exactly so rescore produces the same
+        # winner as the original run.
         mode_filter_overrides = {"min_valid_warm_count": 3}
 
     filter_overrides = dict(mode_filter_overrides)
@@ -105,21 +116,50 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
 
     try:
         # Avoid double-analysis — score_campaign runs analyze internally
-        scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides or None)
-        stats = scores.get("stats", {})
+        result = score_campaign(
+            campaign_id, 
+            DB_PATH, 
+            baseline=baseline, 
+            filter_overrides=filter_overrides,
+            force_new_anchors=force_new_anchors
+        )
+        # The score_campaign return dict changed in Phase 3.3/4
+        # stats, passing, unrankable, eliminated, scores_df
+        stats      = result["stats"]
+        passing    = result["passing"]
+        unrankable = result["unrankable"]
+        eliminated = result["eliminated"]
+        scores_df  = result["scores_df"]
+        winner     = result["winner"]
         
         if not stats:
             logger.error("No stats returned — campaign may not be in database: %s", campaign_id)
             return False
 
-        report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats)
-
+        report_path = generate_report(campaign_id, DB_PATH, baseline, result, stats)
         logger.info("Report written: %s", report_path)
 
+        # Regenerate the evidence-first report (report_v2.md) so it always
+        # reflects the current DB state.  Without this, report_v2.md retains
+        # conclusions (winner, eliminated, Pareto) from the prior scoring pass
+        # while report.md and the scores table are already updated — the two
+        # files would then contradict each other with no warning.
+        try:
+            v2_path = generate_campaign_report(
+                campaign_id, DB_PATH, baseline,
+                scores_result=result, stats=stats,
+            )
+            logger.info("Evidence-first report (v2) written: %s", v2_path)
+        except Exception as _v2_exc:
+            logger.warning(
+                "Evidence-first report (report_v2.md) regeneration failed (non-fatal): %s",
+                _v2_exc,
+            )
+
         # Print summary to console
-        winner = scores.get("winner")
-        passing = scores.get("passing", {})
-        eliminated = scores.get("eliminated", {})
+        winner = result.get("winner")
+        passing = result.get("passing", {})
+        eliminated = result.get("eliminated", {})
         logger.info(
             "Result: %d passing, %d eliminated. Winner: %s",
             len(passing), len(eliminated), winner or "none",
@@ -180,6 +220,11 @@ def main() -> None:
         action="store_true",
         help="Re-score all campaigns with completed data in the database",
     )
+    parser.add_argument(
+        "--force-new-anchors",
+        action="store_true",
+        help="Force re-anchoring to current Registry/Baseline references (Methodology Migration)",
+    )
     args = parser.parse_args()
 
     if not args.all and not args.campaigns:
@@ -206,19 +251,19 @@ def main() -> None:
     results = {}
     for idx, cid in enumerate(campaign_ids, start=1):
         # U5: show per-campaign progress so --all on 10+ campaigns is legible
-        print(f"[{idx}/{total}] Re-scoring: {cid}")
+        console.print(f"[{idx}/{total}] Re-scoring: {cid}")
         logger.info("Re-scoring %d/%d: %s", idx, total, cid)
-        results[cid] = rescore(cid, baseline)
+        results[cid] = rescore(cid, baseline, force_new_anchors=args.force_new_anchors)
 
     # Summary
     passed = [c for c, ok in results.items() if ok]
     failed = [c for c, ok in results.items() if not ok]
 
-    print()
-    print("=" * 60)
-    print(f"Re-score complete: {len(passed)} succeeded, {len(failed)} failed")
+    console.print()
+    console.print(f"{ui.SYM_DIVIDER}" * 60)
+    console.print(f"Re-score complete: {len(passed)} succeeded, {len(failed)} failed")
     if failed:
-        print(f"Failed: {failed}")
+        console.print(f"Failed: {failed}")
         sys.exit(1)
 
 

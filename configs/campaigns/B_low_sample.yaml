@@ -1,0 +1,3 @@
+campaign_id: 'B_low_sample'
+variable: 'batch_size'
+values: [128, 512]

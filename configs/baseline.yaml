@@ -111,6 +111,9 @@ requests:
   quality_code: "requests/quality_code.json"
   quality_reasoning: "requests/quality_reasoning.json"
 
+# Experiment Governance
+experiment_profile: default_throughput_v1
+
 # Reference performance numbers (prior estimates — not expected outcomes)
 # Used as denominators in baseline-relative reporting only.
 reference:

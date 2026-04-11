@@ -1,0 +1,89 @@
+# QuantMap — Experiment Profile: default_throughput_v1
+# Legacy-equivalent profile that reproduces the current scoring behavior exactly.
+#
+# This profile formalizes the hard-coded constants from score.py Phases 0-2
+# as a governed Experiment Profile. It is the default profile for all campaigns
+# until a different profile is explicitly specified.
+#
+# IMPORTANT: Changing values in this file changes scoring behavior.
+# Any change must be validated against the determinism test suite.
+
+name: default_throughput_v1
+version: "1.0.0"
+experiment_family: throughput
+description: >
+  Standard throughput optimization profile. Identifies the configuration that
+  delivers the highest sustained token generation rate while maintaining
+  acceptable latency, stability, and thermal safety. Legacy-equivalent to
+  the pre-governance scoring constants in score.py.
+
+# --- Active metrics and roles ---
+# These must be a subset of canonical names defined in configs/metrics.yaml.
+active_metrics:
+  - warm_tg_median
+  - warm_tg_p10
+  - warm_ttft_median_ms
+  - warm_ttft_p90_ms
+  - cold_ttft_median_ms
+  - pp_median
+
+primary_metrics:
+  - warm_tg_median
+  - warm_tg_p10
+
+secondary_metrics:
+  - warm_ttft_median_ms
+  - warm_ttft_p90_ms
+  - cold_ttft_median_ms
+  - pp_median
+
+# --- Weighting ---
+# Must sum to 1.0. Only rank-bearing metrics participate.
+# These values are identical to the legacy SCORE_WEIGHTS in score.py.
+weights:
+  warm_tg_median: 0.35
+  warm_tg_p10: 0.20
+  warm_ttft_median_ms: 0.20
+  warm_ttft_p90_ms: 0.10
+  cold_ttft_median_ms: 0.10
+  pp_median: 0.05
+
+normalize_weights: true
+
+# --- Ranking ---
+ranking_mode: composite
+composite_basis: lcb_score
+
+# --- Confidence ---
+# Activated in Phase 3.2.
+confidence_policy: lcb_k1
+min_sample_gate: 10
+
+# --- Outlier handling ---
+# Phase 3.2 will change to flag_symmetric with both-tails.
+outlier_policy: flag_symmetric
+outlier_fence_method: iqr_1_5
+
+# --- Gate overrides ---
+# These reproduce the legacy ELIMINATION_FILTERS values exactly.
+# Profiles may tighten these but never relax below Registry minimums.
+gate_overrides:
+  max_cv: 0.05
+  max_thermal_events: 0
+  max_outliers: 3
+  max_warm_ttft_p90_ms: 500.0
+  min_success_rate: 0.90
+  min_warm_tg_p10: 7.0
+  min_valid_warm_count: 3
+
+# --- Reporting ---
+report_emphasis:
+  - warm_tg_median
+  - warm_tg_p10
+  - warm_ttft_median_ms
+
+diagnostic_metrics:
+  - warm_tg_cv
+  - thermal_events
+  - success_rate
+  - outlier_count

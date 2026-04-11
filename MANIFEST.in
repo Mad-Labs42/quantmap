@@ -1,0 +1,5 @@
+recursive-include configs *.yaml
+recursive-include requests *.json
+include README.md
+include LICENSE.txt
+include .env.example
