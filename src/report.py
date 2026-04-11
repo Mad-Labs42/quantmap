@@ -816,6 +816,7 @@ def _build_markdown(
         ttftp_disp= f"{s.get('warm_ttft_p90_ms'):.0f}ms"   if s.get('warm_ttft_p90_ms')    is not None else "—"
         thermal_disp  = str(s.get('thermal_events'))  if s.get('thermal_events')  is not None else "—"
         outlier_disp  = str(s.get('outlier_count'))   if s.get('outlier_count')   is not None else "—"
+        score_disp    = f"{score_val:.4f}" if score_val is not None else "—"
 
         sections.append(
             f"| {rank} | `{config_id}` | "
@@ -824,7 +825,7 @@ def _build_markdown(
             f"{cv_disp} | "
             f"{ttft_disp} | "
             f"{ttftp_disp} | "
-            f"{score_val:.4f} | " if score_val is not None else "— | "
+            f"{score_disp} | "
             f"{thermal_disp} | "
             f"{outlier_disp} | "
             f"{'✓ PASS' if config_id in passing else 'FAIL'} |"
