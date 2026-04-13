@@ -28,15 +28,28 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.db import get_connection
+from src.settings_env import optional_env_path
 
 logger = logging.getLogger(__name__)
 
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
+LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap")
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +333,8 @@ def _section_header(
     run_plan: Any,
     baseline: dict[str, Any],
     now: str,
+    baseline_source: str | None = None,
+    trust_identity: Any = None,
 ) -> list[str]:
     lines: list[str] = []
 
@@ -347,6 +362,9 @@ def _section_header(
     lines.append(f"| Variable swept | `{camp.get('variable', '—')}` |")
     lines.append(f"| Campaign type | {camp.get('campaign_type', '—')} |")
     lines.append(f"| Status | {camp.get('status', '—')} |")
+    if camp.get("analysis_status") or camp.get("report_status"):
+        lines.append(f"| Analysis status | {camp.get('analysis_status', '—')} |")
+        lines.append(f"| Report status | {camp.get('report_status', '—')} |")
     lines.append(f"| Started | {camp.get('started_at', '—')} |")
     lines.append(f"| Completed | {camp.get('completed_at', '—')} |")
     lines.append(f"| Machine | {machine.get('name', '—')} |")
@@ -355,9 +373,27 @@ def _section_header(
     lines.append(f"| RAM | {machine.get('ram', '—')} |")
     lines.append(f"| OS | {snap.get('os_version', machine.get('os', '—'))} |")
     lines.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', '—')} |")
+    try:
+        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+        lines.extend(execution_environment_summary_lines(snap))
+    except Exception:
+        lines.append("| Execution support tier | `unknown` |")
+    try:
+        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+
+        lines.extend(provider_evidence_summary_lines(snap))
+    except Exception:
+        lines.append("| Telemetry provider evidence | `unknown` |")
     lines.append(f"| Model | {model_bl.get('name', '—')} |")
     lines.append(f"| Model size | {_na(model_bl.get('size_gb'))} GB |")
     lines.append(f"| Quantization | {model_bl.get('quantization', '—')} |")
+    if baseline_source:
+        lines.append(f"| Baseline identity source | `{baseline_source}` |")
+    if trust_identity is not None:
+        qid = getattr(trust_identity, "quantmap", {}) or {}
+        qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
+        qcommit = qid.get("git_commit") or "unknown"
+        lines.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     lines.append(f"| Power plan | {snap.get('power_plan', '—')} |")
     build_commit = snap.get("build_commit", "—")
     if len(build_commit) > 16:
@@ -379,8 +415,12 @@ def _section_methodology(
     baseline: dict[str, Any],
     n_tested_configs: int,
     scores_result: dict[str, Any],
+    methodology: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
+    from src.trust_identity import methodology_source_label  # noqa: PLC0415
+    methodology = methodology or {}
+    methodology_label = methodology_source_label(methodology)
     
     lines.append("> [!NOTE]")
     lines.append("> **QuantMap Governance Methodology v1.0 (Stable)**")
@@ -426,9 +466,11 @@ def _section_methodology(
         "_All thresholds below were fixed prior to data collection based on the Experiment Profile. "
         "Configs failing any filter are excluded from ranking entirely._\n"
     )
-    from src import governance  # noqa: PLC0415
-    profile = scores_result.get("scoring_profile", governance.DEFAULT_PROFILE)
-    ef = profile.gate_overrides
+    ef = (
+        scores_result.get("effective_filters")
+        or methodology.get("gates")
+        or {}
+    )
 
     lines.append("| Filter | Threshold | Rationale |")
     lines.append("|--------|-----------|-----------|")
@@ -441,9 +483,23 @@ def _section_methodology(
     lines.append(f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 10)} | Minimum for statistical validity |")
     lines.append("")
     # Scoring Profile
-    from src import governance  # noqa: PLC0415
-    profile = scores_result.get("scoring_profile", governance.DEFAULT_PROFILE)
-    lines.append(f"**Experiment Profile:** `{profile.name}` v{profile.version} ({profile.experiment_family.value})\n")
+    profile_obj = scores_result.get("scoring_profile")
+    profile_name = (
+        methodology.get("profile_name")
+        or getattr(profile_obj, "name", None)
+        or "unknown"
+    )
+    profile_version = (
+        methodology.get("profile_version")
+        or getattr(profile_obj, "version", None)
+        or "unknown"
+    )
+    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "unknown")
+    lines.append(
+        f"**Experiment Profile:** `{profile_name}` v{profile_version} "
+        f"({profile_family})  \n"
+        f"**Methodology evidence:** `{methodology_label}`\n"
+    )
 
     # Scoring weights
     lines.append("### Scoring Methodology (Lower Confidence Bound)\n")
@@ -461,7 +517,11 @@ def _section_methodology(
     
     lines.append(f"> **LCB Computation Method:** {lcb_method}\n")
     
-    sw = profile.weights
+    sw = (
+        methodology.get("weights")
+        or getattr(profile_obj, "weights", {})
+        or {}
+    )
 
     lines.append("| Metric | Weight | Direction |")
     lines.append("|--------|-------:|-----------|")
@@ -480,7 +540,7 @@ def _section_methodology(
         "comparability. Scores are measured against governed hardware or baseline anchors._\n"
     )
     
-    governance_snapshot = scores_result.get("governance_methodology")
+    governance_snapshot = methodology.get("anchors") or scores_result.get("governance_methodology")
     if governance_snapshot:
         lines.append("| Metric | Anchor Value | Source | Provenance/Version |")
         lines.append("|--------|-------------:|:-------|:-------------------|")
@@ -1477,7 +1537,7 @@ def _appendix_eliminations(
     collapsed = scores_result.get("collapsed_dimensions", [])
     nan_invalid = scores_result.get("nan_invalid_ids", [])
     
-    degraded = {cid: s.get("elimination_reason") for cid, s in stats.items() if s.get("config_status") == "degraded"}
+    degraded = {cid: s.get("elimination_reason") for cid, s in scores_result.get("stats", {}).items() if s.get("config_status") == "degraded"}
     high_nan_warns = scores_result.get("high_nan_warnings", [])
 
     if collapsed or high_nan_warns or nan_invalid or degraded:
@@ -2098,7 +2158,28 @@ def _section_supporting_artifacts(
     )
 
     def _check(path: Path) -> str:
-        return "✓ Present" if path.exists() else "✗ Not found"
+        return "legacy_file_present" if path.exists() else "missing"
+
+    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    artifact_rows = {
+        row.get("artifact_type"): row
+        for row in load_artifact_summaries(campaign_id, db_path)
+    }
+
+    def _artifact_status(artifact_type: str, path: Path) -> str:
+        row = artifact_rows.get(artifact_type)
+        if not row:
+            return _check(path)
+        status = row.get("status") or "unknown"
+        verification = row.get("verification_source") or "unknown"
+        sha = row.get("sha256")
+        error = row.get("error_message")
+        parts = [status, f"verification={verification}"]
+        if sha:
+            parts.append(f"sha256={sha[:12]}")
+        if error:
+            parts.append(f"error={str(error)[:80]}")
+        return "; ".join(parts)
 
     telemetry_jsonl = results_dir / "telemetry.jsonl"
     raw_jsonl       = results_dir / "raw.jsonl"
@@ -2120,11 +2201,11 @@ def _section_supporting_artifacts(
     lines.append("| Artifact | Path | Status | Contents |")
     lines.append("|----------|------|:------:|----------|")
     lines.append(
-        f"| Hardware trace | `{telemetry_jsonl}` | {_check(telemetry_jsonl)} | "
+        f"| Hardware trace | `{telemetry_jsonl}` | {_artifact_status('telemetry_jsonl', telemetry_jsonl)} | "
         "CPU/GPU/RAM/disk/network samples every 2 s |"
     )
     lines.append(
-        f"| Request results | `{raw_jsonl}` | {_check(raw_jsonl)} | "
+        f"| Request results | `{raw_jsonl}` | {_artifact_status('raw_jsonl', raw_jsonl)} | "
         "All inference request outcomes (TTFT, TG, outcome, errors) |"
     )
     lines.append(
@@ -2132,15 +2213,15 @@ def _section_supporting_artifacts(
         "All tables: telemetry, background_snapshots, requests, scores, artifacts |"
     )
     lines.append(
-        f"| Primary report | `{report_md}` | {_check(report_md)} | "
+        f"| Primary report | `{report_md}` | {_artifact_status('report_md', report_md)} | "
         "Compact campaign report |"
     )
     lines.append(
-        f"| Evidence-first report | `{report_v2_md}` | {_check(report_v2_md)} | "
+        f"| Evidence-first report | `{report_v2_md}` | {_artifact_status('report_v2_md', report_v2_md)} | "
         "This file |"
     )
     lines.append(
-        f"| Scores CSV | `{scores_csv}` | {_check(scores_csv)} | "
+        f"| Scores CSV | `{scores_csv}` | {_artifact_status('scores_csv', scores_csv)} | "
         "Per-config statistics and rankings |"
     )
     lines.append(
@@ -2166,7 +2247,7 @@ def _section_supporting_artifacts(
     )
     lines.append(f"-- Report generation history")
     lines.append(
-        f"SELECT artifact_type, path, created_at FROM artifacts\n"
+        f"SELECT artifact_type, path, status, sha256, verification_source, error_message, created_at FROM artifacts\n"
         f"WHERE campaign_id = '{campaign_id}' ORDER BY created_at DESC;\n"
     )
     lines.append(f"-- Per-config score detail")
@@ -2287,6 +2368,17 @@ def generate_campaign_report(
     even if the file was partially written.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
+    from src.trust_identity import (  # noqa: PLC0415
+        load_baseline_for_historical_use,
+        load_run_identity,
+    )
+    baseline, baseline_source = load_baseline_for_historical_use(
+        campaign_id,
+        db_path,
+        fallback_baseline=baseline,
+        allow_current_input=False,
+    )
+    trust_identity = load_run_identity(campaign_id, db_path)
     results_dir = effective_lab_root / "results" / campaign_id
     results_dir.mkdir(parents=True, exist_ok=True)
     report_path = results_dir / "report_v2.md"
@@ -2304,10 +2396,6 @@ def generate_campaign_report(
         camp_row = conn.execute(
             "SELECT * FROM campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
-        snap_row = conn.execute(
-            "SELECT * FROM campaign_start_snapshot WHERE campaign_id=?",
-            (campaign_id,),
-        ).fetchone()
         # Build config → variable_value map for display
         cfg_rows = conn.execute(
             "SELECT id, variable_value FROM configs WHERE campaign_id=?",
@@ -2315,7 +2403,7 @@ def generate_campaign_report(
         ).fetchall()
 
     camp = dict(camp_row) if camp_row else (campaign or {})
-    snap = dict(snap_row) if snap_row else {}
+    snap = trust_identity.start_snapshot
 
     # variable_value is JSON-serialized; unwrap it for display
     config_variable_map: dict[str, Any] = {}
@@ -2353,7 +2441,13 @@ def generate_campaign_report(
 
     # Header (recovery: minimal title — no stub needed, always recoverable)
     try:
-        sections.extend(_section_header(campaign_id, camp, snap, run_plan, baseline, now))
+        sections.extend(
+            _section_header(
+                campaign_id, camp, snap, run_plan, baseline, now,
+                baseline_source=baseline_source,
+                trust_identity=trust_identity,
+            )
+        )
     except Exception as exc:
         logger.warning("report: header section failed: %s", exc)
         sections.append(f"# QuantMap Campaign Report — {campaign_id}\n")
@@ -2361,7 +2455,13 @@ def generate_campaign_report(
     # Methodology
     try:
         sections.extend(
-            _section_methodology(run_plan, baseline, n_tested_configs=len(stats), scores_result=scores_result)
+            _section_methodology(
+                run_plan,
+                baseline,
+                n_tested_configs=len(stats),
+                scores_result=scores_result,
+                methodology=trust_identity.methodology,
+            )
         )
     except Exception as exc:
         logger.warning("report: methodology section failed: %s", exc)
@@ -2511,10 +2611,26 @@ def generate_campaign_report(
                 "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
                 (campaign_id, "report_v2_md")
             )
+            _report_sha = _file_sha256(report_path)
+            _report_status = "partial" if section_failures else ("complete" if _report_sha else "failed")
+            _report_error = "; ".join(f"{k}: {v}" for k, v in section_failures) or None
+            if _report_sha is None:
+                _report_error = _report_error or "artifact file missing or unreadable after report generation"
             _art_conn.execute(
-                "INSERT INTO artifacts (campaign_id, artifact_type, path, created_at)"
-                " VALUES (?, ?, ?, ?)",
-                (campaign_id, "report_v2_md", str(report_path), _now_utc),
+                "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    campaign_id,
+                    "report_v2_md",
+                    str(report_path),
+                    _report_sha,
+                    _now_utc,
+                    _report_status,
+                    "src.report_campaign.generate_campaign_report",
+                    _report_error,
+                    _now_utc,
+                    "producer_hash" if _report_sha else "producer_missing",
+                ),
             )
             _art_conn.commit()
     except Exception as _art_exc:

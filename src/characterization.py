@@ -33,6 +33,8 @@ from typing import Any
 
 import psutil
 
+from src.settings_env import read_env_path
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,10 +91,10 @@ def _resolve_model_path(
 ) -> Path | None:
     if model_path is not None:
         return Path(model_path)
-    raw = os.getenv("QUANTMAP_MODEL_PATH")
-    if raw:
-        return Path(raw)
-    warnings.append("model_path not provided and QUANTMAP_MODEL_PATH is not set")
+    value = read_env_path("QUANTMAP_MODEL_PATH")
+    if value.path is not None:
+        return value.path
+    warnings.append(f"model_path not provided and {value.message}")
     return None
 
 
@@ -1606,8 +1608,8 @@ def get_characterization_capabilities() -> dict[str, Any]:
     # Model path / size
     # ------------------------------------------------------------------
     try:
-        model_path_env = os.getenv("QUANTMAP_MODEL_PATH")
-        if model_path_env and Path(model_path_env).exists():
+        model_path_env = read_env_path("QUANTMAP_MODEL_PATH")
+        if model_path_env.path is not None and model_path_env.path.exists():
             caps["model_size"] = _S
         else:
             caps["model_size"] = _EU
@@ -1632,4 +1634,3 @@ def get_characterization_capabilities() -> dict[str, Any]:
         caps["llama_cpp_version"] = _PF
 
     return caps
-

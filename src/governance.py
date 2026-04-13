@@ -9,8 +9,8 @@ Design Memo (Revision 1.1):
     Layer 1: Metric Registry  — canonical metric definitions (what a metric IS)
     Layer 2: Experiment Profile — campaign-specific scoring intent (how a metric is USED)
 
-The Metric Registry is loaded from configs/metrics.yaml at import time.
-The default Experiment Profile is loaded from configs/profiles/default_throughput_v1.yaml.
+The Metric Registry and default Experiment Profile are loaded lazily from
+configs/metrics.yaml and configs/profiles/default_throughput_v1.yaml.
 
 DESIGN INVARIANTS:
     - A Profile cannot change what a metric is. It can only change how it is used.
@@ -379,6 +379,17 @@ class ProfileValidationError(Exception):
     pass
 
 
+class CurrentMethodologyLoadError(RuntimeError):
+    """Raised when current live Registry/Profile files cannot be loaded."""
+
+    def __init__(self, component: str, path: Path | None, original: Exception) -> None:
+        self.component = component
+        self.path = path
+        self.original = original
+        location = f" at {path}" if path is not None else ""
+        super().__init__(f"Current methodology {component} failed to load{location}: {original}")
+
+
 # Fields that are LOCKED to the Registry. Profiles cannot override these.
 _REGISTRY_IMMUTABLE_FIELDS: frozenset[str] = frozenset({
     "units",
@@ -468,8 +479,8 @@ def load_registry(yaml_path: Path | None = None) -> MetricRegistry:
     Fails loudly and immediately if the YAML is missing, malformed, or
     any metric definition fails schema validation.
 
-    This function is called once at import time to create BUILTIN_REGISTRY.
-    There is no dynamic reload.
+    Callers that need the process-default current Registry should use
+    get_builtin_registry(), which caches this loader lazily.
     """
     path = yaml_path or _METRICS_YAML
     if not path.exists():
@@ -539,15 +550,111 @@ def load_profile(
 
 
 # ---------------------------------------------------------------------------
-# Module-level singletons — loaded at import time, fail-loud
+# Lazy current-methodology accessors
 # ---------------------------------------------------------------------------
 
-BUILTIN_REGISTRY: MetricRegistry = load_registry()
+_DEFAULT_PROFILE_NAME = "default_throughput_v1"
+_BUILTIN_REGISTRY_CACHE: MetricRegistry | None = None
+_DEFAULT_PROFILE_CACHE: ExperimentProfile | None = None
 
-DEFAULT_PROFILE: ExperimentProfile = load_profile("default_throughput_v1")
 
-# Validate the default profile against the registry at import time.
-validate_profile_against_registry(DEFAULT_PROFILE, BUILTIN_REGISTRY)
+def get_builtin_registry() -> MetricRegistry:
+    """Return the current live Metric Registry, loading it on first use."""
+    global _BUILTIN_REGISTRY_CACHE
+    if _BUILTIN_REGISTRY_CACHE is None:
+        try:
+            _BUILTIN_REGISTRY_CACHE = load_registry()
+        except Exception as exc:
+            raise CurrentMethodologyLoadError("metric registry", _METRICS_YAML, exc) from exc
+    return _BUILTIN_REGISTRY_CACHE
+
+
+def get_default_profile(profile_name: str = _DEFAULT_PROFILE_NAME) -> ExperimentProfile:
+    """Return a validated current live Experiment Profile, loading it on first use."""
+    global _DEFAULT_PROFILE_CACHE
+    profile_path = _PROFILES_DIR / f"{profile_name}.yaml"
+    try:
+        registry = get_builtin_registry()
+        if profile_name == _DEFAULT_PROFILE_NAME:
+            if _DEFAULT_PROFILE_CACHE is None:
+                profile = load_profile(profile_name)
+                validate_profile_against_registry(profile, registry)
+                _DEFAULT_PROFILE_CACHE = profile
+            return _DEFAULT_PROFILE_CACHE
+
+        profile = load_profile(profile_name)
+        validate_profile_against_registry(profile, registry)
+        return profile
+    except CurrentMethodologyLoadError:
+        raise
+    except Exception as exc:
+        raise CurrentMethodologyLoadError("experiment profile", profile_path, exc) from exc
+
+
+def load_current_methodology(
+    profile_name: str | None = None,
+) -> tuple[ExperimentProfile, MetricRegistry]:
+    """Return the current live Profile and Registry for explicit current-input paths."""
+    registry = get_builtin_registry()
+    profile = get_default_profile(profile_name or _DEFAULT_PROFILE_NAME)
+    return profile, registry
+
+
+class _LazyRegistry:
+    """Compatibility proxy that avoids loading current Registry at module import."""
+
+    def _registry(self) -> MetricRegistry:
+        return get_builtin_registry()
+
+    def get(self, canonical_name: str) -> MetricDefinition:
+        return self._registry().get(canonical_name)
+
+    def all_metrics(self) -> dict[str, MetricDefinition]:
+        return self._registry().all_metrics()
+
+    def get_rank_bearing(self) -> list[MetricDefinition]:
+        return self._registry().get_rank_bearing()
+
+    def get_gate_capable(self) -> list[MetricDefinition]:
+        return self._registry().get_gate_capable()
+
+    def get_score_capable(self) -> list[MetricDefinition]:
+        return self._registry().get_score_capable()
+
+    def get_required_score_metrics(self) -> frozenset[str]:
+        return self._registry().get_required_score_metrics()
+
+    def get_optional_score_metrics(self) -> tuple[str, ...]:
+        return self._registry().get_optional_score_metrics()
+
+    def __len__(self) -> int:
+        return len(self._registry())
+
+    def __contains__(self, canonical_name: str) -> bool:
+        return canonical_name in self._registry()
+
+    def __repr__(self) -> str:
+        return repr(self._registry())
+
+
+class _LazyProfile:
+    """Compatibility proxy that avoids loading current Profile at module import."""
+
+    def _profile(self) -> ExperimentProfile:
+        return get_default_profile()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._profile(), name)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._profile().model_dump(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        return repr(self._profile())
+
+
+BUILTIN_REGISTRY = _LazyRegistry()
+DEFAULT_PROFILE = _LazyProfile()
 
 # ---------------------------------------------------------------------------
 # Legacy compatibility helpers
@@ -559,12 +666,12 @@ validate_profile_against_registry(DEFAULT_PROFILE, BUILTIN_REGISTRY)
 
 def get_legacy_score_weights() -> dict[str, float]:
     """Return the Profile's weights dict — must match legacy SCORE_WEIGHTS."""
-    return dict(DEFAULT_PROFILE.weights)
+    return dict(get_default_profile().weights)
 
 
 def get_legacy_elimination_filters() -> dict[str, float]:
     """Return the Profile's gate overrides — must match legacy ELIMINATION_FILTERS."""
-    return dict(DEFAULT_PROFILE.gate_overrides)
+    return dict(get_default_profile().gate_overrides)
 
 
 def get_legacy_primary_score_metrics() -> frozenset[str]:
@@ -577,7 +684,7 @@ def get_legacy_primary_score_metrics() -> frozenset[str]:
     If it does not, the Registry definitions are wrong and must be corrected
     before any scoring changes are made.
     """
-    result = BUILTIN_REGISTRY.get_required_score_metrics()
+    result = get_builtin_registry().get_required_score_metrics()
 
     # Explicit verification against legacy set.
     # This guard prevents silent semantic drift during the Phase 3.1 refactor.
@@ -602,7 +709,7 @@ def get_legacy_secondary_score_metrics() -> tuple[str, ...]:
     The tuple ordering matters for determinism — it must match the Registry
     iteration order, which is YAML key order (insertion order).
     """
-    result = BUILTIN_REGISTRY.get_optional_score_metrics()
+    result = get_builtin_registry().get_optional_score_metrics()
 
     # Explicit verification against legacy set (order-insensitive for safety).
     _LEGACY_SECONDARY = frozenset({

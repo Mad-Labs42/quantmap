@@ -4,6 +4,14 @@ QuantMap is built on the philosophy that **benchmarking is a forensic science**.
 
 ---
 
+## Current State
+
+As of 2026-04-12, the Phase 1/1.1 Trust Bundle is treated as stable. New runs use snapshot-first historical identity for campaign, baseline, methodology, QuantMap code identity, layered runtime/report state, and trust-relevant artifact evidence.
+
+The active phase is **Phase 3: Platform Generalization**. Phase 2 Operational Robustness and Phase 2.1 Settings/Environment Bridge are closed after validation. Phase 3 provider work must preserve the snapshot-first trust model and use the Phase 2.1 settings/environment boundary.
+
+---
+
 ## 1. Provenance & Identity (`about`)
 
 The `quantmap about` command is the first pillar of the trust surface. It exposes the environment and logic currently in effect:
@@ -33,11 +41,13 @@ The `explain` briefing engine provides rationales, not prose.
 
 ---
 
-## 4. Methodology Snapshots (`export`)
+## 4. Methodology Snapshots and Export
 
-Every `.qmap` case file is a self-contained forensic artifact. 
-- **The Snapshot**: It includes the exact Registry and Profile used at the time of the benchmark.
-- **Auditability**: Any other instance of QuantMap can load a `.qmap` and reproduce the interpretation exactly, proving the results weren't "fixed" post-acquisition.
+Historical methodology authority now lives in persisted methodology snapshots, not in whatever profile or registry files happen to be on disk today.
+
+- **Snapshot-first interpretation**: New snapshot-complete runs preserve the registry/profile evidence used for scoring.
+- **Legacy honesty**: Older or incomplete runs are labeled with weaker evidence states such as `legacy_partial`, `hash-only`, `unknown`, or `incomplete` instead of being silently strengthened from current files.
+- **Export boundary**: Export should distinguish historical run identity from exporter identity and avoid claiming full case-file fidelity when historical evidence is incomplete.
 
 ---
 

@@ -89,7 +89,7 @@ class DiagnosticReport:
                 if r.recommendation:
                     console.print(f"    [blue]Recommendation: {r.recommendation}[/blue]")
 
-        console.print(f"\n{ui.SYM_DIVIDER}" * 60)
+        console.print("\n" + ui.SYM_DIVIDER * 60)
         
         final = self.readiness
         if final == Readiness.READY:

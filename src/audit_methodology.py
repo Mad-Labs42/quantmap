@@ -6,7 +6,6 @@ Checks that both campaigns were scored using identical anchors and Registry vers
 """
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
@@ -16,7 +15,6 @@ from typing import Any
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.db import get_connection
-from src.config import LAB_ROOT
 from src import ui
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -24,21 +22,25 @@ logger = logging.getLogger("audit")
 console = ui.get_console()
 
 def get_methodology(campaign_id: str, db_path: Path) -> dict[str, Any] | None:
+    from src.trust_identity import load_run_identity
+
     with get_connection(db_path) as conn:
-        row = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+        row = conn.execute("SELECT id FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
         if not row:
             logger.error("Campaign not found: %s", campaign_id)
             return None
-        
-        notes_str = row[0]
-        if not notes_str:
-            return None
-            
-        try:
-            notes = json.loads(notes_str)
-            return notes.get("governance_methodology")
-        except (json.JSONDecodeError, TypeError):
-            return None
+
+    identity = load_run_identity(campaign_id, db_path)
+    methodology = identity.methodology
+    if methodology.get("source") == "unknown":
+        return None
+    return {
+        "version": methodology.get("version"),
+        "references": methodology.get("anchors", {}),
+        "methodology_snapshot_id": methodology.get("id"),
+        "capture_quality": methodology.get("capture_quality"),
+        "capture_source": methodology.get("capture_source"),
+    }
 
 def compare_methodologies(id1: str, m1: dict, id2: str, m2: dict) -> bool:
     ui.print_banner(f"Methodology Audit: {id1} vs {id2}")
@@ -106,7 +108,12 @@ def main():
     parser.add_argument("--db", type=Path, help="Path to lab.sqlite (optional)")
     args = parser.parse_args()
 
-    db_path = args.db or (LAB_ROOT / "db" / "lab.sqlite")
+    if args.db:
+        db_path = args.db
+    else:
+        from src.config import LAB_ROOT  # noqa: PLC0415
+
+        db_path = LAB_ROOT / "db" / "lab.sqlite"
     
     m1 = get_methodology(args.campaign1, db_path)
     m2 = get_methodology(args.campaign2, db_path)

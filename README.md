@@ -8,6 +8,14 @@ QuantMap is a measurement and reporting system for local LLM inference benchmark
 
 ---
 
+## Current Development Phase
+
+The Phase 1 Trust Bundle and Phase 1.1 stabilization pass are stable after real-workflow validation. QuantMap now treats snapshot-first historical identity, methodology evidence, layered runtime/report state, and non-misleading export/report trust behavior as the foundation for future work.
+
+The active focus is **Phase 3: Platform Generalization**. Phase 2 Operational Robustness and Phase 2.1 Settings/Environment Bridge are closed after validation. Phase 3 begins with boundary-aware telemetry/provider design, not scattered provider conditionals in existing high-blast-radius modules.
+
+---
+
 ## 🔬 The QuantMap Philosophy
 
 QuantMap is built on the principle that **benchmarking is a forensic science**. 
@@ -43,7 +51,7 @@ We separate the tool from the rules.
 > **What Changed vs. What Did Not**:
 > - Software changes may affect the UI, packaging, or diagnostic speed. Historical outcomes remain untouched.
 > - Methodology changes (Registry/Profile) affect winner selection and comparison validity. 
-> - **Rescoring** a campaign under a new methodology is a **migration**, not just a refresh.
+> - **Rescoring** a campaign under persisted historical methodology is snapshot-locked. Current-input rescoring is an explicit migration-like mode and must be labeled as such.
 
 ---
 

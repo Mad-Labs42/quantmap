@@ -2,6 +2,14 @@
 
 QuantMap is designed as a **Controlled Benchmarking Pipeline**. It separates the mechanics of execution from the governance of interpretation.
 
+## Current Phase
+
+As of 2026-04-12, the Phase 1/1.1 Trust Bundle is stable: snapshot-first identity, methodology authority, layered runtime/report state, and non-misleading export/report trust behavior have been validated against a real workflow.
+
+The active architecture focus is **Phase 3: Platform Generalization**. Phase 2 Operational Robustness and Phase 2.1 Settings/Environment Bridge are closed after validation.
+
+Phase 3 starts with telemetry/provider boundary design and Linux/NVIDIA-first portability groundwork. Provider work must use the Phase 2.1 settings/environment boundary instead of recreating local lab assumptions.
+
 ## 1. High-Level Lifecycle
 
 ```mermaid
@@ -61,3 +69,4 @@ The core philosophy of QuantMap is "Lock the scale before you weigh the gold."
 - **Stateless Interpretation**: Scoring logic does not modify raw data; it derives a "Score Layer" in the database.
 - **Forensic Determinism**: Identical raw data always produces identical briefings, regardless of when or where the analysis is run.
 - **Fail-Fast Readiness**: The `doctor` layer prevents the acquisition of "garbage data" by validating the environment before execution.
+- **Boundary Discipline**: New phase work should prefer surgical extraction where it naturally touches crowded modules. Do not enlarge `runner.py`, `report_campaign.py`, or similar high-blast-radius modules without an explicit boundary plan.

@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import hashlib
 import os
 import statistics
 import subprocess
@@ -162,6 +163,18 @@ def _derive_effective_campaign_id(
         val_str = "_".join(str(v) for v in sorted(values_override, key=str))
         return f"{campaign_id}__v{val_str}"
     return campaign_id
+
+
+def _hash_file(path: Path) -> str:
+    """Return SHA256 hex digest of a file for provenance tracking."""
+    if not path.is_file():
+        return "missing"
+    sha = hashlib.sha256()
+    with open(path, "rb") as f:
+        # Read in 64kb chunks
+        for chunk in iter(lambda: f.read(65536), b""):
+            sha.update(chunk)
+    return sha.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +415,7 @@ def list_campaigns() -> None:
     if not db_path.exists():
         console.print("[yellow]No database found.[/yellow] Run a campaign first.")
         return
+    init_db(db_path)
 
     with get_connection(db_path) as conn:
         rows = conn.execute(
@@ -410,6 +424,8 @@ def list_campaigns() -> None:
                 c.id,
                 c.run_mode,
                 c.status,
+                c.analysis_status,
+                c.report_status,
                 (SELECT COUNT(*) FROM configs cf WHERE cf.campaign_id = c.id) AS cfg_count,
                 (SELECT s.config_id FROM scores s
                  WHERE s.campaign_id = c.id AND s.is_score_winner = 1
@@ -420,7 +436,10 @@ def list_campaigns() -> None:
                 COALESCE(c.completed_at, c.started_at, c.created_at) AS ts,
                 (SELECT a.path FROM artifacts a
                  WHERE a.campaign_id = c.id AND a.artifact_type = 'report_md'
-                 LIMIT 1) AS report_path
+                 LIMIT 1) AS report_path,
+                (SELECT css.execution_environment_json FROM campaign_start_snapshot css
+                 WHERE css.campaign_id = c.id
+                 LIMIT 1) AS execution_environment_json
             FROM campaigns c
             ORDER BY ts DESC
             """,
@@ -435,7 +454,9 @@ def list_campaigns() -> None:
     tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
     tbl.add_column("Campaign", style="cyan", no_wrap=True)
     tbl.add_column("Mode", no_wrap=True)
-    tbl.add_column("Status", no_wrap=True)
+    tbl.add_column("Measurement", no_wrap=True)
+    tbl.add_column("Support", no_wrap=True)
+    tbl.add_column("Post-run", no_wrap=True)
     tbl.add_column("Cfgs", justify="right")
     tbl.add_column("Winner", no_wrap=True)
     tbl.add_column("TG (t/s)", justify="right")
@@ -450,15 +471,37 @@ def list_campaigns() -> None:
         "pending": "dim",
     }
 
-    for campaign_id, run_mode, status, cfg_count, winner, winner_tg, ts, report_path in rows:
+    for (
+        campaign_id,
+        run_mode,
+        status,
+        analysis_status,
+        report_status,
+        cfg_count,
+        winner,
+        winner_tg,
+        ts,
+        report_path,
+        execution_environment_json,
+    ) in rows:
         style = status_styles.get(status, "")
+        post_status = f"a:{analysis_status or 'legacy'} r:{report_status or 'legacy'}"
         ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
         report_display = str(report_path) if report_path else "—"
         mode_label = _ML.get(run_mode, run_mode.title()) if run_mode else "—"
+        support_tier = "legacy"
+        if execution_environment_json:
+            try:
+                execution_environment = json.loads(str(execution_environment_json))
+                support_tier = str(execution_environment.get("support_tier") or "unknown")
+            except Exception:
+                support_tier = "unreadable"
         tbl.add_row(
             campaign_id,
             mode_label,
             f"[{style}]{status}[/{style}]" if style else status,
+            support_tier,
+            post_status,
             str(cfg_count),
             winner or "—",
             f"{winner_tg:.2f}" if winner_tg is not None else "—",
@@ -963,9 +1006,7 @@ def validate_campaign(
         ) and ok
 
     # 9. Environment checks
-    from src import doctor
-    doctor.check_defender_exclusions(_server_bin, _model_path, _eff_lab_root_val, console)
-    doctor.check_windows_search(_eff_lab_root_val, _model_path, console)
+    _run_preflight_checks(_server_bin, _model_path, _eff_lab_root_val, is_dry_run=True)
 
     # Summary
     console.print()
@@ -1812,10 +1853,28 @@ def run_campaign(
         elif "requests_per_cycle" in campaign:
             reqs_src = " (campaign YAML)"
 
+        try:
+            elimination_filter_summary = dict(ELIMINATION_FILTERS)
+        except Exception as exc:
+            msg = (
+                "DRY RUN BLOCKED: current methodology could not be loaded. "
+                "Dry-run validates current run intent and needs the active "
+                f"Registry/Profile to display scoring filters. {exc}"
+            )
+            console.print(f"[bold red]{msg}[/bold red]")
+            console.print(
+                "  Fix configs/metrics.yaml or configs/profiles/default_throughput_v1.yaml, "
+                "then run 'quantmap doctor'."
+            )
+            logger.error(msg)
+            sys.exit(1)
+
         _mode_label = run_plan.mode_label
         _mode_desc  = run_plan.mode_description
         summary_lines = [
             f"DRY RUN — {campaign_id}",
+            "  Readiness scope:  structural validation only — telemetry/runtime readiness is not proven",
+            "  Next readiness:   run 'quantmap doctor' or 'quantmap status' before measurement",
             f"  Mode:              {_mode_label} — {_mode_desc}",
             f"  Baseline:          {baseline_path}",
             f"  Lab root:          {_effective_lab_root}" + (
@@ -1851,7 +1910,7 @@ def run_campaign(
             f"  Warm samples/cfg:  {warm_samples}",
             f"  Total requests:    {total_requests}",
             f"  Request types:     {', '.join(sorted(request_files.keys()))}",
-            f"  Elimination filters: {dict(ELIMINATION_FILTERS)}",
+            f"  Elimination filters: {elimination_filter_summary}",
             "",
         ]
         if warm_samples < 20:
@@ -1895,7 +1954,8 @@ def run_campaign(
     # -------------------------------------------------------------------------
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
-        availability = tele.startup_check()
+        from src.telemetry_policy import enforce_current_run_readiness  # noqa: PLC0415
+        availability = enforce_current_run_readiness()
         console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
         console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
@@ -1908,9 +1968,7 @@ def run_campaign(
     # Import the resolved paths from server.py so we check the same binary and
     # model that will actually be used, respecting .env overrides.
     from src.server import SERVER_BIN as _sb_pre, MODEL_PATH as _mp_pre  # noqa: PLC0415
-    from src import doctor
-    doctor.check_defender_exclusions(_sb_pre, _mp_pre, _effective_lab_root, console)
-    doctor.check_windows_search(_effective_lab_root, _mp_pre, console)
+    _run_preflight_checks(_sb_pre, _mp_pre, _effective_lab_root)
 
     # -------------------------------------------------------------------------
     # Initialize filesystem and database
@@ -1962,8 +2020,9 @@ def run_campaign(
                 conn.execute(
                     """INSERT INTO campaigns
                        (id, name, variable, campaign_type, run_mode, status, created_at, started_at,
-                        baseline_sha256, campaign_sha256, rationale)
-                       VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+                        baseline_sha256, campaign_sha256, rationale,
+                        analysis_status, report_status, status_model_version)
+                       VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, 'pending', 'pending', 1)""",
                     (
                         effective_campaign_id,
                         campaign_id,  # human-readable name = parent campaign YAML id
@@ -2013,6 +2072,7 @@ def run_campaign(
 
         campaign_yaml_path = CAMPAIGNS_DIR / f"{campaign_id}.yaml"
         sampling_params = baseline.get("sampling", {})
+        from src.code_identity import capture_quantmap_identity  # noqa: PLC0415
 
         snap = tele.collect_campaign_start_snapshot(
             campaign_id=effective_campaign_id,
@@ -2024,24 +2084,25 @@ def run_campaign(
             baseline_yaml_path=baseline_path,
             sampling_params=sampling_params,
             cpu_affinity_policy=campaign.get("cpu_affinity_details", {}).get("default", "all_cores"),
+            baseline=baseline,
+            quantmap_identity=capture_quantmap_identity(),
+            run_plan_snapshot=run_plan.to_snapshot_dict(),
         )
 
         # Add gpu_vram_total_mb for NGL sweep VRAM headroom reporting.
-        # Uses pynvml directly — same device index as telemetry.py.
+        # Provider-specific NVML access lives behind the Phase 3 helper.
         try:
-            import pynvml  # noqa: PLC0415
-            pynvml.nvmlInit()
-            _handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(_handle)
-            snap["gpu_vram_total_mb"] = mem_info.total / (1024 * 1024)
-            logger.info("gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"])
+            from src.telemetry_nvml import get_gpu_vram_total_mb  # noqa: PLC0415
+            snap["gpu_vram_total_mb"] = get_gpu_vram_total_mb()
+            if snap["gpu_vram_total_mb"] is not None:
+                logger.info("gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"])
         except Exception as _exc:  # noqa: BLE001
             snap["gpu_vram_total_mb"] = None
             logger.warning("Could not capture gpu_vram_total_mb: %s", _exc)
 
         # campaign_start_snapshot (Phase 2 Scoped)
         _existing_snap = conn.execute(
-            "SELECT id FROM campaign_start_snapshot WHERE campaign_id=?",
+            "SELECT id, campaign_yaml_content FROM campaign_start_snapshot WHERE campaign_id=?",
             (effective_campaign_id,),
         ).fetchone()
         if _existing_snap is None:
@@ -2064,16 +2125,84 @@ def run_campaign(
         # Write a parallel human-readable YAML snapshot alongside the report.
         # The DB row is the authoritative record; this file is a convenience copy
         # that can be inspected or diffed without opening SQLite. (L1/U6 fix)
+        canonical_campaign_yaml = (
+            _existing_snap["campaign_yaml_content"]
+            if _existing_snap is not None and _existing_snap["campaign_yaml_content"] is not None
+            else snap.get("campaign_yaml_content") or ""
+        )
         yaml_snapshot_path = _eff_results_dir / effective_campaign_id / "campaign_yaml_snapshot.yaml"
         try:
             yaml_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             yaml_snapshot_path.write_text(
-                snap.get("campaign_yaml_content") or "",
+                canonical_campaign_yaml,
                 encoding="utf-8",
             )
             logger.info("Campaign YAML snapshot written: %s", yaml_snapshot_path)
         except Exception as exc:
             logger.warning("Could not write campaign YAML snapshot file: %s", exc)
+
+        # Phase 3 WSL backend boundary: reject known cross-boundary backend
+        # targets before any config/cycle/server launch. The run-start snapshot
+        # above is already persisted, so the failure has durable context.
+        try:
+            from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: PLC0415
+
+            execution_environment = {}
+            try:
+                execution_environment = json.loads(str(snap.get("execution_environment_json") or "{}"))
+            except Exception:
+                execution_environment = {}
+            assert_backend_execution_allowed(_server_bin, execution_environment=execution_environment)
+        except Exception as exc:
+            from src.backend_execution_policy import BackendExecutionPolicyError  # noqa: PLC0415
+
+            if not isinstance(exc, BackendExecutionPolicyError):
+                raise
+
+            reason = exc.assessment.reason_code or "backend_execution_policy_blocked"
+            marker = {
+                "campaign_id": effective_campaign_id,
+                "reason_code": reason,
+                "backend_path": exc.assessment.backend_path,
+                "backend_target_kind": exc.assessment.backend_target_kind,
+                "execution_support_tier": exc.assessment.execution_support_tier,
+                "diagnostic": exc.assessment.diagnostic,
+            }
+            try:
+                write_raw_jsonl(raw_jsonl_path, {"_backend_execution_policy_block": True, **marker})
+                write_raw_jsonl(telemetry_jsonl_path, {"_backend_execution_policy_block": True, **marker})
+            except Exception as marker_exc:
+                logger.warning("Could not write backend execution policy marker: %s", marker_exc)
+
+            now_fail = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                UPDATE campaigns
+                SET status='failed',
+                    failed_at=?,
+                    failure_reason=?,
+                    analysis_status='skipped',
+                    analysis_failure_reason=?,
+                    report_status='skipped',
+                    report_failure_reason=?,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (
+                    now_fail,
+                    f"{reason}: {exc.assessment.diagnostic}",
+                    "backend execution policy blocked measurement startup",
+                    "backend execution policy blocked measurement startup",
+                    effective_campaign_id,
+                ),
+            )
+            conn.commit()
+            logger.critical("Campaign aborted by backend execution policy: %s", exc)
+            console.print(
+                "[bold red]CAMPAIGN ABORTED — Backend execution policy blocked measurement startup:[/bold red]\n"
+                f"{exc}"
+            )
+            sys.exit(1)
 
         # Log campaign structure so the log file alone is sufficient to reconstruct
         # what was tested. If the YAML is later modified, the log proves what ran.
@@ -2313,6 +2442,7 @@ def run_campaign(
     # falsification from the caller's perspective. (L5 fix)
     console.print("[bold]Running analysis and scoring...[/bold]")
     report_ok = False
+    analysis_ok = False
     try:
         from src.analyze import analyze_campaign
         from src.score import score_campaign
@@ -2337,12 +2467,47 @@ def run_campaign(
         # (e.g. "NGL_sweep__v30"), so analyze/score/report operate only on the
         # rows this run actually inserted — no cross-contamination from prior
         # broader runs.
+        _analysis_started = datetime.now(timezone.utc).isoformat()
+        with get_connection(_eff_db_path) as _status_conn:
+            _status_conn.execute(
+                """
+                UPDATE campaigns
+                SET analysis_status='running',
+                    analysis_started_at=?,
+                    analysis_failure_reason=NULL,
+                    report_status='pending',
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (_analysis_started, effective_campaign_id),
+            )
+            _status_conn.commit()
+
         scores = score_campaign(
             effective_campaign_id, _eff_db_path, baseline,
             campaign=campaign,
             filter_overrides=effective_filter_overrides,
+            current_input=True,
+            current_input_reason="initial_scoring",
         )
         stats = scores["stats"]
+        analysis_ok = True
+        with get_connection(_eff_db_path) as _status_conn:
+            now_status = datetime.now(timezone.utc).isoformat()
+            _status_conn.execute(
+                """
+                UPDATE campaigns
+                SET analysis_status='complete',
+                    analysis_completed_at=?,
+                    report_status='running',
+                    report_started_at=?,
+                    report_failure_reason=NULL,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (now_status, now_status, effective_campaign_id),
+            )
+            _status_conn.commit()
 
         report_path = generate_report(
             effective_campaign_id, _eff_db_path, baseline, scores, stats,
@@ -2355,6 +2520,7 @@ def run_campaign(
 
         # Generate the evidence-first campaign report (new philosophy).
         # Failure here is non-fatal — the primary report above is the critical path.
+        v2_ok = True
         try:
             from src.report_campaign import generate_campaign_report  # noqa: PLC0415
             v2_path = generate_campaign_report(
@@ -2365,15 +2531,96 @@ def run_campaign(
             )
             console.print(f"[green]Evidence report written:[/green] {v2_path}")
         except Exception as _v2_exc:
+            v2_ok = False
             logger.warning(
                 "Evidence-first report generation failed (non-fatal): %s", _v2_exc
             )
+            try:
+                with get_connection(_eff_db_path) as _art_conn:
+                    _now_utc = datetime.now(timezone.utc).isoformat()
+                    _art_conn.execute(
+                        "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+                        (effective_campaign_id, "report_v2_md"),
+                    )
+                    _art_conn.execute(
+                        """
+                        INSERT INTO artifacts (
+                            campaign_id, artifact_type, path, created_at, status,
+                            producer, error_message, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            effective_campaign_id,
+                            "report_v2_md",
+                            str(_effective_lab_root / "results" / effective_campaign_id / "report_v2.md"),
+                            _now_utc,
+                            "failed",
+                            "src.report_campaign.generate_campaign_report",
+                            str(_v2_exc),
+                            _now_utc,
+                        ),
+                    )
+                    _art_conn.commit()
+            except Exception as _art_exc:
+                logger.warning("Could not record report_v2.md failure artifact: %s", _art_exc)
+
+        with get_connection(_eff_db_path) as _status_conn:
+            from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415
+
+            report_status = (
+                summarize_report_artifact_status(effective_campaign_id, _eff_db_path)
+                if v2_ok
+                else "partial"
+            )
+            _status_conn.execute(
+                """
+                UPDATE campaigns
+                SET report_status=?,
+                    report_completed_at=?,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (
+                    report_status,
+                    datetime.now(timezone.utc).isoformat(),
+                    effective_campaign_id,
+                ),
+            )
+            _status_conn.commit()
 
     except Exception as exc:
         logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
         console.print(
             f"[bold red]Analysis failed (raw data is safe — run rescore.py to retry):[/bold red]\n{exc}"
         )
+        with get_connection(_eff_db_path) as _status_conn:
+            now_status = datetime.now(timezone.utc).isoformat()
+            if analysis_ok:
+                _status_conn.execute(
+                    """
+                    UPDATE campaigns
+                    SET report_status='failed',
+                        report_failed_at=?,
+                        report_failure_reason=?,
+                        status_model_version=1
+                    WHERE id=?
+                    """,
+                    (now_status, str(exc), effective_campaign_id),
+                )
+            else:
+                _status_conn.execute(
+                    """
+                    UPDATE campaigns
+                    SET analysis_status='failed',
+                        analysis_failed_at=?,
+                        analysis_failure_reason=?,
+                        report_status='skipped',
+                        status_model_version=1
+                    WHERE id=?
+                    """,
+                    (now_status, str(exc), effective_campaign_id),
+                )
+            _status_conn.commit()
 
     if not report_ok:
         sys.exit(1)
@@ -2408,14 +2655,22 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
 
+    # Idempotency: Remove existing handlers to avoid duplication in re-entry.
+    # While targeted naming is preferred, clearing all root handlers is the
+    # most robust way for this CLI tool to ensure a clean terminal/file state.
+    for h in root.handlers[:]:
+        root.removeHandler(h)
+
     # File handler — full DEBUG detail
     fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.set_name("QuantMap_File")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(fh)
 
     # Console handler — INFO and above only
     ch = logging.StreamHandler()
+    ch.set_name("QuantMap_Console")
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(ch)
@@ -2423,162 +2678,43 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
     logger.info("Log file: %s", log_file)
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False) -> None:
+    """Run environment checks and print a compact summary if issues are found."""
+    from src import doctor
+    from src.diagnostics import DiagnosticReport, Status
 
-    # Summary
-    console.print()
-    if ok:
-        configs = build_config_list(baseline, campaign)
-        if values_override is not None:
-            all_count = len(configs)
-            configs = [c for c in configs if c["variable_value"] in values_override]
-            console.print(
-                f"[dim]--values override: {len(configs)} of {all_count} campaign configs "
-                f"(values={values_override})[/dim]"
-            )
-        # Resolve effective cycles/requests using the same layer ordering as run_campaign:
-        # baseline → campaign YAML → mode-specific default → (CLI --cycles not available here)
-        cycles = campaign.get("cycles_per_config", lab.get("cycles_per_config", 5))
-        reqs = campaign.get("requests_per_cycle", lab.get("requests_per_cycle", 6))
-        source_parts: list[str] = []
-        if "cycles_per_config" in campaign:
-            source_parts.append(f"cycles from campaign YAML ({cycles})")
-        if mode_flag == "quick":
-            # Quick mode override applied here to match run_campaign Layer 2.5 behavior.
-            # CLI --cycles is not available in validate; if user passes --cycles it will
-            # take precedence at actual run time.
-            cycles = QUICK_CYCLES_PER_CONFIG
-            source_parts.append(f"cycles from Quick mode default ({cycles})")
-        elif mode_flag == "standard":
-            cycles = STANDARD_CYCLES_PER_CONFIG
-            source_parts.append(f"cycles from Standard mode default ({cycles})")
-        if "requests_per_cycle" in campaign:
-            source_parts.append(f"requests from campaign YAML ({reqs})")
-        source_note = f"  [dim]({'; '.join(source_parts)})[/dim]" if source_parts else ""
+    results = []
+    # 0. Backend execution boundary
+    results.append(doctor.check_backend_execution_policy(server_bin))
+    # 1. Defender
+    results.extend(doctor.check_defender_exclusions(server_bin, model_path, lab_root))
+    # 2. Windows Search
+    results.append(doctor.check_windows_search())
 
-        warm_per_cycle = reqs - 1  # first request each cycle is cold
-        warm_samples = len(configs) and (cycles * warm_per_cycle)
+    # Aggregate result status
+    has_issues = any(r.status in (Status.WARN, Status.FAIL) for r in results)
 
-        console.print(
-            f"[bold green]All checks passed.[/bold green]  "
-            f"{len(configs)} configs × {cycles} cycles × {reqs} requests = "
-            f"{len(configs) * cycles * reqs} total requests.{source_note}"
-        )
-        _validate_run_mode = resolve_run_mode(values_override, mode_flag)
-        if warm_samples < 20:
-            if _validate_run_mode == "custom":
-                console.print(
-                    f"  [dim]Note: {warm_samples} warm samples per config — "
-                    f"Custom run, sparse data is intentional. "
-                    f"Results are valid for comparison within the tested subset only.[/dim]"
-                )
-            elif _validate_run_mode == "quick":
-                console.print(
-                    f"  [dim]Note: {warm_samples} warm samples per config — "
-                    f"Quick run (1 cycle, complete coverage). Broad but shallow. "
-                    f"Lowest-confidence full-coverage result. "
-                    f"Use Standard or Full for deeper confirmation.[/dim]"
-                )
-            elif _validate_run_mode == "standard":
-                console.print(
-                    f"  [dim]Note: {warm_samples} warm samples per config — "
-                    f"Standard run (reduced repetition). Development-grade result. "
-                    f"Run Full for higher-confidence statistics.[/dim]"
-                )
-            else:
-                console.print(
-                    f"  [dim]Note: {warm_samples} warm samples per config — "
-                    f"detectable difference ~0.4 t/s at 95% confidence. "
-                    f"Use --cycles {max(cycles + 1, 4)} for narrower confidence interval.[/dim]"
-                )
-        logger.info("Validation passed: %s", campaign_id)
-    else:
-        console.print("[bold red]Validation FAILED — fix errors above before running.[/bold red]")
-        logger.error("Validation failed: %s", campaign_id)
-
-    return ok
-
-
-def _list_campaigns() -> None:
-    """
-    Print a summary table of all campaigns recorded in the lab database.
-
-    Columns: campaign ID, status, config count, winner (if scored), completed/started
-    timestamp, report path.  Exits cleanly if no db exists yet.
-    """
-    db_path = DB_PATH
-    if not db_path.exists():
-        console.print("[yellow]No database found.[/yellow] Run a campaign first.")
+    if not has_issues:
+        console.print("[green]Pre-flight checks: OK[/green]")
         return
 
-    with get_connection(db_path) as conn:
-        rows = conn.execute(
-            """
-            SELECT
-                c.id,
-                c.run_mode,
-                c.status,
-                (SELECT COUNT(*) FROM configs cf WHERE cf.campaign_id = c.id) AS cfg_count,
-                (SELECT s.config_id FROM scores s
-                 WHERE s.campaign_id = c.id AND s.is_score_winner = 1
-                 LIMIT 1) AS winner,
-                (SELECT ROUND(s.warm_tg_median, 2) FROM scores s
-                 WHERE s.campaign_id = c.id AND s.is_score_winner = 1
-                 LIMIT 1) AS winner_tg,
-                COALESCE(c.completed_at, c.started_at, c.created_at) AS ts,
-                (SELECT a.path FROM artifacts a
-                 WHERE a.campaign_id = c.id AND a.artifact_type = 'report_md'
-                 LIMIT 1) AS report_path
-            FROM campaigns c
-            ORDER BY ts DESC
-            """,
-        ).fetchall()
-
-    if not rows:
-        console.print("[yellow]No campaigns in database yet.[/yellow]")
-        return
-
-    from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
-
-    tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
-    tbl.add_column("Campaign", style="cyan", no_wrap=True)
-    tbl.add_column("Mode", no_wrap=True)
-    tbl.add_column("Status", no_wrap=True)
-    tbl.add_column("Cfgs", justify="right")
-    tbl.add_column("Winner", no_wrap=True)
-    tbl.add_column("TG (t/s)", justify="right")
-    tbl.add_column("Timestamp (UTC)", no_wrap=True)
-    tbl.add_column("Report")
-
-    status_styles = {
-        "complete": "green",
-        "running": "yellow",
-        "failed": "red",
-        "aborted": "red",
-        "pending": "dim",
-    }
-
-    for campaign_id, run_mode, status, cfg_count, winner, winner_tg, ts, report_path in rows:
-        style = status_styles.get(status, "")
-        ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
-        report_display = str(report_path) if report_path else "—"
-        mode_label = _ML.get(run_mode, run_mode.title()) if run_mode else "—"
-        tbl.add_row(
-            campaign_id,
-            mode_label,
-            f"[{style}]{status}[/{style}]" if style else status,
-            str(cfg_count),
-            winner or "—",
-            f"{winner_tg:.2f}" if winner_tg is not None else "—",
-            ts_short,
-            report_display,
-        )
-
+    # If issues exist, print them in a compact format
+    _title = "Pre-flight Inspection" if is_dry_run else "Pre-flight Issues Found"
+    console.print(f"\n[bold yellow]{_title}[/bold yellow]")
+    for r in results:
+        # Dry-run shows a bit more context if it's not a pass
+        if r.status in (Status.WARN, Status.FAIL):
+            console.print(r.to_rich_line())
+            if r.why_it_matters:
+                console.print(f"    [dim]Why it matters: {r.why_it_matters}[/dim]")
+            if r.recommendation:
+                console.print(f"    [blue]Recommendation: {r.recommendation}[/blue]")
+        elif is_dry_run and r.status == Status.PASS:
+            # Only show passes in dry-run/validate if specifically useful,
+            # but user requested it stay sharp. Skipping passes for now.
+            pass
     console.print()
-    console.print(tbl)
-    console.print()
+
 
 
 def _parse_values_arg(raw: str) -> list:
@@ -2752,87 +2888,3 @@ if __name__ == "__main__":
         baseline_path=_active_baseline,
         mode_flag=_mode_flag,
     )
-
-def list_campaigns():
-    """List all campaigns in the database with their status and winner."""
-    from src.db import get_connection
-    from rich.table import Table
-    
-    with get_connection(DB_PATH) as conn:
-        rows = conn.execute(
-            """SELECT c.id, c.name, c.status, s.config_id as winner_id, c.run_mode, c.created_at 
-               FROM campaigns c
-               LEFT JOIN scores s ON c.id = s.campaign_id AND s.is_score_winner = 1
-               ORDER BY c.created_at DESC"""
-        ).fetchall()
-
-    if not rows:
-        console.print(f"[yellow]{ui.SYM_INFO} No campaigns found in database.[/yellow]")
-        return
-
-    table = Table(box=None if ui.USE_ASCII else None) # Rich usually handles box well, but we can be explicit
-    table.add_column("Campaign", style="cyan", no_wrap=True)
-    table.add_column("Mode", style="magenta")
-    table.add_column("Status", style="green")
-    table.add_column("Winner", style="bold yellow")
-    table.add_column("Timestamp (UTC)", style="dim")
-
-    for r in rows:
-        cid, name, status, winner, mode, created = r
-        ts = datetime.fromisoformat(created).strftime("%Y-%m-%d %H:%M") if created else "—"
-        mode_label = mode.capitalize() if mode else "—"
-        winner_label = winner if winner else "—"
-        
-        # Color status
-        status_style = "green" if status == "complete" else "yellow"
-        if status == "failed": status_style = "red"
-        
-        table.add_row(
-            cid, mode_label, f"[{status_style}]{status}[/{status_style}]", winner_label, ts
-        )
-
-    console.print()
-    console.print(table)
-    console.print()
-
-
-def validate_campaign(
-    campaign_id: str,
-    values_override: list | None = None,
-    baseline_path: Path = BASELINE_YAML,
-    mode_flag: str | None = None,
-) -> bool:
-    """Perform pre-flight checks for a campaign without running measurements."""
-    ui.print_banner(f"Pre-flight Validation: {campaign_id}")
-    try:
-        baseline = load_baseline(baseline_path)
-        campaign = load_campaign(campaign_id)
-        
-        # Check model shards
-        from src.server import resolve_model_shards
-        shards = resolve_model_shards()
-        if not shards:
-            console.print(f"[red]{ui.SYM_FAIL} ERROR: No model shards found.[/red]")
-            return False
-        
-        console.print(f"[green]{ui.SYM_OK} Configuration validated.[/green]")
-        console.print(f"  [dim]Baseline: {baseline_path.name}[/dim]")
-        console.print(f"  [dim]Shards:   {len(shards)} files identified[/dim]")
-        
-        # Check environment doctor
-        from src.server import SERVER_BIN, MODEL_PATH
-        dr_ok = doctor.run_doctor(SERVER_BIN, MODEL_PATH, _derive_lab_root(baseline_path))
-        
-        if dr_ok:
-            console.print(f"\n[bold green]{ui.SYM_OK} Pre-flight complete: Environment is ready.[/bold green]")
-        else:
-            console.print(f"\n[bold yellow]{ui.SYM_WARN} Pre-flight complete with warnings. Review doctor report.[/bold yellow]")
-        
-        return True
-    except Exception as exc:
-        console.print(f"[bold red]{ui.SYM_FAIL} Validation failed:[/bold red] {exc}")
-        return False
-
-
-if __name__ == "__main__":
-    main()

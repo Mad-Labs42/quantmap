@@ -51,28 +51,58 @@ _REPO_ROOT = _SCRIPT_DIR if (_SCRIPT_DIR / "src").is_dir() else Path.cwd()
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-# Imports within try-except to handle environment issues gracefully
+# Version import is intentionally light enough to happen before dispatch.
 try:
-    from src.config import LAB_ROOT, CONFIGS_DIR
-    from src import runner
-    from src import doctor
-    from src import explain
-    from src import export as export_mod
     from src.version import __version__, __methodology_version__
-    import rescore as rescore_mod
-except ImportError as e:
-    print(f"error: failed to import QuantMap internal modules: {e}")
-    sys.path.append(str(_REPO_ROOT))
-    from src.config import LAB_ROOT, CONFIGS_DIR
-    from src import runner
-    from src import doctor
-    from src import audit_methodology
-    from src.version import __version__, __methodology_version__
-    import rescore as rescore_mod
+except ImportError:
+    __version__ = "unknown"
+    __methodology_version__ = "methodology unknown"
+
+
+from src.settings_env import EnvPath, read_env_path, require_env_path
+
+
+def _load_lab_root() -> Path:
+    return require_env_path(
+        "QUANTMAP_LAB_ROOT",
+        purpose="QuantMap lab root",
+        recommendation="Set QUANTMAP_LAB_ROOT in .env, or pass --db/--output where supported.",
+    )
+
+
+def _env_path(name: str) -> Path | None:
+    return read_env_path(name).path
+
+
+def _env_detail(name: str) -> EnvPath:
+    return read_env_path(name)
+
+
+def _default_db_path() -> Path:
+    return _load_lab_root() / "db" / "lab.sqlite"
+
+
+def _default_results_path(*parts: str) -> Path:
+    return _load_lab_root() / "results" / Path(*parts)
+
+
+def _print_path_resolution_error(context: str, exc: Exception) -> None:
+    print(f"error: {context}: {exc}")
+    print("hint: pass --db/--output where supported, or run 'quantmap doctor' to diagnose local setup.")
+
+
+def _blocked_label(value: EnvPath) -> str:
+    return f"blocked ({value.message})"
 
 def cmd_run(args):
     """Execute a benchmark campaign."""
     # Maps to src.runner.run_campaign or src.runner.validate_campaign
+    try:
+        from src import runner  # noqa: PLC0415
+    except Exception as exc:
+        _print_path_resolution_error("could not initialize run environment", exc)
+        sys.exit(1)
+
     baseline_path = Path(args.baseline) if args.baseline else runner.BASELINE_YAML
     if not baseline_path.is_absolute():
         baseline_path = (_REPO_ROOT / baseline_path).resolve()
@@ -107,8 +137,19 @@ def cmd_run(args):
 
 def cmd_doctor(args):
     """Run environment health checks."""
-    from src.server import SERVER_BIN, MODEL_PATH
-    doctor.run_doctor(SERVER_BIN, MODEL_PATH, LAB_ROOT, fix=args.fix)
+    from src import doctor  # noqa: PLC0415
+
+    env_details = {
+        name: _env_detail(name)
+        for name in ("QUANTMAP_SERVER_BIN", "QUANTMAP_MODEL_PATH", "QUANTMAP_LAB_ROOT")
+    }
+    doctor.run_doctor(
+        env_details["QUANTMAP_SERVER_BIN"].path,
+        env_details["QUANTMAP_MODEL_PATH"].path,
+        env_details["QUANTMAP_LAB_ROOT"].path,
+        fix=args.fix,
+        env_details=env_details,
+    )
 
 def cmd_init(args):
     """Run interactive lab setup wizard."""
@@ -122,41 +163,84 @@ def cmd_selftest(args):
 
 def cmd_status(args):
     """Display high-level operational status (Situation Room)."""
-    from src import ui
-    from src.governance import DEFAULT_PROFILE
+    from src import ui  # noqa: PLC0415
     
     console = ui.get_console()
     ui.print_banner("QuantMap: Operational Status")
     
     # Version/Identity
     console.print(f"  [bold]Versions:[/bold]        {__version__} ({__methodology_version__})")
-    console.print(f"  [bold]Lab Root:[/bold]        {LAB_ROOT}")
+    lab_detail = _env_detail("QUANTMAP_LAB_ROOT")
+    lab_root = lab_detail.path
+    if lab_root is not None:
+        console.print(f"  [bold]Lab Root:[/bold]        {lab_root}")
+    else:
+        console.print(f"  [bold]Lab Root:[/bold]        [red]{_blocked_label(lab_detail)}[/red]")
     
     # Active Governance
-    console.print(f"  [bold]Active Profile:[/bold]  {DEFAULT_PROFILE.name} (v{DEFAULT_PROFILE.version})")
+    methodology_ok = False
+    try:
+        from src.governance import get_default_profile  # noqa: PLC0415
+
+        profile = get_default_profile()
+        methodology_ok = True
+        console.print(f"  [bold]Current Methodology:[/bold] {profile.name} (v{profile.version})")
+    except Exception as exc:
+        console.print(f"  [bold]Current Methodology:[/bold] [red]blocked[/red] ({exc})")
     
     # DB Stats
     try:
         import sqlite3
-        db_p = LAB_ROOT / "db" / "lab.sqlite"
-        if db_p.exists():
+        db_p = lab_root / "db" / "lab.sqlite" if lab_root is not None else None
+        if db_p is not None and db_p.exists():
             conn = sqlite3.connect(db_p)
             count = conn.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
             conn.close()
             console.print(f"  [bold]Campaigns:[/bold]     {count} in database")
+        elif db_p is None:
+            console.print("  [bold]Campaigns:[/bold]     unavailable (lab root unavailable)")
         else:
             console.print(f"  [bold]Campaigns:[/bold]     0 (DB not found)")
     except Exception:
         console.print(f"  [bold]Campaigns:[/bold]     Unknown")
+
+    if methodology_ok:
+        console.print("  [bold]Historical Trust:[/bold] snapshot-complete runs remain DB-authoritative")
+    else:
+        console.print("  [bold]Historical Trust:[/bold] snapshot-complete runs remain readable from DB evidence")
+        console.print("  [dim]Current-run scoring and explicit current-input rescore are blocked until methodology files are fixed.[/dim]")
+
+    try:
+        from src.telemetry_policy import probe_provider_readiness  # noqa: PLC0415
+
+        provider_readiness = probe_provider_readiness()
+        exec_env = provider_readiness.get("execution_environment") or {}
+        support_tier = exec_env.get("support_tier", "unknown")
+        measurement_grade = exec_env.get("measurement_grade", "unknown")
+        console.print(
+            f"  [bold]Execution Support:[/bold] {support_tier} "
+            f"(measurement-grade: {measurement_grade})"
+        )
+        if support_tier == "wsl_degraded":
+            reasons = ", ".join(exec_env.get("degraded_reasons") or [])
+            console.print(f"  [yellow]WSL degraded:[/yellow] {reasons or 'explicit degraded execution target'}")
+    except Exception as exc:
+        console.print(f"  [bold]Execution Support:[/bold] unknown ({exc})")
         
     console.print(f"\n[bold]{ui.SYM_DIVIDER}[/bold] Readiness")
     # Quick doctor summary (silent)
-    from src.server import SERVER_BIN, MODEL_PATH
-    from src.diagnostics import Status as DStatus, DiagnosticReport, Readiness
+    from src import doctor  # noqa: PLC0415
+    from src.diagnostics import DiagnosticReport, Readiness  # noqa: PLC0415
+
     report = DiagnosticReport("Status Pulse")
-    report.add(doctor.check_lab_structure(LAB_ROOT))
-    report.add(doctor.check_server_binary(SERVER_BIN))
-    report.add(doctor.check_hwinfo_shared_memory())
+    server_detail = _env_detail("QUANTMAP_SERVER_BIN")
+    model_detail = _env_detail("QUANTMAP_MODEL_PATH")
+    report.add(doctor.check_lab_structure(lab_root, detail=lab_detail.message))
+    report.add(doctor.check_registry_load())
+    report.add(doctor.check_default_profile_load())
+    report.add(doctor.check_server_binary(server_detail.path, detail=server_detail.message))
+    report.add(doctor.check_model_path(model_detail.path, detail=model_detail.message))
+    report.add(doctor.check_telemetry_provider_readiness())
     
     final = report.readiness
     if final == Readiness.READY:
@@ -171,6 +255,11 @@ def cmd_status(args):
 def cmd_rescore(args):
     """Re-play analysis/scoring logic on existing campaign data."""
     import yaml
+    try:
+        import rescore as rescore_mod  # noqa: PLC0415
+    except Exception as exc:
+        _print_path_resolution_error("could not initialize rescore environment", exc)
+        sys.exit(1)
     
     baseline_path = Path(args.baseline) if args.baseline else rescore_mod.BASELINE_YAML
     if not baseline_path.exists():
@@ -192,7 +281,12 @@ def cmd_rescore(args):
     results = {}
     for idx, cid in enumerate(campaign_ids, start=1):
         print(f"[{idx}/{total}] Re-scoring: {cid}")
-        results[cid] = rescore_mod.rescore(cid, baseline, force_new_anchors=args.force_new_anchors)
+        results[cid] = rescore_mod.rescore(
+            cid,
+            baseline,
+            force_new_anchors=args.force_new_anchors,
+            current_input=args.current_input,
+        )
 
     failed = [c for c, ok in results.items() if not ok]
     if failed:
@@ -202,7 +296,13 @@ def cmd_rescore(args):
 
 def cmd_audit(args):
     """Verify methodological integrity between two campaigns."""
-    db_path = args.db or (LAB_ROOT / "db" / "lab.sqlite")
+    from src import audit_methodology  # noqa: PLC0415
+
+    try:
+        db_path = args.db or _default_db_path()
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve audit DB path", exc)
+        sys.exit(1)
     m1 = audit_methodology.get_methodology(args.campaign1, db_path)
     m2 = audit_methodology.get_methodology(args.campaign2, db_path)
     
@@ -218,61 +318,96 @@ def cmd_audit(args):
 
 def cmd_list(args):
     """List all campaigns and their status."""
+    try:
+        from src import runner  # noqa: PLC0415
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve campaign list DB path", exc)
+        sys.exit(1)
+
     runner.list_campaigns()
 
 def cmd_explain(args):
     """Generate a technical briefing explaining a campaign outcome."""
-    db_p = args.db or (LAB_ROOT / "db" / "lab.sqlite")
+    from src import explain  # noqa: PLC0415
+
+    try:
+        db_p = args.db or _default_db_path()
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve explain DB path", exc)
+        sys.exit(1)
     briefing = explain.get_campaign_briefing(args.campaign, db_p, evidence_mode=args.evidence)
     explain.print_briefing(briefing, evidence_mode=args.evidence)
 
 def cmd_explain_compare(args):
     """Generate a technical briefing explaining narrative shifts between two campaigns."""
-    db_p = args.db or (LAB_ROOT / "db" / "lab.sqlite")
+    from src import explain  # noqa: PLC0415
+
+    try:
+        db_p = args.db or _default_db_path()
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve explain DB path", exc)
+        sys.exit(1)
     briefing = explain.get_compare_briefing(args.campaign1, args.campaign2, db_p)
     explain.print_briefing(briefing)
 
 def cmd_export(args):
     """Export a campaign to a portable .qmap case file."""
-    db_p = args.db or (LAB_ROOT / "db" / "lab.sqlite")
-    output_path = Path(args.output) if args.output else (LAB_ROOT / "results" / f"{args.campaign}.qmap")
+    from src import export as export_mod  # noqa: PLC0415
+
+    try:
+        db_p = args.db or _default_db_path()
+        output_path = Path(args.output) if args.output else _default_results_path(f"{args.campaign}.qmap")
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve export paths", exc)
+        sys.exit(1)
     
-    export_mod.run_export(
+    ok = export_mod.run_export(
         args.campaign, 
         db_p, 
         output_path, 
         lite=args.lite, 
-        strip_env=args.strip_env
+        strip_env=args.strip_env,
+        redaction_root=_env_path("QUANTMAP_LAB_ROOT") if args.strip_env else None,
     )
+    if not ok:
+        sys.exit(1)
 
 def cmd_about(args):
     """Display rich system and provenance information."""
-    from src.governance import DEFAULT_PROFILE, BUILTIN_REGISTRY
+    from src import ui  # noqa: PLC0415
     
     console = ui.get_console()
     ui.print_banner("QuantMap: About & Provenance")
     
     console.print(f"  [bold]Software Version:[/bold]      {__version__}")
     console.print(f"  [bold]Methodology Version:[/bold]   {__methodology_version__}")
-    console.print(f"  [bold]Active Profile:[/bold]        {DEFAULT_PROFILE.name} (v{DEFAULT_PROFILE.version})")
-    console.print(f"  [bold]Registry Metrics:[/bold]      {len(BUILTIN_REGISTRY)} defined")
-    console.print(f"  [bold]Lab Root:[/bold]              {LAB_ROOT}")
-    console.print(f"  [bold]DB Path:[/bold]               {LAB_ROOT / 'db' / 'lab.sqlite'}")
-    
-    console.print(f"\n[green]{ui.SYM_OK} Environment identity verified.[/green]\n")
+    try:
+        from src.governance import get_builtin_registry, get_default_profile  # noqa: PLC0415
+
+        profile = get_default_profile()
+        registry = get_builtin_registry()
+        console.print(f"  [bold]Current Profile:[/bold]       {profile.name} (v{profile.version})")
+        console.print(f"  [bold]Registry Metrics:[/bold]      {len(registry)} defined")
+    except Exception as exc:
+        console.print(f"  [bold]Current Methodology:[/bold]   [red]blocked[/red] ({exc})")
+
+    lab_root = _env_path("QUANTMAP_LAB_ROOT")
+    console.print(f"  [bold]Lab Root:[/bold]              {lab_root or 'unavailable'}")
+    console.print(f"  [bold]DB Path:[/bold]               {(lab_root / 'db' / 'lab.sqlite') if lab_root else 'unavailable'}")
+
+    console.print(f"\n[green]{ui.SYM_OK} Software identity available.[/green]\n")
 
 def cmd_compare(args):
     """Forensic comparison between two campaigns."""
     from src import compare
     from src import report_compare
     from src import ui
-    from pathlib import Path
 
     console = ui.get_console()
     
     # 1. Generate Structured Analysis
     try:
-        db_p = args.db or (Path(LAB_ROOT) / "db" / "lab.sqlite")
+        db_p = args.db or _default_db_path()
         result = compare.generate_compare_result(args.campaign1, args.campaign2, db_p)
     except Exception as e:
         console.print(f"[bold red]{ui.SYM_FAIL} Comparison Analysis Failed:[/bold red] {e}")
@@ -300,7 +435,11 @@ def cmd_compare(args):
     output_path = args.output
     if not output_path:
         # Default: results/comparisons/C01_vs_C02.md
-        output_path = Path(LAB_ROOT) / "results" / "comparisons" / f"{args.campaign1}_vs_{args.campaign2}.md"
+        try:
+            output_path = _default_results_path("comparisons", f"{args.campaign1}_vs_{args.campaign2}.md")
+        except Exception as exc:
+            _print_path_resolution_error("could not resolve comparison output path", exc)
+            sys.exit(1)
     else:
         output_path = Path(output_path)
 
@@ -374,6 +513,7 @@ def main():
     rescore_parser.add_argument("--all", action="store_true", help="Rescore all completed campaigns")
     rescore_parser.add_argument("--baseline", help="Path to baseline.yaml override")
     rescore_parser.add_argument("--force-new-anchors", action="store_true", help="Force re-anchoring to current Registry values")
+    rescore_parser.add_argument("--current-input", action="store_true", help="Explicitly use current files when a complete historical snapshot is unavailable")
     rescore_parser.set_defaults(func=cmd_rescore)
 
     # --- AUDIT ---

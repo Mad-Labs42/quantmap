@@ -36,6 +36,7 @@ class Briefing:
     confidence: Confidence = Confidence.MODERATE
     confidence_rationale: str = ""
     copy_summary: str = ""
+    evidence_lines: List[str] = field(default_factory=list)
 
 # Normalized buckets for elimination
 REASON_BUCKETS = {
@@ -62,6 +63,70 @@ def normalize_reason(raw_reason: str) -> str:
 
 def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool = False) -> Briefing:
     """Generate a technical briefing for a single campaign."""
+    methodology_label = "methodology_unknown"
+    trust_evidence_lines: list[str] = []
+    try:
+        from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+
+        identity = load_run_identity(campaign_id, db_path)
+        methodology_label = methodology_source_label(identity.methodology)
+        snapshot = identity.start_snapshot
+
+        execution_raw = snapshot.get("execution_environment_json")
+        if execution_raw:
+            try:
+                execution = json.loads(str(execution_raw))
+                reasons = execution.get("degraded_reasons") or []
+                reason_text = ", ".join(str(item) for item in reasons) if reasons else "none"
+                trust_evidence_lines.extend(
+                    [
+                        f"Execution support tier: {execution.get('support_tier', 'unknown')}",
+                        f"Execution boundary: {execution.get('boundary_type', 'unknown')}",
+                        f"Measurement-grade platform: {execution.get('measurement_grade', 'unknown')}",
+                        f"Platform degradation reasons: {reason_text}",
+                    ]
+                )
+            except Exception as exc:
+                logger.debug("Could not parse execution environment evidence: %s", exc)
+
+        provider_raw = snapshot.get("telemetry_provider_identity_json")
+        if provider_raw:
+            try:
+                providers = json.loads(str(provider_raw))
+                if isinstance(providers, list):
+                    provider_text = "; ".join(
+                        f"{provider.get('provider_label', provider.get('provider_id', 'provider'))} "
+                        f"({provider.get('status', 'unknown')})"
+                        for provider in providers
+                        if isinstance(provider, dict)
+                    )
+                    if provider_text:
+                        trust_evidence_lines.append(f"Telemetry providers: {provider_text}")
+            except Exception as exc:
+                logger.debug("Could not parse telemetry provider evidence: %s", exc)
+
+        capture_quality = snapshot.get("telemetry_capture_quality")
+        if capture_quality:
+            trust_evidence_lines.append(f"Telemetry capture quality: {capture_quality}")
+    except Exception as exc:
+        logger.debug("Could not load trust methodology context for briefing: %s", exc)
+
+    def _attach_trust_context(briefing: Briefing) -> Briefing:
+        briefing.watchlist.append(f"Methodology evidence: {methodology_label}")
+        briefing.evidence_lines.extend(trust_evidence_lines)
+        if methodology_label != "snapshot_complete":
+            briefing.confidence = Confidence.CAUTION
+            suffix = (
+                f" Methodology evidence is {methodology_label}; historical "
+                "interpretation should be treated as weaker evidence."
+            )
+            briefing.confidence_rationale = (briefing.confidence_rationale or "").rstrip() + suffix
+        if briefing.copy_summary:
+            briefing.copy_summary += f"\nMethodology evidence: {methodology_label}"
+            for line in trust_evidence_lines:
+                briefing.copy_summary += f"\n{line}"
+        return briefing
+
     with get_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
         
@@ -110,7 +175,7 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
             # Identify the "Closest Failure"
             # (In a real implementation, we'd query configurations and see which was closest to gates)
             b.top_constraint = "Primary gate rejection: Stability or Latency floors."
-        return b
+        return _attach_trust_context(b)
 
     # --- WINNER Path ---
     winner = winners[0]
@@ -173,7 +238,7 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
         f"Constraint: {b.top_constraint.replace('[bold]', '').replace('[/bold]', '')}"
     )
 
-    return b
+    return _attach_trust_context(b)
 
 def print_briefing(b: Briefing, evidence_mode: bool = False):
     """Render a briefing to the console."""
@@ -203,6 +268,8 @@ def print_briefing(b: Briefing, evidence_mode: bool = False):
         if b.margin_of_victory:
             console.print(f"  [dim]Comparative Lead:   {b.margin_of_victory}[/dim]")
         console.print("  [dim]Heuristic Engine: Quantitative Lead Analysis (v1.1) active.[/dim]")
+        for line in b.evidence_lines:
+            console.print(f"  [dim]{line}[/dim]")
     
     # Copy-paste block
     console.print(f"\n[bold]{ui.SYM_DIVIDER}[/bold] Copy-Paste Summary:")

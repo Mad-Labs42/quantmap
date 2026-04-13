@@ -51,6 +51,10 @@ from typing import Any
 import warnings
 
 import psutil
+from src.execution_environment import SUPPORT_WSL_DEGRADED, classify_execution_environment
+from src.telemetry_hwinfo import read_hwinfo_shared_memory_bytes
+from src.telemetry_nvml import probe_nvml_provider
+from src.telemetry_provider import build_provider_evidence
 
 try:
     with warnings.catch_warnings():
@@ -165,18 +169,6 @@ class HWiNFOUnavailable(RuntimeError):
     """Raised when HWiNFO shared memory cannot be opened."""
 
 
-# Win32 type setup (done once at module level)
-_k32 = ctypes.windll.kernel32
-_k32.OpenFileMappingW.restype  = ctypes.wintypes.HANDLE
-_k32.OpenFileMappingW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
-_k32.MapViewOfFile.restype     = ctypes.c_void_p
-_k32.MapViewOfFile.argtypes    = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
-                                   ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_size_t]
-_k32.UnmapViewOfFile.restype   = ctypes.wintypes.BOOL
-_k32.UnmapViewOfFile.argtypes  = [ctypes.c_void_p]
-_k32.CloseHandle.restype       = ctypes.wintypes.BOOL
-_k32.CloseHandle.argtypes      = [ctypes.wintypes.HANDLE]
-
 _FILE_MAP_READ = 0x0004
 
 
@@ -191,42 +183,11 @@ def _read_hwinfo_sm_bytes() -> bytes | None:
 
     Returns None if HWiNFO is not running or shared memory is unavailable.
     """
-    h = _k32.OpenFileMappingW(_FILE_MAP_READ, False, _HWINFO_SM_NAME)
-    if not h:
-        return None
-
-    try:
-        addr = _k32.MapViewOfFile(h, _FILE_MAP_READ, 0, 0, 0)
-        if not addr:
-            return None
-        try:
-            # Read header to determine how many bytes we actually need
-            header_raw = ctypes.string_at(addr, _HEADER_SIZE)
-            if len(header_raw) < _HEADER_SIZE:
-                return None
-
-            fields = struct.unpack(_HEADER_FMT, header_raw)
-            sig = fields[0]
-            if sig != _HWINFO_SIGNATURE:
-                logger.debug("HWiNFO signature mismatch: got 0x%08X", sig)
-                return None
-
-            off_sensor, sz_sensor, num_sensor = fields[4], fields[5], fields[6]
-            off_reading, sz_reading, num_reading = fields[7], fields[8], fields[9]
-
-            total_bytes = max(
-                _HEADER_SIZE,
-                (off_sensor  + sz_sensor  * num_sensor)  if num_sensor  > 0 else 0,
-                (off_reading + sz_reading * num_reading) if num_reading > 0 else 0,
-            )
-            if total_bytes <= 0 or total_bytes > 32 * 1024 * 1024:
-                return None
-
-            return ctypes.string_at(addr, total_bytes)
-        finally:
-            _k32.UnmapViewOfFile(ctypes.c_void_p(addr))
-    finally:
-        _k32.CloseHandle(h)
+    return read_hwinfo_shared_memory_bytes(
+        header_size=_HEADER_SIZE,
+        header_fmt=_HEADER_FMT,
+        signature=_HWINFO_SIGNATURE,
+    )
 
 
 def _read_hwinfo_readings(sm: io.BytesIO) -> list[dict[str, Any]]:
@@ -526,12 +487,16 @@ def startup_check() -> dict[str, Any]:
     Returns availability report dict.
     """
     global _NVML_INITIALIZED, _NVML_HANDLE
+    execution_environment = classify_execution_environment()
+    support_tier = execution_environment.support_tier
+    wsl_degraded = support_tier == SUPPORT_WSL_DEGRADED
 
     report: dict[str, Any] = {
         "abort": {},
         "warn": {},
         "silent": {},
         "source_details": {},
+        "execution_environment": execution_environment.to_dict(),
     }
 
     # ---- HWiNFO (PRIMARY for all hardware temps/power/clocks) ---------------
@@ -539,17 +504,27 @@ def startup_check() -> dict[str, Any]:
     hwinfo_ok = len(readings) > 0
     report["source_details"]["hwinfo_available"] = hwinfo_ok
     report["source_details"]["hwinfo_reading_count"] = len(readings)
+    cpu_temp = None
 
-    if not hwinfo_ok:
+    if not hwinfo_ok and not wsl_degraded:
         raise TelemetryStartupError(
             "ABORT: HWiNFO64 shared memory not accessible.\n\n"
             "HWiNFO must be running with 'Shared Memory Support' enabled.\n"
             "Required for cpu_temp_c (ABORT tier).\n\n"
             "If you do not have HWiNFO, you cannot run QuantMap campaigns safely."
         )
+    if not hwinfo_ok and wsl_degraded:
+        report["abort"]["cpu_temp_c"] = False
+        report["warn"]["wsl_degraded_cpu_thermal"] = False
+        report["source_details"]["cpu_temp_label"] = "unavailable_wsl_degraded"
+        logger.warning(
+            "WSL degraded run: CPU package temperature is unavailable; "
+            "run is not measurement-grade."
+        )
 
     # Confirm CPU Package temp is readable
-    cpu_temp = _find_reading(readings, "CPU Package", rtype=_RTYPE_TEMP)
+    if readings:
+        cpu_temp = _find_reading(readings, "CPU Package", rtype=_RTYPE_TEMP)
     if cpu_temp is None:
         # Try alternate labels used by HWiNFO on some Intel chips
         for alt_label in ("CPU (Tctl/Tdie)", "CPU Tctl", "CPU Die", "DTS"):
@@ -558,7 +533,7 @@ def startup_check() -> dict[str, Any]:
                 report["source_details"]["cpu_temp_label"] = alt_label
                 break
 
-    if cpu_temp is None:
+    if cpu_temp is None and not wsl_degraded:
         # Log all temp sensor labels for diagnosis
         temp_labels = [r["label"] for r in readings if r["rtype"] == _RTYPE_TEMP]
         raise TelemetryStartupError(
@@ -569,38 +544,53 @@ def startup_check() -> dict[str, Any]:
             + "\n\nCheck HWiNFO sensor list and ensure the CPU sensor is enabled."
         )
 
-    report["abort"]["cpu_temp_c"] = True
-    report["source_details"]["cpu_temp_label"] = report["source_details"].get("cpu_temp_label", "CPU Package")
-    logger.info("cpu_temp_c (ABORT) available via HWiNFO: %.1f°C", cpu_temp)
+    report["abort"]["cpu_temp_c"] = cpu_temp is not None
+    if cpu_temp is not None:
+        report["source_details"]["cpu_temp_label"] = report["source_details"].get("cpu_temp_label", "CPU Package")
+        logger.info("cpu_temp_c (ABORT) available via HWiNFO: %.1f°C", cpu_temp)
 
     # ---- GPU via pynvml (ABORT for VRAM + throttle, WARN for temp) ----------
     nvml_ok = _init_nvml()
     report["source_details"]["pynvml"] = nvml_ok
 
-    if not nvml_ok:
+    if not nvml_ok and not wsl_degraded:
         raise TelemetryStartupError(
             "ABORT: pynvml unavailable — gpu_vram_used_mb and power_limit_throttling "
             "cannot be collected.\n"
             "Verify nvidia-ml-py is installed: pip install nvidia-ml-py\n"
             "Verify NVIDIA driver is accessible."
         )
+    if not nvml_ok and wsl_degraded:
+        report["abort"]["gpu_vram_used_mb"] = False
+        report["abort"]["power_limit_throttling"] = False
+        logger.warning("WSL degraded run: NVML Python provider unavailable.")
 
-    try:
-        mem = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
-        report["abort"]["gpu_vram_used_mb"] = True
-    except Exception as exc:
-        raise TelemetryStartupError(
-            f"ABORT: pynvml initialized but VRAM read failed: {exc}"
-        ) from exc
+    gpu_vram_available = False
+    if nvml_ok:
+        try:
+            mem = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
+            report["abort"]["gpu_vram_used_mb"] = True
+            gpu_vram_available = True
+        except Exception as exc:
+            if not wsl_degraded:
+                raise TelemetryStartupError(
+                    f"ABORT: pynvml initialized but VRAM read failed: {exc}"
+                ) from exc
+            report["abort"]["gpu_vram_used_mb"] = False
 
-    try:
-        pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(_NVML_HANDLE)
-        report["abort"]["power_limit_throttling"] = True
-    except Exception as exc:
-        raise TelemetryStartupError(
-            f"ABORT: pynvml throttle reason query failed: {exc}\n"
-            "power_limit_throttling (ABORT tier) requires driver support for this query."
-        ) from exc
+    power_limit_available = False
+    if nvml_ok:
+        try:
+            pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(_NVML_HANDLE)
+            report["abort"]["power_limit_throttling"] = True
+            power_limit_available = True
+        except Exception as exc:
+            if not wsl_degraded:
+                raise TelemetryStartupError(
+                    f"ABORT: pynvml throttle reason query failed: {exc}\n"
+                    "power_limit_throttling (ABORT tier) requires driver support for this query."
+                ) from exc
+            report["abort"]["power_limit_throttling"] = False
 
     # GPU temp (WARN — try HWiNFO first, then pynvml)
     gpu_temp_hwinfo = _find_reading(readings, "GPU Temperature", rtype=_RTYPE_TEMP)
@@ -647,6 +637,49 @@ def startup_check() -> dict[str, Any]:
     report["silent"]["hwinfo_reading_count"] = len(readings)
 
     report["abort"]["timestamp"] = True
+
+    nvml_details: dict[str, Any] = {}
+    nvml_probe_status: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE is not None:
+        try:
+            driver = pynvml.nvmlSystemGetDriverVersion()
+            nvml_details["driver_version"] = (
+                driver.decode("utf-8", errors="replace") if isinstance(driver, bytes) else str(driver)
+            )
+        except Exception:
+            pass
+        try:
+            gpu_name = pynvml.nvmlDeviceGetName(_NVML_HANDLE)
+            nvml_details["gpu_name"] = (
+                gpu_name.decode("utf-8", errors="replace") if isinstance(gpu_name, bytes) else str(gpu_name)
+            )
+        except Exception:
+            pass
+    elif wsl_degraded:
+        nvml_probe = probe_nvml_provider()
+        nvml_probe_status = nvml_probe.status
+        nvml_details.update(nvml_probe.details)
+        if nvml_probe.provider_version:
+            nvml_details["driver_version"] = nvml_probe.provider_version
+
+    provider_evidence = build_provider_evidence(
+        hwinfo_available=hwinfo_ok,
+        hwinfo_reading_count=len(readings),
+        nvml_available=nvml_ok,
+        nvml_status=nvml_probe_status,
+        nvml_details=nvml_details,
+        cpu_temp_available=cpu_temp is not None,
+        gpu_vram_available=gpu_vram_available,
+        power_limit_available=power_limit_available,
+        gpu_temp_available=report["warn"]["gpu_temp_c"],
+        support_tier=support_tier,
+        notes=execution_environment.degraded_reasons,
+    )
+    report["provider_evidence"] = {
+        "provider_identity": provider_evidence.provider_identity_json(),
+        "capabilities": provider_evidence.capabilities_json(),
+        "capture_quality": provider_evidence.capture_quality,
+    }
 
     logger.info(
         "Telemetry startup check passed. "
@@ -1500,6 +1533,9 @@ def collect_campaign_start_snapshot(
     baseline_yaml_path: Path,
     sampling_params: dict,
     cpu_affinity_policy: str,
+    baseline: dict[str, Any] | None = None,
+    quantmap_identity: dict[str, Any] | None = None,
+    run_plan_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect a complete system fingerprint at campaign start (MDD §10.5)."""
     import hashlib
@@ -1560,30 +1596,54 @@ def collect_campaign_start_snapshot(
             snap[f"{label}_sha256"] = None
             raw = None
 
-        # Store verbatim YAML text for the campaign file only.
-        # This makes every DB row fully self-contained: if configs/ is modified
-        # or deleted after a run, the exact YAML that governed the run is still
-        # recoverable from the database. (L1/U6 fix)
         if label == "campaign_yaml":
             try:
                 snap["campaign_yaml_content"] = raw.decode("utf-8") if raw is not None else None
             except Exception:
                 snap["campaign_yaml_content"] = None
+        elif label == "baseline_yaml":
+            try:
+                snap["baseline_yaml_content"] = raw.decode("utf-8") if raw is not None else None
+            except Exception:
+                snap["baseline_yaml_content"] = None
+
+    snap["baseline_yaml_path"] = str(baseline_yaml_path)
+    if baseline is not None:
+        try:
+            baseline_identity = {
+                "model": baseline.get("model", {}),
+                "machine": baseline.get("machine", {}),
+                "runtime": baseline.get("runtime", {}),
+                "sampling": baseline.get("sampling", {}),
+            }
+            snap["baseline_identity_json"] = json.dumps(baseline_identity, sort_keys=True)
+        except Exception:
+            snap["baseline_identity_json"] = None
+    if quantmap_identity is not None:
+        snap["quantmap_identity_json"] = json.dumps(quantmap_identity, sort_keys=True)
+    if run_plan_snapshot is not None:
+        snap["run_plan_json"] = json.dumps(run_plan_snapshot, sort_keys=True)
+    snap["snapshot_schema_version"] = 2
+    snap["snapshot_capture_quality"] = "complete" if snap.get("baseline_yaml_content") else "partial"
+    execution_environment = classify_execution_environment()
+    snap["execution_environment_json"] = execution_environment.to_json()
 
     snap["os_version"] = platform.version()
     snap["os_platform"] = platform.platform()
     snap["python_version"] = sys.version
 
     try:
+        driver = pynvml.nvmlSystemGetDriverVersion() if _NVML_INITIALIZED else None
         snap["nvidia_driver"] = (
-            pynvml.nvmlSystemGetDriverVersion() if _NVML_INITIALIZED else None
+            driver.decode("utf-8", errors="replace") if isinstance(driver, bytes) else driver
         )
     except Exception:
         snap["nvidia_driver"] = None
 
     try:
+        gpu_name = pynvml.nvmlDeviceGetName(_NVML_HANDLE) if _NVML_INITIALIZED and _NVML_HANDLE else None
         snap["gpu_name"] = (
-            pynvml.nvmlDeviceGetName(_NVML_HANDLE) if _NVML_INITIALIZED and _NVML_HANDLE else None
+            gpu_name.decode("utf-8", errors="replace") if isinstance(gpu_name, bytes) else gpu_name
         )
     except Exception:
         snap["gpu_name"] = None
@@ -1610,6 +1670,36 @@ def collect_campaign_start_snapshot(
         )
     except Exception:
         snap["gpu_temp_at_start_c"] = None
+
+    nvml_details: dict[str, Any] = {}
+    nvml_probe_status: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE:
+        if snap.get("nvidia_driver"):
+            nvml_details["driver_version"] = snap.get("nvidia_driver")
+        if snap.get("gpu_name"):
+            nvml_details["gpu_name"] = snap.get("gpu_name")
+    elif execution_environment.support_tier == SUPPORT_WSL_DEGRADED:
+        nvml_probe = probe_nvml_provider()
+        nvml_probe_status = nvml_probe.status
+        nvml_details.update(nvml_probe.details)
+        if nvml_probe.provider_version:
+            nvml_details["driver_version"] = nvml_probe.provider_version
+    provider_evidence = build_provider_evidence(
+        hwinfo_available=bool(readings),
+        hwinfo_reading_count=len(readings),
+        nvml_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        nvml_status=nvml_probe_status,
+        nvml_details=nvml_details,
+        cpu_temp_available=snap["cpu_temp_at_start_c"] is not None,
+        gpu_vram_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        power_limit_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        gpu_temp_available=snap["gpu_temp_at_start_c"] is not None,
+        support_tier=execution_environment.support_tier,
+        notes=execution_environment.degraded_reasons,
+    )
+    snap["telemetry_provider_identity_json"] = provider_evidence.provider_identity_json()
+    snap["telemetry_capabilities_json"] = provider_evidence.capabilities_json()
+    snap["telemetry_capture_quality"] = provider_evidence.capture_quality
 
     logger.info("Campaign start snapshot collected for %s", campaign_id)
     return snap

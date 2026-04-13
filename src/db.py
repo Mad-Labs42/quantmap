@@ -20,9 +20,12 @@ Schema overview (MDD §11.2 + extensions):
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,18 @@ CREATE TABLE IF NOT EXISTS campaigns (
     campaign_sha256     TEXT,
     machine_profile_json TEXT,
     rationale           TEXT,
-    notes_json          TEXT
+    notes_json          TEXT,
+    analysis_status     TEXT NOT NULL DEFAULT 'pending',
+    analysis_started_at TEXT,
+    analysis_completed_at TEXT,
+    analysis_failed_at  TEXT,
+    analysis_failure_reason TEXT,
+    report_status       TEXT NOT NULL DEFAULT 'pending',
+    report_started_at   TEXT,
+    report_completed_at TEXT,
+    report_failed_at    TEXT,
+    report_failure_reason TEXT,
+    status_model_version INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS campaign_start_snapshot (
@@ -69,6 +83,17 @@ CREATE TABLE IF NOT EXISTS campaign_start_snapshot (
     campaign_yaml_sha256     TEXT,
     campaign_yaml_content    TEXT,   -- full YAML text, verbatim at campaign start
     baseline_yaml_sha256     TEXT,
+    baseline_yaml_path       TEXT,
+    baseline_yaml_content    TEXT,
+    baseline_identity_json   TEXT,
+    quantmap_identity_json   TEXT,
+    run_plan_json            TEXT,
+    snapshot_schema_version  INTEGER,
+    snapshot_capture_quality TEXT,
+    telemetry_provider_identity_json TEXT,
+    telemetry_capabilities_json TEXT,
+    telemetry_capture_quality TEXT,
+    execution_environment_json TEXT,
     os_version               TEXT,
     os_platform              TEXT,
     python_version           TEXT,
@@ -270,7 +295,29 @@ CREATE TABLE IF NOT EXISTS scores (
     -- Baseline comparison
     warm_tg_vs_baseline_pct      REAL,    -- % improvement vs S0-new
     warm_ttft_vs_baseline_pct    REAL,
+    methodology_snapshot_id      INTEGER,
     UNIQUE (campaign_id, config_id)
+);
+
+CREATE TABLE IF NOT EXISTS methodology_snapshots (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id        TEXT NOT NULL REFERENCES campaigns(id),
+    created_at         TEXT NOT NULL,
+    snapshot_kind      TEXT NOT NULL,
+    methodology_version TEXT,
+    profile_name       TEXT,
+    profile_version    TEXT,
+    profile_yaml_content TEXT,
+    registry_yaml_content TEXT,
+    weights_json       TEXT,
+    gates_json         TEXT,
+    anchors_json       TEXT,
+    source_paths_json  TEXT,
+    source_hashes_json TEXT,
+    capture_quality    TEXT NOT NULL,
+    capture_source     TEXT NOT NULL,
+    replaces_snapshot_id INTEGER,
+    is_current         INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS artifacts (
@@ -280,7 +327,12 @@ CREATE TABLE IF NOT EXISTS artifacts (
     -- report_md | scores_csv | raw_jsonl | telemetry_jsonl | config_yaml
     path          TEXT NOT NULL,
     sha256        TEXT,
-    created_at    TEXT NOT NULL
+    created_at    TEXT NOT NULL,
+    status        TEXT,
+    producer      TEXT,
+    error_message TEXT,
+    updated_at    TEXT,
+    verification_source TEXT
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -297,6 +349,8 @@ CREATE INDEX IF NOT EXISTS idx_requests_outcome ON requests(outcome);
 CREATE INDEX IF NOT EXISTS idx_telemetry_config ON telemetry(campaign_id, config_id);
 CREATE INDEX IF NOT EXISTS idx_cycles_config ON cycles(config_id, campaign_id);
 CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_methodology_snapshots_campaign ON methodology_snapshots(campaign_id, is_current);
+CREATE INDEX IF NOT EXISTS idx_artifacts_campaign_type ON artifacts(campaign_id, artifact_type);
 """
 
 
@@ -310,7 +364,7 @@ CREATE INDEX IF NOT EXISTS idx_scores_campaign ON scores(campaign_id);
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 8
+SCHEMA_VERSION: int = 12
 
 
 class SchemaVersionError(RuntimeError):
@@ -326,16 +380,107 @@ class SchemaVersionError(RuntimeError):
 # ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
-# Each entry: (target_version: int, description: str, sql_statements: list[str])
+# Each entry: (target_version: int, description: str, sql_statements_or_hooks)
 #
 # Rules:
 #   - Append only.  Never remove, reorder, or renumber entries.
 #   - Each entry raises the schema version by exactly 1.
 #   - SQL statements may be any valid SQLite DDL or DML.
+#   - Callable hooks may be used for trust-critical validation that SQL cannot
+#     express clearly enough.
 #   - Migrations must be idempotent where possible (use IF NOT EXISTS / IF EXISTS).
 #   - If a migration requires a data backfill, do it in the SQL statements.
 #
-_MIGRATIONS: list[tuple[int, str, list[str]]] = [
+MigrationStep = str | Callable[[sqlite3.Connection], None]
+
+
+def _assert_no_duplicate_campaign_start_snapshots(conn: sqlite3.Connection) -> None:
+    """Fail loudly before making campaign_start_snapshot authoritative."""
+    rows = conn.execute(
+        """
+        SELECT campaign_id, COUNT(*) AS duplicate_count, GROUP_CONCAT(id) AS ids
+        FROM campaign_start_snapshot
+        GROUP BY campaign_id
+        HAVING COUNT(*) > 1
+        """
+    ).fetchall()
+    if not rows:
+        return
+    details = "; ".join(
+        f"{row[0] or '<null>'}: ids={row[2]}"
+        for row in rows
+    )
+    raise SchemaVersionError(
+        "Cannot apply Phase 1 trust snapshot migration: duplicate "
+        "campaign_start_snapshot rows exist. Manual remediation is required "
+        f"before this DB can be trusted as snapshot-authoritative. {details}"
+    )
+
+
+def _backfill_legacy_methodology_snapshots(conn: sqlite3.Connection) -> None:
+    """
+    Bridge legacy notes_json methodology into formal partial snapshot rows.
+
+    These rows make legacy evidence visible to every reader without pretending
+    that partial notes can reproduce complete historical scoring semantics.
+    """
+    campaigns = conn.execute("SELECT id, notes_json FROM campaigns").fetchall()
+    now_utc = datetime.now(timezone.utc).isoformat()
+    for campaign_id, notes_raw in campaigns:
+        if not notes_raw:
+            continue
+        existing = conn.execute(
+            "SELECT id FROM methodology_snapshots WHERE campaign_id=? LIMIT 1",
+            (campaign_id,),
+        ).fetchone()
+        if existing:
+            continue
+        try:
+            notes = json.loads(notes_raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        legacy = notes.get("governance_methodology")
+        if not isinstance(legacy, dict):
+            continue
+
+        anchors = legacy.get("references") or legacy.get("anchors") or {}
+        created_at = legacy.get("snapshot_at_utc") or now_utc
+        cur = conn.execute(
+            """
+            INSERT INTO methodology_snapshots (
+                campaign_id, created_at, snapshot_kind, methodology_version,
+                profile_name, profile_version, profile_yaml_content,
+                registry_yaml_content, weights_json, gates_json, anchors_json,
+                source_paths_json, source_hashes_json, capture_quality,
+                capture_source, is_current
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                campaign_id,
+                created_at,
+                "legacy_partial",
+                legacy.get("version") or "legacy_unknown",
+                legacy.get("profile_name"),
+                legacy.get("profile_version"),
+                json.dumps(legacy.get("weights") or {}, default=str),
+                json.dumps(legacy.get("gates") or {}, default=str),
+                json.dumps(anchors, default=str),
+                json.dumps({"legacy": "campaigns.notes_json.governance_methodology"}),
+                json.dumps({}),
+                "legacy_partial",
+                "campaigns.notes_json.governance_methodology",
+            ),
+        )
+        legacy["methodology_snapshot_id"] = int(cur.lastrowid)
+        legacy["capture_quality"] = "legacy_partial"
+        notes["governance_methodology"] = legacy
+        conn.execute(
+            "UPDATE campaigns SET notes_json=? WHERE id=?",
+            (json.dumps(notes, default=str), campaign_id),
+        )
+
+
+_MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
     (
         1,
         "CRIT-1: replace duplicate process_rss_mb with server_private_bytes_mb. "
@@ -423,6 +568,72 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
             "ALTER TABLE background_snapshots ADD COLUMN cycle_id INTEGER DEFAULT NULL",
         ],
     ),
+    (
+        9,
+        "Phase 1 Trust Bundle foundation: extend run-start snapshots with "
+        "baseline content, QuantMap identity, and persisted run intent; add "
+        "methodology snapshots, layered campaign status fields, and richer "
+        "artifact truth.",
+        [
+            _assert_no_duplicate_campaign_start_snapshots,
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN baseline_yaml_path TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN baseline_yaml_content TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN baseline_identity_json TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN quantmap_identity_json TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN run_plan_json TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN snapshot_schema_version INTEGER",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN snapshot_capture_quality TEXT",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_campaign_start_snapshot_campaign_id ON campaign_start_snapshot(campaign_id)",
+            "CREATE TABLE IF NOT EXISTS methodology_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign_id TEXT NOT NULL REFERENCES campaigns(id), created_at TEXT NOT NULL, snapshot_kind TEXT NOT NULL, methodology_version TEXT, profile_name TEXT, profile_version TEXT, profile_yaml_content TEXT, registry_yaml_content TEXT, weights_json TEXT, gates_json TEXT, anchors_json TEXT, source_paths_json TEXT, source_hashes_json TEXT, capture_quality TEXT NOT NULL, capture_source TEXT NOT NULL, replaces_snapshot_id INTEGER, is_current INTEGER NOT NULL DEFAULT 1)",
+            "CREATE INDEX IF NOT EXISTS idx_methodology_snapshots_campaign ON methodology_snapshots(campaign_id, is_current)",
+            "ALTER TABLE scores ADD COLUMN methodology_snapshot_id INTEGER",
+            "ALTER TABLE campaigns ADD COLUMN analysis_status TEXT DEFAULT 'legacy_unknown'",
+            "ALTER TABLE campaigns ADD COLUMN analysis_started_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN analysis_completed_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN analysis_failed_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN analysis_failure_reason TEXT",
+            "ALTER TABLE campaigns ADD COLUMN report_status TEXT DEFAULT 'legacy_unknown'",
+            "ALTER TABLE campaigns ADD COLUMN report_started_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN report_completed_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN report_failed_at TEXT",
+            "ALTER TABLE campaigns ADD COLUMN report_failure_reason TEXT",
+            "ALTER TABLE campaigns ADD COLUMN status_model_version INTEGER DEFAULT 1",
+            "ALTER TABLE artifacts ADD COLUMN status TEXT",
+            "ALTER TABLE artifacts ADD COLUMN producer TEXT",
+            "ALTER TABLE artifacts ADD COLUMN error_message TEXT",
+            "ALTER TABLE artifacts ADD COLUMN updated_at TEXT",
+            "ALTER TABLE artifacts ADD COLUMN verification_source TEXT",
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_campaign_type ON artifacts(campaign_id, artifact_type)",
+        ],
+    ),
+    (
+        10,
+        "Phase 1.1 Trust Bundle stabilization: bridge legacy "
+        "notes_json.governance_methodology into methodology_snapshots as "
+        "legacy_partial evidence. These rows are display/audit evidence only "
+        "and must not be treated as complete historical scoring authority.",
+        [
+            _backfill_legacy_methodology_snapshots,
+        ],
+    ),
+    (
+        11,
+        "Phase 3 Platform Generalization: add run-level telemetry provider "
+        "identity and evidence-quality fields to campaign_start_snapshot.",
+        [
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN telemetry_provider_identity_json TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN telemetry_capabilities_json TEXT",
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN telemetry_capture_quality TEXT",
+        ],
+    ),
+    (
+        12,
+        "Phase 3 WSL degraded support: persist explicit execution environment "
+        "support tier and boundary evidence.",
+        [
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN execution_environment_json TEXT",
+        ],
+    ),
 ]
 
 
@@ -507,7 +718,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         logger.info(
             "Applying schema migration v%d: %s", target_version, description
         )
-        for sql in statements:
+        for step in statements:
+            if callable(step):
+                step(conn)
+                continue
+            sql = step
             try:
                 conn.execute(sql)
             except sqlite3.OperationalError as exc:

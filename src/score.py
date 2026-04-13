@@ -44,11 +44,13 @@ SPEED_MEDIUM FLAG:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterator, Mapping
 
 import pandas as pd
 import numpy as np
@@ -57,16 +59,94 @@ import yaml
 from src.db import get_connection
 from src.analyze import analyze_campaign
 from src import governance
+from src.trust_identity import (
+    MethodologySnapshotError,
+    load_methodology_for_historical_scoring,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Elimination filter thresholds — Governed by the Experiment Profile
 # ---------------------------------------------------------------------------
-ELIMINATION_FILTERS: dict[str, float] = governance.get_legacy_elimination_filters()
+
+class _LazyGovernanceMapping(Mapping[str, float]):
+    """Mapping proxy that loads current governance only when values are used."""
+
+    def __init__(self, loader: Callable[[], dict[str, float]]) -> None:
+        self._loader = loader
+
+    def _data(self) -> dict[str, float]:
+        return self._loader()
+
+    def __getitem__(self, key: str) -> float:
+        return self._data()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def __repr__(self) -> str:
+        return repr(self._data())
+
+
+class _LazyGovernanceSet:
+    """Set-like proxy for legacy metric constants without import-time loading."""
+
+    def __init__(self, loader: Callable[[], frozenset[str]]) -> None:
+        self._loader = loader
+
+    def _data(self) -> frozenset[str]:
+        return self._loader()
+
+    def __contains__(self, value: object) -> bool:
+        return value in self._data()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def __repr__(self) -> str:
+        return repr(self._data())
+
+
+class _LazyGovernanceTuple:
+    """Tuple-like proxy for legacy metric constants without import-time loading."""
+
+    def __init__(self, loader: Callable[[], tuple[str, ...]]) -> None:
+        self._loader = loader
+
+    def _data(self) -> tuple[str, ...]:
+        return self._loader()
+
+    def __contains__(self, value: object) -> bool:
+        return value in self._data()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._data())
+
+    def __len__(self) -> int:
+        return len(self._data())
+
+    def __getitem__(self, index: int) -> str:
+        return self._data()[index]
+
+    def __repr__(self) -> str:
+        return repr(self._data())
+
+
+ELIMINATION_FILTERS: Mapping[str, float] = _LazyGovernanceMapping(
+    governance.get_legacy_elimination_filters
+)
 
 # Scoring weights — Governed by the Experiment Profile
-SCORE_WEIGHTS: dict[str, float] = governance.get_legacy_score_weights()
+SCORE_WEIGHTS: Mapping[str, float] = _LazyGovernanceMapping(
+    governance.get_legacy_score_weights
+)
 
 # Dimension Audit Safeguards (Phase 2 Refinements)
 DIMENSION_FAILURE_MIN_CONFIGS = 3    # Only collapse if at least this many configs were tested
@@ -92,6 +172,7 @@ def rank_overall(passing_dict: dict[str, dict[str, Any]]) -> pd.DataFrame:
         passing_dict, {}, passing_dict,
         governance.DEFAULT_PROFILE,
         governance.BUILTIN_REGISTRY,
+        {},
     )
     return scores_df
 
@@ -214,11 +295,11 @@ def _check_filters(config_id: str, s: dict[str, Any], f: dict[str, float]) -> st
 
 # Metrics whose absence on a passing config indicates a data integrity defect.
 # These values must exist if min_valid_warm_count was satisfied.
-_PRIMARY_SCORE_METRICS: frozenset[str] = governance.get_legacy_primary_score_metrics()
+_PRIMARY_SCORE_METRICS = _LazyGovernanceSet(governance.get_legacy_primary_score_metrics)
 
 # Metrics that may legitimately be absent in edge cases.
 # Absence makes the config unrankable but not eliminated.
-_SECONDARY_SCORE_METRICS: tuple[str, ...] = governance.get_legacy_secondary_score_metrics()
+_SECONDARY_SCORE_METRICS = _LazyGovernanceTuple(governance.get_legacy_secondary_score_metrics)
 
 
 def _split_by_rankability(
@@ -491,7 +572,7 @@ def compute_scores(
     high_nan_warnings = []
     total_configs = len(df_rankable)
 
-    for metric in SCORE_WEIGHTS.keys():
+    for metric in profile.weights.keys():
         if metric not in df_rankable.columns: continue
         nan_count = df_rankable[metric].isnull().sum()
         
@@ -681,6 +762,8 @@ def score_campaign(
     filter_overrides: dict[str, float] | None = None,
     profile_name: str | None = None,
     force_new_anchors: bool = False,
+    current_input: bool = False,
+    current_input_reason: str = "initial_scoring",
 ) -> dict[str, Any]:
     """
     Run the full analysis + scoring pipeline for a completed campaign.
@@ -714,18 +797,39 @@ def score_campaign(
         pareto_frontier    — list of config_ids on Pareto frontier
         effective_filters  — the actual filter thresholds applied (for report audit)
     """
-    # Phase 3.2: Governance loading
-    registry = governance.BUILTIN_REGISTRY
-    profile = governance.DEFAULT_PROFILE
-    if profile_name:
-        profile = governance.load_profile(profile_name)
-        governance.validate_profile_against_registry(profile, registry)
-        
-    print(_METHODOLOGY_HEADER)
-    logger.info("Governance: %s v%s", profile.name, profile.version)
+    # Phase 1.1: historical scoring must be driven by persisted methodology
+    # snapshots. Live governance files are allowed only for the initial
+    # current-run scoring path or explicit current-input rescore.
+    if force_new_anchors and not current_input:
+        raise MethodologySnapshotError(
+            "force_new_anchors requires explicit current-input mode; "
+            "snapshot-locked scoring cannot re-anchor to current files."
+        )
 
-    # Build effective filter thresholds — defaults merged with any campaign overrides
-    # Note: Phase 3.2 uses profile-defined gates
+    (
+        profile,
+        registry,
+        provided_references,
+        ref_snapshot,
+        methodology_snapshot_id,
+        methodology_source,
+    ) = load_methodology_for_historical_scoring(
+        campaign_id,
+        db_path,
+        allow_current_input=current_input,
+        profile_name=profile_name,
+        force_new_anchors=force_new_anchors,
+    )
+
+    print(_METHODOLOGY_HEADER)
+    logger.info(
+        "Governance: %s v%s (%s)",
+        profile.name,
+        profile.version,
+        methodology_source,
+    )
+
+    # Build effective filter thresholds — defaults merged with any campaign overrides.
     effective_filters: dict[str, float] = {**profile.gate_overrides, **(filter_overrides or {})}
     if filter_overrides:
         logger.info(
@@ -733,73 +837,57 @@ def score_campaign(
             campaign_id, filter_overrides,
         )
 
-    # --- Methodology Governance (Anchor Stability & Migration) -----------
-    # 1. Check for existing snapshot in DB
-    existing_methodology = _load_methodology_snapshot(campaign_id, db_path)
-    
-    # 2. Decide whether to use existing anchors or build new ones
-    use_existing = (existing_methodology is not None and not force_new_anchors)
-    
-    provided_references: dict[str, float] = {}
-    ref_snapshot: dict[str, dict[str, Any]] = {}
-
-    if use_existing:
-        logger.info("Governance: Preserving original methodology anchors (v%s)", existing_methodology.get("version", "unknown"))
-        refs = existing_methodology.get("references", {})
-        for m_name, ref in refs.items():
-            val = ref.get("value")
-            if val is not None:
-                provided_references[m_name] = val
-            ref_snapshot[m_name] = ref
-    else:
-        if existing_methodology and force_new_anchors:
-            logger.warning("METHODOLOGY MIGRATION: Force-updating references for %s to current Registry/Baseline", campaign_id)
-            
+    if methodology_source == "current_input_explicit":
         # Build the tier-1 references (Registry > Baseline YAML > Fallback)
-        # 1. Registry Tier (authoritative)
-        # 2. Baseline YAML Tier (controlled override)
+        # from the explicit current inputs, then persist them as a new snapshot.
         baseline_ref = baseline.get("reference", {})
-        
-        # Map from metrics.yaml names to internal baseline keys
         key_map = {
             "warm_tg_median": "warm_tg_median_ts",
             "warm_ttft_median_ms": "warm_ttft_median_ms"
         }
-        
+
         for m_name in profile.weights.keys():
             mdef = registry.get(m_name)
             ref_val = None
             source = "best-in-batch"
             provenance = "cohort-relative"
-            
-            # Priority 1: Registry
+
             if mdef.fixed_reference_value is not None:
                 ref_val = mdef.fixed_reference_value
                 source = "registry"
                 provenance = mdef.reference_provenance or "registry:generation_1"
-                
-            # Priority 2: Baseline YAML Override
+
             yaml_key = key_map.get(m_name)
             if yaml_key and baseline_ref.get(yaml_key) is not None:
                 ref_val = baseline_ref[yaml_key]
-                # If we're overriding the registry, make it loud.
                 if source == "registry":
                     logger.warning("METHODOLOGY OVERRIDE: Baseline YAML superseding Registry for %s", m_name)
                 source = "baseline_yaml"
                 provenance = f"override:{baseline.get('name', 'unknown')}"
-                
-            # If no fixed reference found, we record the fallback
+
             if ref_val is not None:
                 provided_references[m_name] = ref_val
-                
+
             ref_snapshot[m_name] = {
                 "value": ref_val,
                 "source": source,
-                "provenance": provenance
+                "provenance": provenance,
             }
 
-        # Persist the Methodology Snapshot to DB (namespaced)
-        _persist_methodology_snapshot(campaign_id, ref_snapshot, db_path)
+        methodology_snapshot_id = _persist_methodology_snapshot(
+            campaign_id,
+            ref_snapshot,
+            db_path,
+            profile=profile,
+            registry=registry,
+            snapshot_kind=(
+                "current_input_rescore"
+                if current_input_reason == "current_input_rescore"
+                else "scoring"
+            ),
+            capture_quality="complete",
+            capture_source=f"score_campaign:{current_input_reason}",
+        )
     
     # Legacy ref vars for report logic (kept for backward compatibility with return dict/display)
     ref_warm_tg = provided_references.get("warm_tg_median")
@@ -884,7 +972,7 @@ def score_campaign(
     # Write to scores table (passing=rankable, unrankable tracked separately)
     _write_scores_to_db(
         campaign_id, stats, passing, eliminated, unrankable,
-        scores_df, speed_medium_flags, db_path,
+        scores_df, speed_medium_flags, db_path, methodology_snapshot_id,
     )
 
     # Extract summary
@@ -911,10 +999,13 @@ def score_campaign(
         "winner":             winner,
         "highest_tg":         highest_tg,
         "pareto_frontier":    pareto_frontier,
+        "effective_filters":  effective_filters,
         "collapsed_dimensions": collapsed_dims,
         "high_nan_warnings":  high_nan_warns,
         "nan_invalid_ids":    nan_invalid_ids,
         "governance_methodology": ref_snapshot,
+        "methodology_snapshot_id": methodology_snapshot_id,
+        "methodology_source": methodology_source,
         "provided_references": provided_references,
         "scoring_profile":    profile,
         "registry":           registry,
@@ -924,49 +1015,94 @@ def score_campaign(
     return result
 
 
-def _load_methodology_snapshot(
-    campaign_id: str,
-    db_path: Path
-) -> dict[str, Any] | None:
-    """
-    Load the existing governance methodology snapshot from the campaigns table.
-    Returns the snapshot dict if found, else None.
-    """
-    conn = sqlite3.connect(db_path, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    try:
-        with conn:
-            curr = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
-            if curr and curr[0]:
-                try:
-                    notes = json.loads(curr[0])
-                    return notes.get("governance_methodology")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        return None
-    finally:
-        conn.close()
-
-
 def _persist_methodology_snapshot(
     campaign_id: str,
     snapshot: dict[str, Any],
-    db_path: Path
-) -> None:
+    db_path: Path,
+    *,
+    profile: Any,
+    registry: Any,
+    snapshot_kind: str,
+    capture_quality: str,
+    capture_source: str,
+) -> int:
     """
-    Persist the Phase 3.3 Reference Methodology Snapshot to the campaigns table.
-    Ensures historical traceability of the score normalization anchors.
+    Persist the methodology snapshot used to interpret a campaign.
+
+    Also keeps the legacy notes_json block updated as a transitional reader
+    bridge until all consumers have moved to methodology_snapshots.
     """
+    profile_path = Path(getattr(governance, "_PROFILES_DIR")) / f"{profile.name}.yaml"
+    registry_path = Path(getattr(governance, "_METRICS_YAML"))
+
+    def _read_text(path: Path) -> str | None:
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+    def _hash_text(text: str | None) -> str | None:
+        if text is None:
+            return None
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    profile_text = _read_text(profile_path)
+    registry_text = _read_text(registry_path)
+    actual_capture_quality = capture_quality
+    if capture_quality == "complete" and (profile_text is None or registry_text is None):
+        actual_capture_quality = "partial"
+    now_utc = datetime.now(timezone.utc).isoformat()
+
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
         with conn:
             # Ensure the campaign row exists (UPSERT-lite)
             # Need to provide NOT NULL columns: name, created_at
-            now_str = str(pd.Timestamp.utcnow())
+            now_str = now_utc
             conn.execute(
                 "INSERT OR IGNORE INTO campaigns (id, name, created_at, run_mode) VALUES (?, ?, ?, 'standard')", 
                 (campaign_id, campaign_id, now_str)
             )
+
+            conn.execute(
+                "UPDATE methodology_snapshots SET is_current=0 WHERE campaign_id=?",
+                (campaign_id,),
+            )
+            cur = conn.execute(
+                """
+                INSERT INTO methodology_snapshots (
+                    campaign_id, created_at, snapshot_kind, methodology_version,
+                    profile_name, profile_version, profile_yaml_content,
+                    registry_yaml_content, weights_json, gates_json, anchors_json,
+                    source_paths_json, source_hashes_json, capture_quality,
+                    capture_source, is_current
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    campaign_id,
+                    now_utc,
+                    snapshot_kind,
+                    "1.0",
+                    profile.name,
+                    profile.version,
+                    profile_text,
+                    registry_text,
+                    json.dumps(dict(profile.weights), default=str),
+                    json.dumps(dict(profile.gate_overrides), default=str),
+                    json.dumps(snapshot, default=str),
+                    json.dumps({
+                        "profile_yaml": str(profile_path),
+                        "registry_yaml": str(registry_path),
+                    }),
+                    json.dumps({
+                        "profile_yaml_sha256": _hash_text(profile_text),
+                        "registry_yaml_sha256": _hash_text(registry_text),
+                    }),
+                    actual_capture_quality,
+                    capture_source,
+                ),
+            )
+            snapshot_id = int(cur.lastrowid)
             
             # Load existing notes
             curr = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
@@ -980,15 +1116,21 @@ def _persist_methodology_snapshot(
             # Merge snapshot into a namespaced block
             notes["governance_methodology"] = {
                 "version": "1.0",
-                "snapshot_at_utc": str(pd.Timestamp.utcnow()),
-                "references": snapshot
+                "snapshot_at_utc": now_utc,
+                "references": snapshot,
+                "methodology_snapshot_id": snapshot_id,
+                "capture_quality": actual_capture_quality,
             }
             
             conn.execute(
                 "UPDATE campaigns SET notes_json=? WHERE id=?",
                 (json.dumps(notes), campaign_id)
             )
-        logger.info("Persisted governance methodology snapshot for %s", campaign_id)
+        logger.info(
+            "Persisted governance methodology snapshot %s for %s",
+            snapshot_id, campaign_id,
+        )
+        return snapshot_id
     finally:
         conn.close()
 
@@ -1002,6 +1144,7 @@ def _write_scores_to_db(
     scores_df: pd.DataFrame,
     speed_medium_flags: dict[str, bool],
     db_path: Path,
+    methodology_snapshot_id: int | None,
 ) -> None:
     """Write all scoring results to lab.sqlite scores table.
 
@@ -1087,9 +1230,10 @@ def _write_scores_to_db(
                     composite_score, rank_overall,
                     passed_filters, elimination_reason,
                     pareto_dominated, is_highest_tg, is_score_winner,
-                    warm_tg_vs_baseline_pct, warm_ttft_vs_baseline_pct
+                    warm_tg_vs_baseline_pct, warm_ttft_vs_baseline_pct,
+                    methodology_snapshot_id
                 ) VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+                    ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
                 )""",
                 (
                     campaign_id, config_id,
@@ -1108,7 +1252,7 @@ def _write_scores_to_db(
                     int(pareto_dominated) if pareto_dominated is not None else None,
                     int(is_highest_tg)    if is_highest_tg    is not None else None,
                     int(is_score_winner)  if is_score_winner  is not None else None,
-                    tg_vs_baseline, ttft_vs_baseline,
+                    tg_vs_baseline, ttft_vs_baseline, methodology_snapshot_id,
                 ),
             )
         conn.commit()

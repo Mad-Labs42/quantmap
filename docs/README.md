@@ -4,6 +4,14 @@ Welcome to the QuantMap technical library. This documentation is organized by **
 
 ---
 
+## Current Project State
+
+As of 2026-04-12, the Phase 1 Trust Bundle and Phase 1.1 Trust Bundle Stabilization are treated as stable after real-workflow validation. **Phase 2: Operational Robustness** and **Phase 2.1: Settings/Environment Bridge** are closed after validation.
+
+Historical audits, response memos, and validation memos remain preserved as records of what was known at the time. Current actionable status lives in K.I.T. and TO-DO. **Phase 3: Platform Generalization** is now active, beginning with boundary-aware telemetry/provider design.
+
+---
+
 ## 🏎️ First 15 Minutes
 
 *Goal: Get setup and build technical confidence.*

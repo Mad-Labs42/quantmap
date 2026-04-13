@@ -146,12 +146,10 @@ def get_eliminations(conn: Any, campaign_id: str) -> Dict[str, str]:
     ).fetchall()
     return {r["id"]: r["elimination_reason"] for r in rows}
 
-def get_start_snapshot(conn: Any, campaign_id: str) -> Dict[str, Any]:
-    row = conn.execute(
-        "SELECT * FROM campaign_start_snapshot WHERE campaign_id=? ORDER BY id DESC LIMIT 1",
-        (campaign_id,)
-    ).fetchone()
-    return dict(row) if row else {}
+def get_start_snapshot(db_path: Path, campaign_id: str) -> Dict[str, Any]:
+    from src.trust_identity import load_run_identity  # noqa: PLC0415
+
+    return load_run_identity(campaign_id, db_path).start_snapshot
 
 def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> MethodologyResult:
     """Wraps audit_methodology to produce a graded compatibility result."""
@@ -170,6 +168,13 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
     v1 = m1.get("version", "unknown")
     v2 = m2.get("version", "unknown")
     registry_match = (v1 == v2)
+    q1 = m1.get("capture_quality")
+    q2 = m2.get("capture_quality")
+    quality_warnings = []
+    if q1 != "complete" or q2 != "complete":
+        quality_warnings.append(
+            f"Methodology evidence is incomplete: {campaign_a_id}={q1}, {campaign_b_id}={q2}"
+        )
     
     refs1 = m1.get("references", {})
     refs2 = m2.get("references", {})
@@ -200,15 +205,21 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
     grade = "compatible"
     if mismatches > 0:
         grade = "warnings"
+    if quality_warnings:
+        grade = "mismatch"
     if not registry_match:
         grade = "mismatch"
+
+    warnings = quality_warnings + drifts
+    if not registry_match:
+        warnings.insert(0, f"Registry version mismatch: {v1} vs {v2}")
         
     return {
         "grade": grade,
         "compatibility_score": 1.0 - (mismatches / max(len(all_metrics), 1)),
         "registry_version_match": registry_match,
         "anchor_deltas": anchor_deltas,
-        "warnings": drifts if not registry_match else [f"Registry version mismatch: {v1} vs {v2}"] + drifts
+        "warnings": warnings
     }
 
 def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResult:
@@ -223,9 +234,9 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
         elim_a = get_eliminations(conn, id_a)
         elim_b = get_eliminations(conn, id_b)
         
-        snap_a = get_start_snapshot(conn, id_a)
-        snap_b = get_start_snapshot(conn, id_b)
-        
+    snap_a = get_start_snapshot(db_path, id_a)
+    snap_b = get_start_snapshot(db_path, id_b)
+
     # 1. Methodology
     meth = grade_methodology(id_a, id_b, db_path)
     
@@ -247,6 +258,38 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
                 "val_b": val_b,
                 "is_regression": False # Hard to auto-judge regression on driver version
             })
+
+    try:
+        from src.execution_environment import execution_environment_from_snapshot  # noqa: PLC0415
+
+        env_a = execution_environment_from_snapshot(snap_a)
+        env_b = execution_environment_from_snapshot(snap_b)
+        if env_a.get("support_tier") != env_b.get("support_tier"):
+            env_deltas.append({
+                "category": "execution_support_tier",
+                "label": "Execution support tier",
+                "val_a": env_a.get("support_tier"),
+                "val_b": env_b.get("support_tier"),
+                "is_regression": False,
+            })
+    except Exception:
+        pass
+
+    try:
+        from src.telemetry_provider import provider_evidence_label  # noqa: PLC0415
+
+        provider_a = provider_evidence_label(snap_a)
+        provider_b = provider_evidence_label(snap_b)
+        if provider_a != provider_b:
+            env_deltas.append({
+                "category": "telemetry_provider_evidence",
+                "label": "Telemetry provider evidence",
+                "val_a": provider_a,
+                "val_b": provider_b,
+                "is_regression": False,
+            })
+    except Exception:
+        pass
             
     # Thermal trend
     temp_a = snap_a.get("cpu_temp_at_start_c")

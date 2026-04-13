@@ -49,6 +49,8 @@ from dotenv import load_dotenv  # type: ignore[import]
 load_dotenv()
 
 from src.config import DEFAULT_HOST, LAB_ROOT, PRODUCTION_PORT  # noqa: E402
+from src.settings_env import require_env_path  # noqa: E402
+from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -64,24 +66,26 @@ logger = logging.getLogger(__name__)
 
 # llama-server binary — Build B FROZEN at commit afa6bfe4f
 # (GGML_CUDA_FORCE_MMQ=ON baked in at compile time; do not upgrade during campaigns)
-_server_bin_raw = os.getenv("QUANTMAP_SERVER_BIN")
-if _server_bin_raw is None:
-    raise EnvironmentError(
-        "QUANTMAP_SERVER_BIN is not set. "
-        "Copy .env.example to .env and set QUANTMAP_SERVER_BIN to the llama-server binary path "
+SERVER_BIN: Path = require_env_path(
+    "QUANTMAP_SERVER_BIN",
+    purpose="llama-server binary path",
+    recommendation=(
+        "Copy .env.example to .env and set QUANTMAP_SERVER_BIN to the "
+        "llama-server binary path "
         "(e.g. D:/.store/tools/llama.cpp/build-B/bin/llama-server.exe)."
-    )
-SERVER_BIN: Path = Path(_server_bin_raw)
+    ),
+)
 
 # First model shard — llama.cpp resolves the remaining shards automatically
-_model_path_raw = os.getenv("QUANTMAP_MODEL_PATH")
-if _model_path_raw is None:
-    raise EnvironmentError(
-        "QUANTMAP_MODEL_PATH is not set. "
-        "Copy .env.example to .env and set QUANTMAP_MODEL_PATH to the first GGUF shard "
+MODEL_PATH: Path = require_env_path(
+    "QUANTMAP_MODEL_PATH",
+    purpose="model shard path",
+    recommendation=(
+        "Copy .env.example to .env and set QUANTMAP_MODEL_PATH to the first "
+        "GGUF shard "
         "(e.g. D:/.store/models/MiniMax-M2.5/UD-Q3_K_XL/MiniMax-M2.5-UD-Q3_K_XL-00001-of-00004.gguf)."
-    )
-MODEL_PATH: Path = Path(_model_path_raw)
+    ),
+)
 
 # Server log directory — runtime output, lives under LAB_ROOT (gitignored)
 LOGS_DIR: Path = LAB_ROOT / "logs"
@@ -655,6 +659,8 @@ def start_server(
         raise FileNotFoundError(
             f"Model shard not found: {MODEL_PATH}\nCheck QUANTMAP_MODEL_PATH in .env"
         )
+
+    assert_backend_execution_allowed(SERVER_BIN)
 
     if port is None:
         port = _pick_port()
