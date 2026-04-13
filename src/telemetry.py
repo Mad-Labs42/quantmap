@@ -51,6 +51,10 @@ from typing import Any
 import warnings
 
 import psutil
+from src.execution_environment import SUPPORT_WSL_DEGRADED, classify_execution_environment
+from src.telemetry_hwinfo import read_hwinfo_shared_memory_bytes
+from src.telemetry_nvml import probe_nvml_provider
+from src.telemetry_provider import build_provider_evidence
 
 try:
     with warnings.catch_warnings():
@@ -165,18 +169,6 @@ class HWiNFOUnavailable(RuntimeError):
     """Raised when HWiNFO shared memory cannot be opened."""
 
 
-# Win32 type setup (done once at module level)
-_k32 = ctypes.windll.kernel32
-_k32.OpenFileMappingW.restype  = ctypes.wintypes.HANDLE
-_k32.OpenFileMappingW.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
-_k32.MapViewOfFile.restype     = ctypes.c_void_p
-_k32.MapViewOfFile.argtypes    = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
-                                   ctypes.wintypes.DWORD, ctypes.wintypes.DWORD, ctypes.c_size_t]
-_k32.UnmapViewOfFile.restype   = ctypes.wintypes.BOOL
-_k32.UnmapViewOfFile.argtypes  = [ctypes.c_void_p]
-_k32.CloseHandle.restype       = ctypes.wintypes.BOOL
-_k32.CloseHandle.argtypes      = [ctypes.wintypes.HANDLE]
-
 _FILE_MAP_READ = 0x0004
 
 
@@ -191,42 +183,11 @@ def _read_hwinfo_sm_bytes() -> bytes | None:
 
     Returns None if HWiNFO is not running or shared memory is unavailable.
     """
-    h = _k32.OpenFileMappingW(_FILE_MAP_READ, False, _HWINFO_SM_NAME)
-    if not h:
-        return None
-
-    try:
-        addr = _k32.MapViewOfFile(h, _FILE_MAP_READ, 0, 0, 0)
-        if not addr:
-            return None
-        try:
-            # Read header to determine how many bytes we actually need
-            header_raw = ctypes.string_at(addr, _HEADER_SIZE)
-            if len(header_raw) < _HEADER_SIZE:
-                return None
-
-            fields = struct.unpack(_HEADER_FMT, header_raw)
-            sig = fields[0]
-            if sig != _HWINFO_SIGNATURE:
-                logger.debug("HWiNFO signature mismatch: got 0x%08X", sig)
-                return None
-
-            off_sensor, sz_sensor, num_sensor = fields[4], fields[5], fields[6]
-            off_reading, sz_reading, num_reading = fields[7], fields[8], fields[9]
-
-            total_bytes = max(
-                _HEADER_SIZE,
-                (off_sensor  + sz_sensor  * num_sensor)  if num_sensor  > 0 else 0,
-                (off_reading + sz_reading * num_reading) if num_reading > 0 else 0,
-            )
-            if total_bytes <= 0 or total_bytes > 32 * 1024 * 1024:
-                return None
-
-            return ctypes.string_at(addr, total_bytes)
-        finally:
-            _k32.UnmapViewOfFile(ctypes.c_void_p(addr))
-    finally:
-        _k32.CloseHandle(h)
+    return read_hwinfo_shared_memory_bytes(
+        header_size=_HEADER_SIZE,
+        header_fmt=_HEADER_FMT,
+        signature=_HWINFO_SIGNATURE,
+    )
 
 
 def _read_hwinfo_readings(sm: io.BytesIO) -> list[dict[str, Any]]:
@@ -421,6 +382,7 @@ class TelemetrySample:
     # Identity
     campaign_id: str
     config_id: str
+    cycle_id: int | None
     timestamp: str  # ISO8601 UTC
 
     # --- ABORT tier ---
@@ -481,12 +443,20 @@ class BackgroundSnapshot:
 
     campaign_id: str
     config_id: str
+    cycle_id: int | None
     timestamp: str
 
     top_cpu_procs_json: str = "[]"
     top_ram_procs_json: str = "[]"
     top_disk_procs_json: str = "[]"
     all_notable_procs_json: str = "[]"
+
+    # Per-process GPU VRAM usage, serialized as JSON list of
+    # {"name": str, "pid": int, "used_vram_mb": float}.
+    # Populated via nvmlDeviceGetComputeRunningProcesses() when NVML is
+    # available; null (JSON 'null') when NVML is not initialized or the
+    # query fails.  Never faked — absence is explicit.
+    gpu_proc_vram_json: str | None = None
 
     defender_process_running: bool = False
     windows_update_active: bool = False
@@ -517,12 +487,16 @@ def startup_check() -> dict[str, Any]:
     Returns availability report dict.
     """
     global _NVML_INITIALIZED, _NVML_HANDLE
+    execution_environment = classify_execution_environment()
+    support_tier = execution_environment.support_tier
+    wsl_degraded = support_tier == SUPPORT_WSL_DEGRADED
 
     report: dict[str, Any] = {
         "abort": {},
         "warn": {},
         "silent": {},
         "source_details": {},
+        "execution_environment": execution_environment.to_dict(),
     }
 
     # ---- HWiNFO (PRIMARY for all hardware temps/power/clocks) ---------------
@@ -530,17 +504,27 @@ def startup_check() -> dict[str, Any]:
     hwinfo_ok = len(readings) > 0
     report["source_details"]["hwinfo_available"] = hwinfo_ok
     report["source_details"]["hwinfo_reading_count"] = len(readings)
+    cpu_temp = None
 
-    if not hwinfo_ok:
+    if not hwinfo_ok and not wsl_degraded:
         raise TelemetryStartupError(
             "ABORT: HWiNFO64 shared memory not accessible.\n\n"
             "HWiNFO must be running with 'Shared Memory Support' enabled.\n"
             "Required for cpu_temp_c (ABORT tier).\n\n"
             "If you do not have HWiNFO, you cannot run QuantMap campaigns safely."
         )
+    if not hwinfo_ok and wsl_degraded:
+        report["abort"]["cpu_temp_c"] = False
+        report["warn"]["wsl_degraded_cpu_thermal"] = False
+        report["source_details"]["cpu_temp_label"] = "unavailable_wsl_degraded"
+        logger.warning(
+            "WSL degraded run: CPU package temperature is unavailable; "
+            "run is not measurement-grade."
+        )
 
     # Confirm CPU Package temp is readable
-    cpu_temp = _find_reading(readings, "CPU Package", rtype=_RTYPE_TEMP)
+    if readings:
+        cpu_temp = _find_reading(readings, "CPU Package", rtype=_RTYPE_TEMP)
     if cpu_temp is None:
         # Try alternate labels used by HWiNFO on some Intel chips
         for alt_label in ("CPU (Tctl/Tdie)", "CPU Tctl", "CPU Die", "DTS"):
@@ -549,7 +533,7 @@ def startup_check() -> dict[str, Any]:
                 report["source_details"]["cpu_temp_label"] = alt_label
                 break
 
-    if cpu_temp is None:
+    if cpu_temp is None and not wsl_degraded:
         # Log all temp sensor labels for diagnosis
         temp_labels = [r["label"] for r in readings if r["rtype"] == _RTYPE_TEMP]
         raise TelemetryStartupError(
@@ -560,38 +544,53 @@ def startup_check() -> dict[str, Any]:
             + "\n\nCheck HWiNFO sensor list and ensure the CPU sensor is enabled."
         )
 
-    report["abort"]["cpu_temp_c"] = True
-    report["source_details"]["cpu_temp_label"] = report["source_details"].get("cpu_temp_label", "CPU Package")
-    logger.info("cpu_temp_c (ABORT) available via HWiNFO: %.1f°C", cpu_temp)
+    report["abort"]["cpu_temp_c"] = cpu_temp is not None
+    if cpu_temp is not None:
+        report["source_details"]["cpu_temp_label"] = report["source_details"].get("cpu_temp_label", "CPU Package")
+        logger.info("cpu_temp_c (ABORT) available via HWiNFO: %.1f°C", cpu_temp)
 
     # ---- GPU via pynvml (ABORT for VRAM + throttle, WARN for temp) ----------
     nvml_ok = _init_nvml()
     report["source_details"]["pynvml"] = nvml_ok
 
-    if not nvml_ok:
+    if not nvml_ok and not wsl_degraded:
         raise TelemetryStartupError(
             "ABORT: pynvml unavailable — gpu_vram_used_mb and power_limit_throttling "
             "cannot be collected.\n"
             "Verify nvidia-ml-py is installed: pip install nvidia-ml-py\n"
             "Verify NVIDIA driver is accessible."
         )
+    if not nvml_ok and wsl_degraded:
+        report["abort"]["gpu_vram_used_mb"] = False
+        report["abort"]["power_limit_throttling"] = False
+        logger.warning("WSL degraded run: NVML Python provider unavailable.")
 
-    try:
-        mem = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
-        report["abort"]["gpu_vram_used_mb"] = True
-    except Exception as exc:
-        raise TelemetryStartupError(
-            f"ABORT: pynvml initialized but VRAM read failed: {exc}"
-        ) from exc
+    gpu_vram_available = False
+    if nvml_ok:
+        try:
+            mem = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
+            report["abort"]["gpu_vram_used_mb"] = True
+            gpu_vram_available = True
+        except Exception as exc:
+            if not wsl_degraded:
+                raise TelemetryStartupError(
+                    f"ABORT: pynvml initialized but VRAM read failed: {exc}"
+                ) from exc
+            report["abort"]["gpu_vram_used_mb"] = False
 
-    try:
-        pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(_NVML_HANDLE)
-        report["abort"]["power_limit_throttling"] = True
-    except Exception as exc:
-        raise TelemetryStartupError(
-            f"ABORT: pynvml throttle reason query failed: {exc}\n"
-            "power_limit_throttling (ABORT tier) requires driver support for this query."
-        ) from exc
+    power_limit_available = False
+    if nvml_ok:
+        try:
+            pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(_NVML_HANDLE)
+            report["abort"]["power_limit_throttling"] = True
+            power_limit_available = True
+        except Exception as exc:
+            if not wsl_degraded:
+                raise TelemetryStartupError(
+                    f"ABORT: pynvml throttle reason query failed: {exc}\n"
+                    "power_limit_throttling (ABORT tier) requires driver support for this query."
+                ) from exc
+            report["abort"]["power_limit_throttling"] = False
 
     # GPU temp (WARN — try HWiNFO first, then pynvml)
     gpu_temp_hwinfo = _find_reading(readings, "GPU Temperature", rtype=_RTYPE_TEMP)
@@ -638,6 +637,49 @@ def startup_check() -> dict[str, Any]:
     report["silent"]["hwinfo_reading_count"] = len(readings)
 
     report["abort"]["timestamp"] = True
+
+    nvml_details: dict[str, Any] = {}
+    nvml_probe_status: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE is not None:
+        try:
+            driver = pynvml.nvmlSystemGetDriverVersion()
+            nvml_details["driver_version"] = (
+                driver.decode("utf-8", errors="replace") if isinstance(driver, bytes) else str(driver)
+            )
+        except Exception:
+            pass
+        try:
+            gpu_name = pynvml.nvmlDeviceGetName(_NVML_HANDLE)
+            nvml_details["gpu_name"] = (
+                gpu_name.decode("utf-8", errors="replace") if isinstance(gpu_name, bytes) else str(gpu_name)
+            )
+        except Exception:
+            pass
+    elif wsl_degraded:
+        nvml_probe = probe_nvml_provider()
+        nvml_probe_status = nvml_probe.status
+        nvml_details.update(nvml_probe.details)
+        if nvml_probe.provider_version:
+            nvml_details["driver_version"] = nvml_probe.provider_version
+
+    provider_evidence = build_provider_evidence(
+        hwinfo_available=hwinfo_ok,
+        hwinfo_reading_count=len(readings),
+        nvml_available=nvml_ok,
+        nvml_status=nvml_probe_status,
+        nvml_details=nvml_details,
+        cpu_temp_available=cpu_temp is not None,
+        gpu_vram_available=gpu_vram_available,
+        power_limit_available=power_limit_available,
+        gpu_temp_available=report["warn"]["gpu_temp_c"],
+        support_tier=support_tier,
+        notes=execution_environment.degraded_reasons,
+    )
+    report["provider_evidence"] = {
+        "provider_identity": provider_evidence.provider_identity_json(),
+        "capabilities": provider_evidence.capabilities_json(),
+        "capture_quality": provider_evidence.capture_quality,
+    }
 
     logger.info(
         "Telemetry startup check passed. "
@@ -785,6 +827,7 @@ def collect_sample(
     campaign_id: str,
     config_id: str,
     server_pid: int | None = None,
+    cycle_id: int | None = None,
 ) -> TelemetrySample:
     """
     Collect one telemetry sample. Safe to call from background thread.
@@ -1042,6 +1085,7 @@ def collect_sample(
     return TelemetrySample(
         campaign_id=campaign_id,
         config_id=config_id,
+        cycle_id=cycle_id,
         timestamp=ts,
         # ABORT
         cpu_temp_c=cpu_temp_c,
@@ -1114,6 +1158,7 @@ def _get_active_power_plan() -> str:
 def collect_background_snapshot(
     campaign_id: str,
     config_id: str,
+    cycle_id: int | None = None,
 ) -> BackgroundSnapshot:
     """
     Collect a background activity snapshot. Records what other processes
@@ -1127,6 +1172,33 @@ def collect_background_snapshot(
     antivirus_scan_active = False
     proc_data: list[dict] = []
 
+    # PROCESS CAPTURE THRESHOLD — EXPLICIT DESIGN BOUNDARY
+    #
+    # This loop captures processes with cpu_pct > 0.5% OR rss_mb > 50 MB.
+    # Processes below BOTH thresholds are NOT recorded in all_notable_procs_json.
+    #
+    # This is a collection boundary, not a summary filter.
+    # "Full process data" in QuantMap means: all processes above these thresholds.
+    # The 50 MB RAM threshold is intentionally conservative to capture
+    # "death by a thousand cuts" scenarios where multiple mid-sized processes
+    # (e.g. 10 × 60 MB = 600 MB aggregate) create pressure not visible
+    # from any single process's CPU usage alone.
+    #
+    # This threshold is also documented in:
+    #   - report_campaign.py: _section_background_interference()
+    #   - Any report section referencing captured process data
+    #
+    # To adjust, change _BG_CPU_THRESHOLD_PCT and _BG_RAM_THRESHOLD_MB below.
+    # Both thresholds apply per-process; a process is captured if it exceeds
+    # EITHER threshold (OR logic, not AND).
+    _BG_CPU_THRESHOLD_PCT = 0.5
+    _BG_RAM_THRESHOLD_MB  = 50.0
+
+    # Note: psutil.process_iter may return AccessDenied for elevated/protected
+    # processes (e.g. antimalware PPL-protected processes on Windows). Those are
+    # silently skipped. The named-process flags (defender_process_running etc.)
+    # are set by name-match before the RAM/CPU filter, so they are reliable
+    # even when the process is inaccessible for detailed stats.
     try:
         for proc in psutil.process_iter(
             ["pid", "name", "cpu_percent", "memory_info", "io_counters"]
@@ -1150,7 +1222,7 @@ def collect_background_snapshot(
                     if cpu > 0.5:
                         search_indexer_active = True
 
-                if cpu > 0.5 or rss_mb > 100:
+                if cpu > _BG_CPU_THRESHOLD_PCT or rss_mb > _BG_RAM_THRESHOLD_MB:
                     io = info.get("io_counters")
                     proc_data.append({
                         "name": name,
@@ -1170,6 +1242,41 @@ def collect_background_snapshot(
     by_disk = sorted(proc_data, key=lambda x: x["read_mb"] + x["write_mb"], reverse=True)
     high_cpu_count = sum(1 for p in proc_data if p["cpu_pct"] > 1.0)
 
+    # Per-process GPU VRAM — collected only when NVML is initialized.
+    # nvmlDeviceGetComputeRunningProcesses() returns used VRAM per process.
+    # GPU compute % per-process is NOT available via any user-space NVML API;
+    # only VRAM usage is tracked.  The field is null (not []) when unavailable.
+    gpu_proc_vram_json: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE is not None:
+        try:
+            gpu_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(_NVML_HANDLE)
+            gpu_proc_list = [
+                {
+                    "pid":          int(gp.pid),
+                    "used_vram_mb": round(gp.usedGpuMemory / (1024 * 1024), 1)
+                    if gp.usedGpuMemory is not None else None,
+                }
+                for gp in gpu_procs
+            ]
+            # Enrich with process name from proc_data where known (by PID),
+            # or from psutil for processes not in proc_data.
+            pid_to_name: dict[int, str] = {p["pid"]: p["name"] for p in proc_data}
+            for entry in gpu_proc_list:
+                pid = entry["pid"]
+                if pid in pid_to_name:
+                    entry["name"] = pid_to_name[pid]
+                else:
+                    # Try a quick psutil lookup for processes below the CPU/RAM
+                    # threshold (they may still use VRAM).
+                    try:
+                        entry["name"] = psutil.Process(pid).name()
+                    except Exception:
+                        entry["name"] = f"pid:{pid}"
+            gpu_proc_vram_json = json.dumps(gpu_proc_list)
+        except Exception as exc:
+            logger.debug("nvml per-process VRAM query failed: %s", exc)
+            gpu_proc_vram_json = None  # explicit: unavailable, not empty
+
     total_conns = established_conns = 0
     try:
         conns = psutil.net_connections()
@@ -1181,11 +1288,13 @@ def collect_background_snapshot(
     return BackgroundSnapshot(
         campaign_id=campaign_id,
         config_id=config_id,
+        cycle_id=cycle_id,
         timestamp=ts,
         top_cpu_procs_json=json.dumps(by_cpu[:10]),
         top_ram_procs_json=json.dumps(by_ram[:10]),
         top_disk_procs_json=json.dumps(by_disk[:10]),
         all_notable_procs_json=json.dumps(proc_data),
+        gpu_proc_vram_json=gpu_proc_vram_json,
         defender_process_running=defender_process_running,
         windows_update_active=windows_update_active,
         search_indexer_active=search_indexer_active,
@@ -1227,19 +1336,25 @@ class TelemetryCollector:
         self._campaign_id: str = ""
         self._config_id: str = ""
         self._server_pid: int | None = None
+        self._conn: sqlite3.Connection | None = None  # Scoped reuse (Phase 2)
 
     def start(
         self,
         campaign_id: str,
         config_id: str,
         server_pid: int | None = None,
+        cycle_id: int | None = None,
     ) -> None:
         if self._thread is not None and self._thread.is_alive():
-            self.stop()
+            raise RuntimeError(
+                "TelemetryCollector: thread still alive after 15s | "
+                "likely blocked on DB/IO | refusing to start a second collector"
+            )
 
         self._campaign_id = campaign_id
         self._config_id = config_id
         self._server_pid = server_pid
+        self._cycle_id = cycle_id
         self._stop_event.clear()
 
         with self._lock:
@@ -1273,7 +1388,19 @@ class TelemetryCollector:
         if self._thread is not None:
             self._thread.join(timeout=15)
             if self._thread.is_alive():
-                logger.warning("TelemetryCollector thread did not stop within 15s")
+                raise RuntimeError(
+                    "TelemetryCollector: thread still alive after 15s | "
+                    "likely blocked on DB/IO | refusing to start a second collector"
+                )
+        
+        # Phase 2: Close scoped connection safely
+        if self._conn:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
         self._thread = None
 
         with self._lock:
@@ -1289,6 +1416,14 @@ class TelemetryCollector:
     def _run(self) -> None:
         last_snapshot_time = 0.0
 
+        # Phase 2: Open scoped connection for this thread
+        from src.db import get_connection
+        try:
+            self._conn = get_connection(self._db_path)
+        except Exception as exc:
+            logger.error("TelemetryCollector failed to open DB connection: %s", exc)
+            return
+
         while not self._stop_event.is_set():
             loop_start = time.monotonic()
 
@@ -1297,6 +1432,7 @@ class TelemetryCollector:
                     self._campaign_id,
                     self._config_id,
                     self._server_pid,
+                    self._cycle_id,
                 )
                 with self._lock:
                     self._samples.append(sample)
@@ -1307,7 +1443,7 @@ class TelemetryCollector:
             now = time.monotonic()
             if now - last_snapshot_time >= self.SNAPSHOT_INTERVAL_S:
                 try:
-                    snap = collect_background_snapshot(self._campaign_id, self._config_id)
+                    snap = collect_background_snapshot(self._campaign_id, self._config_id, self._cycle_id)
                     with self._lock:
                         self._snapshots.append(snap)
                     self._write_snapshot(snap)
@@ -1328,30 +1464,59 @@ class TelemetryCollector:
             logger.warning("Failed to write telemetry JSONL: %s", exc)
 
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            if self._conn:
                 cols = ", ".join(row.keys())
                 placeholders = ", ".join("?" for _ in row)
-                conn.execute(
+                self._conn.execute(
                     f"INSERT INTO telemetry ({cols}) VALUES ({placeholders})",
                     list(row.values()),
                 )
-                conn.commit()
+                self._conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write telemetry SQLite: %s", exc)
+            # Severity B (Invalidating) escalation (Phase 2)
+            logger.error("Severity B: Failed to write telemetry SQLite for %s: %s", self._config_id, exc)
+            self._handle_severity_b(f"[INSTRUMENTATION_FAILURE] sqlite_write_error: {exc}")
 
     def _write_snapshot(self, snap: BackgroundSnapshot) -> None:
         row = asdict(snap)
         try:
-            with sqlite3.connect(self._db_path) as conn:
+            if self._conn:
                 cols = ", ".join(row.keys())
                 placeholders = ", ".join("?" for _ in row)
-                conn.execute(
+                self._conn.execute(
                     f"INSERT INTO background_snapshots ({cols}) VALUES ({placeholders})",
                     list(row.values()),
                 )
-                conn.commit()
+                self._conn.commit()
         except Exception as exc:
-            logger.debug("Failed to write background snapshot: %s", exc)
+            # Severity B (Invalidating) escalation (Phase 2)
+            logger.error("Severity B: Failed to write background snapshot SQLite for %s: %s", self._config_id, exc)
+            self._handle_severity_b(f"[INSTRUMENTATION_FAILURE] snapshot_sqlite_write_error: {exc}")
+
+    def _handle_severity_b(self, reason: str) -> None:
+        """
+        Escalate a non-fatal but truth-invalidating failure (Severity B) to the DB.
+        Marks the configuration as 'degraded' with a structured reason. (Phase 2)
+        """
+        if not self._conn or not self._config_id:
+            return
+
+        # Structured cause: [CONFIG] [CATEGORY] [REASON]
+        # (Distinction: config-level instrumentation or contract failure)
+        full_reason = f"[CONFIG] {reason}"
+        
+        try:
+            self._conn.execute(
+                "UPDATE configs SET status='degraded', elimination_reason=? WHERE id=?",
+                (full_reason, self._config_id),
+            )
+            self._conn.commit()
+            logger.info("Severity B: Config %s marked degraded (Reason: %s)", self._config_id, full_reason)
+        except Exception as exc:
+            # If we cannot update even the status, the DB might be fully unresponsive.
+            # This is essentially promoted to Severity A by the Runner eventually.
+            logger.error("CRITICAL: Failed to persist Severity B status to DB: %s", exc)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1368,6 +1533,9 @@ def collect_campaign_start_snapshot(
     baseline_yaml_path: Path,
     sampling_params: dict,
     cpu_affinity_policy: str,
+    baseline: dict[str, Any] | None = None,
+    quantmap_identity: dict[str, Any] | None = None,
+    run_plan_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect a complete system fingerprint at campaign start (MDD §10.5)."""
     import hashlib
@@ -1428,30 +1596,54 @@ def collect_campaign_start_snapshot(
             snap[f"{label}_sha256"] = None
             raw = None
 
-        # Store verbatim YAML text for the campaign file only.
-        # This makes every DB row fully self-contained: if configs/ is modified
-        # or deleted after a run, the exact YAML that governed the run is still
-        # recoverable from the database. (L1/U6 fix)
         if label == "campaign_yaml":
             try:
                 snap["campaign_yaml_content"] = raw.decode("utf-8") if raw is not None else None
             except Exception:
                 snap["campaign_yaml_content"] = None
+        elif label == "baseline_yaml":
+            try:
+                snap["baseline_yaml_content"] = raw.decode("utf-8") if raw is not None else None
+            except Exception:
+                snap["baseline_yaml_content"] = None
+
+    snap["baseline_yaml_path"] = str(baseline_yaml_path)
+    if baseline is not None:
+        try:
+            baseline_identity = {
+                "model": baseline.get("model", {}),
+                "machine": baseline.get("machine", {}),
+                "runtime": baseline.get("runtime", {}),
+                "sampling": baseline.get("sampling", {}),
+            }
+            snap["baseline_identity_json"] = json.dumps(baseline_identity, sort_keys=True)
+        except Exception:
+            snap["baseline_identity_json"] = None
+    if quantmap_identity is not None:
+        snap["quantmap_identity_json"] = json.dumps(quantmap_identity, sort_keys=True)
+    if run_plan_snapshot is not None:
+        snap["run_plan_json"] = json.dumps(run_plan_snapshot, sort_keys=True)
+    snap["snapshot_schema_version"] = 2
+    snap["snapshot_capture_quality"] = "complete" if snap.get("baseline_yaml_content") else "partial"
+    execution_environment = classify_execution_environment()
+    snap["execution_environment_json"] = execution_environment.to_json()
 
     snap["os_version"] = platform.version()
     snap["os_platform"] = platform.platform()
     snap["python_version"] = sys.version
 
     try:
+        driver = pynvml.nvmlSystemGetDriverVersion() if _NVML_INITIALIZED else None
         snap["nvidia_driver"] = (
-            pynvml.nvmlSystemGetDriverVersion() if _NVML_INITIALIZED else None
+            driver.decode("utf-8", errors="replace") if isinstance(driver, bytes) else driver
         )
     except Exception:
         snap["nvidia_driver"] = None
 
     try:
+        gpu_name = pynvml.nvmlDeviceGetName(_NVML_HANDLE) if _NVML_INITIALIZED and _NVML_HANDLE else None
         snap["gpu_name"] = (
-            pynvml.nvmlDeviceGetName(_NVML_HANDLE) if _NVML_INITIALIZED and _NVML_HANDLE else None
+            gpu_name.decode("utf-8", errors="replace") if isinstance(gpu_name, bytes) else gpu_name
         )
     except Exception:
         snap["gpu_name"] = None
@@ -1478,6 +1670,36 @@ def collect_campaign_start_snapshot(
         )
     except Exception:
         snap["gpu_temp_at_start_c"] = None
+
+    nvml_details: dict[str, Any] = {}
+    nvml_probe_status: str | None = None
+    if _NVML_INITIALIZED and _NVML_HANDLE:
+        if snap.get("nvidia_driver"):
+            nvml_details["driver_version"] = snap.get("nvidia_driver")
+        if snap.get("gpu_name"):
+            nvml_details["gpu_name"] = snap.get("gpu_name")
+    elif execution_environment.support_tier == SUPPORT_WSL_DEGRADED:
+        nvml_probe = probe_nvml_provider()
+        nvml_probe_status = nvml_probe.status
+        nvml_details.update(nvml_probe.details)
+        if nvml_probe.provider_version:
+            nvml_details["driver_version"] = nvml_probe.provider_version
+    provider_evidence = build_provider_evidence(
+        hwinfo_available=bool(readings),
+        hwinfo_reading_count=len(readings),
+        nvml_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        nvml_status=nvml_probe_status,
+        nvml_details=nvml_details,
+        cpu_temp_available=snap["cpu_temp_at_start_c"] is not None,
+        gpu_vram_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        power_limit_available=bool(_NVML_INITIALIZED and _NVML_HANDLE),
+        gpu_temp_available=snap["gpu_temp_at_start_c"] is not None,
+        support_tier=execution_environment.support_tier,
+        notes=execution_environment.degraded_reasons,
+    )
+    snap["telemetry_provider_identity_json"] = provider_evidence.provider_identity_json()
+    snap["telemetry_capabilities_json"] = provider_evidence.capabilities_json()
+    snap["telemetry_capture_quality"] = provider_evidence.capture_quality
 
     logger.info("Campaign start snapshot collected for %s", campaign_id)
     return snap

@@ -12,7 +12,8 @@ runtime flags) live with their respective backend modules, not here.
     backends/llamacpp.py:  future home of server.py backend constants
 
 Dependency rule:
-    config.py imports NOTHING from the QuantMap source tree.
+    config.py imports only the stdlib-only settings_env helper from the
+    QuantMap source tree.
     All other src/ modules MAY import from config.py.
     No src/ module should import infrastructure constants from another src/ module.
 
@@ -26,6 +27,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from src.settings_env import optional_env_path, require_env_path
+
 # ---------------------------------------------------------------------------
 # Repository layout
 # ---------------------------------------------------------------------------
@@ -35,24 +38,20 @@ _REPO_ROOT: Path = Path(__file__).parent.parent
 # ---------------------------------------------------------------------------
 # Lab root — all runtime output (results, logs, db, state).  Gitignored.
 # ---------------------------------------------------------------------------
-_lab_root_raw = os.getenv("QUANTMAP_LAB_ROOT")
-if _lab_root_raw is None:
-    raise EnvironmentError(
-        "QUANTMAP_LAB_ROOT is not set. "
-        "Copy .env.example to .env and set QUANTMAP_LAB_ROOT to your lab directory "
-        "(e.g. D:/Workspaces/QuantMap)."
-    )
-LAB_ROOT: Path = Path(_lab_root_raw)
+LAB_ROOT: Path = require_env_path(
+    "QUANTMAP_LAB_ROOT",
+    purpose="QuantMap lab root",
+    recommendation=(
+        "Copy .env.example to .env and set QUANTMAP_LAB_ROOT to your lab "
+        "directory (e.g. D:/Workspaces/QuantMap)."
+    ),
+)
 
 # ---------------------------------------------------------------------------
 # Source-tree directories — live with the repo, not with runtime output.
 # ---------------------------------------------------------------------------
-CONFIGS_DIR: Path = Path(
-    os.getenv("QUANTMAP_CONFIGS_DIR", str(_REPO_ROOT / "configs"))
-)
-REQUESTS_DIR: Path = Path(
-    os.getenv("QUANTMAP_REQUESTS_DIR", str(_REPO_ROOT / "requests"))
-)
+CONFIGS_DIR: Path = optional_env_path("QUANTMAP_CONFIGS_DIR", _REPO_ROOT / "configs")
+REQUESTS_DIR: Path = optional_env_path("QUANTMAP_REQUESTS_DIR", _REPO_ROOT / "requests")
 
 # ---------------------------------------------------------------------------
 # Network — infrastructure constants, backend-agnostic

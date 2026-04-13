@@ -28,15 +28,40 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from src.db import get_connection
+from src.settings_env import optional_env_path
 
 logger = logging.getLogger(__name__)
 
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
+LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap")
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Semantic labels (Section 5 of Design Memo)
+# ---------------------------------------------------------------------------
+_L_CONT = "CONTEXT"
+_L_METH = "METHODOLOGY"
+_L_DATA = "DATA"
+_L_INT  = "INTERPRETATION"
+_L_IMP  = "IMPLICATIONS"
+_L_LIM  = "LIMITATIONS"
+_L_WARN = "WARNINGS"
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +333,8 @@ def _section_header(
     run_plan: Any,
     baseline: dict[str, Any],
     now: str,
+    baseline_source: str | None = None,
+    trust_identity: Any = None,
 ) -> list[str]:
     lines: list[str] = []
 
@@ -335,6 +362,9 @@ def _section_header(
     lines.append(f"| Variable swept | `{camp.get('variable', '—')}` |")
     lines.append(f"| Campaign type | {camp.get('campaign_type', '—')} |")
     lines.append(f"| Status | {camp.get('status', '—')} |")
+    if camp.get("analysis_status") or camp.get("report_status"):
+        lines.append(f"| Analysis status | {camp.get('analysis_status', '—')} |")
+        lines.append(f"| Report status | {camp.get('report_status', '—')} |")
     lines.append(f"| Started | {camp.get('started_at', '—')} |")
     lines.append(f"| Completed | {camp.get('completed_at', '—')} |")
     lines.append(f"| Machine | {machine.get('name', '—')} |")
@@ -343,15 +373,34 @@ def _section_header(
     lines.append(f"| RAM | {machine.get('ram', '—')} |")
     lines.append(f"| OS | {snap.get('os_version', machine.get('os', '—'))} |")
     lines.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', '—')} |")
+    try:
+        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+        lines.extend(execution_environment_summary_lines(snap))
+    except Exception:
+        lines.append("| Execution support tier | `unknown` |")
+    try:
+        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+
+        lines.extend(provider_evidence_summary_lines(snap))
+    except Exception:
+        lines.append("| Telemetry provider evidence | `unknown` |")
     lines.append(f"| Model | {model_bl.get('name', '—')} |")
     lines.append(f"| Model size | {_na(model_bl.get('size_gb'))} GB |")
     lines.append(f"| Quantization | {model_bl.get('quantization', '—')} |")
+    if baseline_source:
+        lines.append(f"| Baseline identity source | `{baseline_source}` |")
+    if trust_identity is not None:
+        qid = getattr(trust_identity, "quantmap", {}) or {}
+        qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
+        qcommit = qid.get("git_commit") or "unknown"
+        lines.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     lines.append(f"| Power plan | {snap.get('power_plan', '—')} |")
     build_commit = snap.get("build_commit", "—")
     if len(build_commit) > 16:
         build_commit = f"`{build_commit[:16]}...`"
     lines.append(f"| Build commit | {build_commit} |")
-    lines.append(f"| Campaign SHA256 | `{camp.get('campaign_sha256', '—')[:16]}...` |")
+    campaign_sha = (camp.get('campaign_sha256') or '—')
+    lines.append(f"| Campaign SHA256 | `{campaign_sha[:16]}...` |")
     lines.append("")
 
     rationale = camp.get("rationale") or ""
@@ -365,9 +414,20 @@ def _section_methodology(
     run_plan: Any,
     baseline: dict[str, Any],
     n_tested_configs: int,
+    scores_result: dict[str, Any],
+    methodology: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
-    lines.append("## Test Protocol\n> Type: Methodology\n")
+    from src.trust_identity import methodology_source_label  # noqa: PLC0415
+    methodology = methodology or {}
+    methodology_label = methodology_source_label(methodology)
+    
+    lines.append("> [!NOTE]")
+    lines.append("> **QuantMap Governance Methodology v1.0 (Stable)**")
+    lines.append("> Methodology: v1.0 (Winsorized Means + LCB + Absolute Anchors)")
+    lines.append("")
+    
+    lines.append(f"## Test Protocol\n> Type: {_L_METH}\n")
 
     lab_cfg = baseline.get("lab", {})
     cycles  = (
@@ -403,48 +463,108 @@ def _section_methodology(
     # Elimination filters — displayed verbatim because they are pre-committed
     lines.append("### Elimination Filters (pre-committed before data collection)\n")
     lines.append(
-        "_All thresholds below were fixed prior to data collection. "
+        "_All thresholds below were fixed prior to data collection based on the Experiment Profile. "
         "Configs failing any filter are excluded from ranking entirely._\n"
     )
-    try:
-        from src.score import ELIMINATION_FILTERS  # noqa: PLC0415
-        ef = ELIMINATION_FILTERS
-    except Exception:
-        ef = {}
+    ef = (
+        scores_result.get("effective_filters")
+        or methodology.get("gates")
+        or {}
+    )
 
     lines.append("| Filter | Threshold | Rationale |")
     lines.append("|--------|-----------|-----------|")
     lines.append(f"| Max coefficient of variation | ≤ {ef.get('max_cv', 0.05):.0%} | Inconsistent results are not rankable |")
     lines.append(f"| Max thermal throttle events | ≤ {ef.get('max_thermal_events', 0)} | Throttled configs are not at their rated performance |")
-    lines.append(f"| Max statistical outliers | ≤ {ef.get('max_outliers', 3)} | Excessive outliers indicate instability |")
+    lines.append(f"| Max statistical outliers (symmetric) | ≤ {ef.get('max_outliers', 3)} | Excessive outliers indicate instability |")
     lines.append(f"| Max warm TTFT P90 | ≤ {ef.get('max_warm_ttft_p90_ms', 500):.0f} ms | Hard latency ceiling for interactive use |")
     lines.append(f"| Min success rate | ≥ {ef.get('min_success_rate', 0.90):.0%} | Unreliable server responses invalidate results |")
     lines.append(f"| Min warm TG P10 | ≥ {ef.get('min_warm_tg_p10', 7.0):.1f} t/s | Floor below which throughput is unusable |")
     lines.append(f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 10)} | Minimum for statistical validity |")
     lines.append("")
+    # Scoring Profile
+    profile_obj = scores_result.get("scoring_profile")
+    profile_name = (
+        methodology.get("profile_name")
+        or getattr(profile_obj, "name", None)
+        or "unknown"
+    )
+    profile_version = (
+        methodology.get("profile_version")
+        or getattr(profile_obj, "version", None)
+        or "unknown"
+    )
+    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "unknown")
+    lines.append(
+        f"**Experiment Profile:** `{profile_name}` v{profile_version} "
+        f"({profile_family})  \n"
+        f"**Methodology evidence:** `{methodology_label}`\n"
+    )
 
     # Scoring weights
-    lines.append("### Scoring Weights (pre-committed)\n")
+    lines.append("### Scoring Methodology (Lower Confidence Bound)\n")
     lines.append(
-        "_Composite score = weighted sum of min-max normalized metrics below. "
-        "Higher weight = more influence on rank. "
-        "TTFT metrics are inverted (lower = better)._\n"
+        "_Scoring uses **Winsorized Means** (10% tails) to stabilize point estimates. "
+        "The composite score represents the **Lower Confidence Bound (LCB)**, penalizing configs "
+        "with high performance variance across cycles. Higher LCB = more stable performance._\n"
     )
-    try:
-        from src.score import SCORE_WEIGHTS  # noqa: PLC0415
-        sw = SCORE_WEIGHTS
-    except Exception:
-        sw = {}
+    
+    # LCB Method Disclosure
+    lcb_method = "unknown"
+    scores_df = scores_result.get("scores_df")
+    if scores_df is not None and not scores_df.empty:
+        lcb_method = scores_df["lcb_method"].iloc[0]
+    
+    lines.append(f"> **LCB Computation Method:** {lcb_method}\n")
+    
+    sw = (
+        methodology.get("weights")
+        or getattr(profile_obj, "weights", {})
+        or {}
+    )
 
     lines.append("| Metric | Weight | Direction |")
     lines.append("|--------|-------:|-----------|")
     lines.append(f"| Throughput median (TG) | {sw.get('warm_tg_median', 0.35):.0%} | higher is better |")
     lines.append(f"| Throughput P10 (consistency floor) | {sw.get('warm_tg_p10', 0.20):.0%} | higher is better |")
-    lines.append(f"| Warm TTFT median | {sw.get('warm_ttft_median', 0.20):.0%} | lower is better |")
-    lines.append(f"| Warm TTFT P90 (worst-case latency) | {sw.get('warm_ttft_p90', 0.10):.0%} | lower is better |")
-    lines.append(f"| Cold TTFT (server startup latency) | {sw.get('cold_ttft_median', 0.10):.0%} | lower is better |")
+    lines.append(f"| Warm TTFT median | {sw.get('warm_ttft_median_ms', 0.20):.0%} | lower is better |")
+    lines.append(f"| Warm TTFT P90 (worst-case latency) | {sw.get('warm_ttft_p90_ms', 0.10):.0%} | lower is better |")
+    lines.append(f"| Cold TTFT (server startup latency) | {sw.get('cold_ttft_median_ms', 0.10):.0%} | lower is better |")
     lines.append(f"| Prompt processing (PP) | {sw.get('pp_median', 0.05):.0%} | higher is better |")
     lines.append("")
+
+    # Phase 4: Normalization Methodology (Anchor Governance)
+    lines.append("### Normalization Methodology (Anchor Governance)\n")
+    lines.append(
+        "_QuantMap Governance Methodology v1.0 follows absolute fixed-reference normalization to ensure cross-campaign "
+        "comparability. Scores are measured against governed hardware or baseline anchors._\n"
+    )
+    
+    governance_snapshot = methodology.get("anchors") or scores_result.get("governance_methodology")
+    if governance_snapshot:
+        lines.append("| Metric | Anchor Value | Source | Provenance/Version |")
+        lines.append("|--------|-------------:|:-------|:-------------------|")
+        # Sort metrics for stable reporting
+        for m_name in sorted(governance_snapshot.keys()):
+            ref = governance_snapshot[m_name]
+            val = ref.get("value")
+            source = ref.get("source", "unknown")
+            provenance = ref.get("provenance", "N/A")
+            
+            val_str = f"{val:.1f}" if val is not None else "BATCH-BEST"
+            
+            # Format source labels for clarity
+            source_label = source
+            if source == "baseline_yaml":
+                source_label = "**BASELINE OVERRIDE**"
+            elif source == "best-in-batch":
+                source_label = "FALLBACK (Cohort-Relative) [!CAUTION]"
+            
+            lines.append(f"| {m_name.replace('_', ' ').title()} | {val_str} | {source_label} | {provenance} |")
+        lines.append("")
+    else:
+        lines.append("> [!WARNING]")
+        lines.append("> **Legacy Metadata:** No governance methodology snapshot found. Scores may be cohort-relative.\n")
 
     # Mode limitations
     limitations: list[str] = []
@@ -502,6 +622,7 @@ def _section_primary_results(
     pareto_frontier = scores_result.get("pareto_frontier", [])
     passing         = scores_result.get("passing",         {})
     eliminated      = scores_result.get("eliminated",      {})
+    unrankable      = scores_result.get("unrankable",      {})
     scores_df       = scores_result.get("scores_df")
 
     n_passing = len(passing)
@@ -547,36 +668,46 @@ def _section_primary_results(
         )
 
     # Highest TG row
-    if highest_tg and highest_tg != winner:
+    if highest_tg:
+        is_unrank = (highest_tg in unrankable)
+        unrank_note = " ⚠ **Unrankable (Evidence Only)**" if is_unrank else ""
+        
         var_val = config_variable_map.get(highest_tg, highest_tg)
         tg   = cfg_s(highest_tg).get("warm_tg_median")
         ttft = cfg_s(highest_tg).get("warm_ttft_median_ms")
         sc   = score_field(highest_tg, "composite_score")
-        lines.append(
-            f"| Highest raw TG | `{highest_tg}` ({variable_name}={var_val}) "
-            f"| {_fmt(tg, '.2f')} | {_fmt(ttft, '.0f')} | {_fmt(sc, '.3f')} "
-            f"| Highest TG median ({_fmt(tg, '.2f')} t/s) among passing configs "
-            f"(based on TG Median column) |"
-        )
-    elif highest_tg and highest_tg == winner:
-        tg_w = cfg_s(winner).get("warm_tg_median")
-        lines.append(
-            f"| Highest raw TG | _(same as score winner)_ | — | — | — "
-            f"| TG leader and score leader are the same config "
-            f"(based on TG Median and Composite Score columns) |"
-        )
+        
+        if highest_tg == winner:
+            lines.append(
+                f"| Highest raw TG | _(same as score winner)_ | — | — | — "
+                f"| TG leader and score leader are the same config "
+                f"(based on TG Median and Composite Score columns) |"
+            )
+        else:
+            lines.append(
+                f"| Highest raw TG | `{highest_tg}` ({variable_name}={var_val}){unrank_note} "
+                f"| {_fmt(tg, '.2f')} | {_fmt(ttft, '.0f')} | {_fmt(sc, '.3f')} "
+                f"| Highest TG median ({_fmt(tg, '.2f')} t/s) among passing configurations "
+                f"(based on TG Median column) |"
+            )
     else:
         lines.append("| Highest raw TG | — | — | — | — | No passing configs |")
 
     # Pareto row
     if pareto_frontier:
-        frontier_display = ", ".join(f"`{c}`" for c in pareto_frontier[:4])
+        def _brand(cid: str) -> str:
+            if cid in unrankable:
+                return f"`{cid}` (⚠)"
+            return f"`{cid}`"
+            
+        frontier_display = ", ".join(_brand(c) for c in pareto_frontier[:4])
         if len(pareto_frontier) > 4:
             frontier_display += f" +{len(pareto_frontier) - 4} more"
+        
         lines.append(
             f"| Pareto frontier | {frontier_display} | — | — | — "
             "| Not dominated on both TG median and TTFT median simultaneously "
-            "(based on TG Median and TTFT Median columns) |"
+            "(based on TG Median and TTFT Median columns). (⚠) = Unrankable evidence |"
         )
     else:
         lines.append("| Pareto frontier | — | — | — | — | No non-dominated configs identified |")
@@ -660,7 +791,7 @@ def _section_primary_results(
             "| — | — | — | — | — | — | — | _unrankable configs below_ |"
         )
         for missing, cid in unrankable_rows:
-            lines.append(_row(cid, f"❌ unrankable: missing {missing}"))
+            lines.append(_row(cid, f"⚠ unrankable: missing {missing}"))
 
     if elim_rows:
         lines.append(
@@ -673,7 +804,7 @@ def _section_primary_results(
     lines.append("")
     lines.append(
         "_★ = score winner · ▲ = highest raw TG · ◆ = Pareto frontier · "
-        "CV = coefficient of variation (lower = more stable)_\n"
+        "⚠ = unrankable evidence · CV = coefficient of variation (lower = more stable)_\n"
     )
 
     # ── Section-end block ────────────────────────────────────────────────────
@@ -1310,6 +1441,7 @@ def _appendix_full_stats(
     )
 
     eliminated = scores_result.get("eliminated", {})
+    unrankable = scores_result.get("unrankable", {})
     scores_df  = scores_result.get("scores_df")
 
     def score_field(cid: str, field: str) -> Any:
@@ -1337,8 +1469,13 @@ def _appendix_full_stats(
         var_val = config_variable_map.get(cid, "—")
         sc      = score_field(cid, "composite_score")
         rank    = score_field(cid, "rank_overall")
-        elim    = "✗ " if cid in eliminated else ""
         n_warm  = s.get("valid_warm_request_count", 0)
+
+        elim = ""
+        if cid in eliminated:
+            elim = "✗ "
+        elif cid in unrankable:
+            elim = "⚠ "
         cv_frac = s.get("warm_tg_cv")
         cv_disp = f"{cv_frac * 100:.1f}%" if (cv_frac is not None and n_warm >= 3) else "N/A"
         
@@ -1361,7 +1498,7 @@ def _appendix_full_stats(
 
     lines.append("")
     lines.append(
-        "_✗ = eliminated. TG = generation throughput (t/s). TTFT = time to first token (ms). "
+        "_✗ = eliminated. ⚠ = unrankable. TG = generation throughput (t/s). TTFT = time to first token (ms). "
         "PP = prompt processing throughput (t/s). CV = coefficient of variation._\n"
     )
     return lines
@@ -1373,23 +1510,767 @@ def _appendix_eliminations(
     variable_name:       str,
 ) -> list[str]:
     lines: list[str] = []
-    lines.append("## Appendix B: Elimination Diagnostics\n")
+    lines.append("## Appendix B: Elimination & Forensic Exclusions\n")
 
     eliminated = scores_result.get("eliminated", {})
-    if not eliminated:
-        lines.append("_No configs were eliminated — all passed the pre-committed filters._\n")
+    unrankable = scores_result.get("unrankable", {})
+
+    if not eliminated and not unrankable:
+        lines.append("_No configs were eliminated or unrankable — all passed the pre-committed filters._\n")
         return lines
 
+    if eliminated:
+        lines.append("### Eliminated Configurations\n")
+        lines.append(
+            "This section details configurations that failed one or more pre-committed elimination filters. "
+            "These configurations are categorically excluded from primary rankings. The specific threshold violation that triggered elimination is shown below.\n"
+        )
+        lines.append(f"| Config | {variable_name} | Elimination Reason |")
+        lines.append("|--------|----------|--------------------|")
+        for cid, reason in sorted(eliminated.items()):
+            var_val = config_variable_map.get(cid, "—")
+            lines.append(f"| `{cid}` | {var_val} | {reason} |")
+        lines.append("")
+
+    # Forensic Exclusions: Degraded (Severity B) and NaN-Invalid (Hard NaN Guard)
+    # These were previously hidden or mixed with filters.
+    collapsed = scores_result.get("collapsed_dimensions", [])
+    nan_invalid = scores_result.get("nan_invalid_ids", [])
+    
+    degraded = {cid: s.get("elimination_reason") for cid, s in scores_result.get("stats", {}).items() if s.get("config_status") == "degraded"}
+    high_nan_warns = scores_result.get("high_nan_warnings", [])
+
+    if collapsed or high_nan_warns or nan_invalid or degraded:
+        lines.append("### Forensic Exclusions & Sensor Collapse\n")
+        lines.append(
+            "This section details configurations and dimensions that were excluded for truth-integrity reasons "
+            "rather than policy filters. These exclusions indicate that the underlying measurements were either "
+            "physically impossible to collect (OOM/Degraded) or mathematically invalid for comparison (NaNs).\n"
+        )
+        
+        if collapsed:
+            lines.append("#### [WARNING] Sensor Collapse Detected\n")
+            lines.append(
+                "> **The following scoring dimensions were truth-invalidated across the entire campaign.** "
+                "These dimensions produced 100% NaN rates across a valid sample size and were automatically dropped "
+                "from the composite solver to prevent ranking corruption:\n"
+            )
+            for dim in collapsed:
+                lines.append(f"- `{dim}`")
+            lines.append("")
+
+        if high_nan_warns:
+            lines.append("#### [DIAGNOSTIC] High NaN Rate Dimensions\n")
+            lines.append(
+                "> **The following dimensions exceeded the noise threshold (>50% NaN) but were not fully collapsed.** "
+                "These dimensions are still active in the solver, but their information density is low. "
+                "Ranking results for these specific metrics should be treated as directional only:\n"
+            )
+            for dim in high_nan_warns:
+                lines.append(f"- `{dim}`")
+            lines.append("")
+
+        if nan_invalid or degraded:
+            lines.append("#### Excluded Configurations (Truth-Invalidated)\n")
+            lines.append(
+                "Configurations listed below are **truth-invalidated**. They may have completed cycles, but the "
+                "resulting data was either fundamentally missing required metrics (Hard NaN Guard) or marked as "
+                "degraded by the instrumentation system (Severity B).\n"
+            )
+            lines.append(
+                "> NOTE: These configs are excluded from all rankings (Winner, Highest TG, Pareto). "
+                "Any raw performance observation is provided for diagnostic context only and does not "
+                "imply ranking eligibility.\n"
+            )
+            lines.append(f"| Config | {variable_name} | Exclusion Reason | Basis |")
+            lines.append("|--------|----------|------------------|-------|")
+            
+            # Combine for sorting
+            all_exclusions: list[tuple[str, str, str]] = []
+            for cid in nan_invalid:
+                all_exclusions.append((cid, "composite_nan_exclusion", "Hard NaN Guard (incomplete metric set)"))
+            for cid, reason in degraded.items():
+                # Use the structured reason from the DB
+                all_exclusions.append((cid, "instrumentation_degraded", reason or "degraded"))
+                
+            for cid, category, reason in sorted(all_exclusions):
+                var_val = config_variable_map.get(cid, "—")
+                lines.append(f"| `{cid}` | {var_val} | {category} | {reason} |")
+            lines.append("")
+
+    return lines
+
+
+def _appendix_historical_configs(
+    scores_result:       dict[str, Any],
+    config_variable_map: dict[str, Any],
+    variable_name:       str,
+) -> list[str]:
+    """
+    Render Appendix D for configurations found in the DB but missing from the current YAML.
+    """
+    abandoned = scores_result.get("abandoned", [])
+    if not abandoned:
+        return []
+
+    lines: list[str] = []
+    lines.append("## Appendix D: Historical & Abandoned Configs\n")
     lines.append(
-        "This section details configurations that failed one or more pre-committed elimination filters. "
-        "These configurations are categorically excluded from primary rankings. The specific threshold violation that triggered elimination is shown below.\n"
+        "The configurations listed below were found in the database for this campaign ID but are missing from the "
+        "currently active YAML definition. They are preserved here for forensics and auditability but are "
+        "excluded from primary rankings and Pareto evaluations.\n"
     )
-    lines.append(f"| Config | {variable_name} | Elimination Reason |")
-    lines.append("|--------|----------|--------------------|")
-    for cid, reason in sorted(eliminated.items()):
+
+    lines.append(f"| Config ID | {variable_name} | Observed Status | Last Reason |")
+    lines.append("|:---|:---|:---|:---|")
+
+    stats = scores_result.get("stats", {})
+    for cid in sorted(abandoned):
         var_val = config_variable_map.get(cid, "—")
-        lines.append(f"| `{cid}` | {var_val} | {reason} |")
+        cfg_stats = stats.get(cid, {})
+        status = cfg_stats.get("config_status", "abandoned")
+        reason = cfg_stats.get("elimination_reason", "n/a")
+        lines.append(f"| `{cid}` | {var_val} | {status} | {reason} |")
+
     lines.append("")
+    return lines
+
+
+
+# ---------------------------------------------------------------------------
+# Background Process Activity — computation layer
+# ---------------------------------------------------------------------------
+
+# Known background interferer categories with their name substrings.
+# Checked case-insensitively against process names in all_notable_procs_json.
+# Extend this list to add new categories — do NOT use heuristics, only explicit names.
+_KNOWN_INTERFERERS: list[tuple[str, list[str]]] = [
+    ("Windows Defender",     ["msmpeng", "mpcmdrun", "mpdefendsandbox"]),
+    ("Windows Update",       ["tiworker", "wuauclt", "wudfhost", "usoclient"]),
+    ("Search Indexer",       ["searchindexer", "searchhost", "searchprotocolhost"]),
+    ("Browser (Chrome)",     ["chrome"]),
+    ("Browser (Edge)",       ["msedge"]),
+    ("Browser (Firefox)",    ["firefox"]),
+    ("Steam / Game Client",  ["steam", "epicgameslauncher", "gameoverlayui"]),
+    ("Discord / Chat",       ["discord", "slack", "teams"]),
+    ("OneDrive / Cloud",     ["onedrive", "googledrivefs", "dropbox"]),
+    ("NVIDIA Container",     ["nvcontainer", "nvspcaps", "nvidia web helper"]),
+]
+
+# SUMMARY SIGNIFICANCE RULES — explicit, deterministic, v1
+#
+# Rule R1: Top CPU consumers  — top 5 unique process names by peak_cpu_pct
+#          Source: all_notable_procs_json across all snapshots
+# Rule R2: Top RAM consumers  — top 5 unique process names by peak_rss_mb
+#          Source: all_notable_procs_json; llama-server PID excluded
+# Rule R3: Notable CPU spikes — any process with cpu_pct >= 5% in any snapshot
+#          Threshold: 5% (conservative — avoids missing short-lived interference)
+# Rule R4: Known interferers  — checked against _KNOWN_INTERFERERS list above
+#          Reported with presence fraction and peak CPU; absence stated explicitly
+# Rule R5: Hardware spikes    — from telemetry table
+#          cpu_temp_c >= 90°C OR gpu_temp_c >= 80°C OR power_limit_throttling=1
+#
+# CAPTURE BOUNDARY (NOT a significance rule):
+#   Processes with cpu_pct <= 0.5% AND rss_mb <= 50 MB are NOT captured.
+#   This is a collection-time boundary documented in telemetry.py.
+
+_CPU_SPIKE_THRESHOLD_PCT: float = 5.0   # R3
+_HW_CPU_TEMP_SPIKE_C: float = 90.0      # R5
+_HW_GPU_TEMP_SPIKE_C: float = 80.0      # R5
+
+
+def _compute_background_interference(
+    campaign_id: str,
+    db_path: Path,
+) -> dict[str, Any]:
+    """
+    Derive background interference summary from background_snapshots DB records.
+
+    This function applies the explicit significance rules defined above (R1–R5).
+    It never modifies or discards stored data — it is a pure read layer.
+
+    Returns a structured dict ready for _section_background_interference().
+    Returns {"available": False, "reason": str} if no snapshot data exists.
+    """
+    try:
+        with get_connection(db_path) as conn:
+            # R1: Aggregate process activity from snapshots
+            # Rule A: Join with cycles to include only data from verified-complete cycles.
+            # This naturally excludes legacy NULL cycle_id rows.
+            rows = conn.execute(
+                "SELECT bs.timestamp, bs.all_notable_procs_json, bs.gpu_proc_vram_json, "
+                "       bs.defender_process_running, bs.windows_update_active, "
+                "       bs.search_indexer_active, bs.antivirus_scan_active, "
+                "       bs.high_cpu_process_count "
+                "FROM background_snapshots bs "
+                "INNER JOIN cycles c ON bs.cycle_id = c.id "
+                "WHERE bs.campaign_id=? AND c.status='complete' "
+                "ORDER BY bs.timestamp",
+                (campaign_id,),
+            ).fetchall()
+
+            # Hardware spikes from telemetry table (R5)
+            # Filtered to completed cycles for consistency with Rule A.
+            hw_rows = conn.execute(
+                "SELECT t.timestamp, t.cpu_temp_c, t.gpu_temp_c, t.power_limit_throttling "
+                "FROM telemetry t "
+                "INNER JOIN cycles c ON t.cycle_id = c.id "
+                "WHERE t.campaign_id=? AND c.status='complete' "
+                "ORDER BY t.timestamp",
+                (campaign_id,),
+            ).fetchall()
+
+            # Get llama-server PID(s) to exclude from RAM rankings
+            server_pids: set[int] = set()
+            pid_rows = conn.execute(
+                "SELECT DISTINCT server_pid FROM telemetry "
+                "WHERE campaign_id=? AND server_pid IS NOT NULL",
+                (campaign_id,),
+            ).fetchall()
+            for pr in pid_rows:
+                if pr["server_pid"]:
+                    server_pids.add(int(pr["server_pid"]))
+
+    except Exception as exc:
+        logger.warning("_compute_background_interference: DB query failed: %s", exc)
+        return {"available": False, "reason": f"DB query failed: {exc}"}
+
+    if not rows:
+        return {"available": False, "reason": "No background_snapshots records found for this campaign."}
+
+    total_snapshots = len(rows)
+
+    # Aggregate per-process stats across all snapshots
+    # peak_cpu[name] = max cpu_pct seen in any snapshot
+    # peak_rss[name] = max rss_mb seen in any snapshot
+    # presence[name] = count of snapshots where process appeared
+    peak_cpu:  dict[str, float] = {}
+    peak_rss:  dict[str, float] = {}
+    presence:  dict[str, int]   = {}
+    # Spike events: list of {timestamp, name, cpu_pct} for R3
+    spike_events: list[dict[str, Any]] = []
+
+    # Named flag counts (for R4 supplement)
+    defender_snapshots = 0
+    update_snapshots   = 0
+    indexer_snapshots  = 0
+    avscan_snapshots   = 0
+    total_high_cpu_proc_count = 0
+    total_tracked_rss_mb = 0.0
+    total_tracked_cpu_pct = 0.0
+
+    for row in rows:
+        if row["defender_process_running"]:
+            defender_snapshots += 1
+        if row["windows_update_active"]:
+            update_snapshots += 1
+        if row["search_indexer_active"]:
+            indexer_snapshots += 1
+        if row["antivirus_scan_active"]:
+            avscan_snapshots += 1
+        total_high_cpu_proc_count += row["high_cpu_process_count"] or 0
+
+        try:
+            procs: list[dict] = json.loads(row["all_notable_procs_json"] or "[]")
+        except (ValueError, TypeError):
+            procs = []
+
+        # Option 6: Per-snapshot aggregation by name
+        snapshot_by_name_cpu: dict[str, float] = {}
+        snapshot_by_name_rss: dict[str, float] = {}
+        snapshot_cpu_total = 0.0
+        snapshot_rss_total = 0.0
+
+        # Exclusion logic: llama-server is the test subject, not background interference.
+        _SERVER_NAME_SUBSTRINGS = {"llama-server", "llama_server", "llama.server"}
+
+        for p in procs:
+            name = p.get("name") or "unknown"
+            
+            # Exclude server from all background logic
+            if any(sub in name.lower() for sub in _SERVER_NAME_SUBSTRINGS):
+                continue
+                
+            cpu = p.get("cpu_pct") or 0.0
+            rss = p.get("rss_mb") or 0.0
+
+            snapshot_by_name_cpu[name] = snapshot_by_name_cpu.get(name, 0.0) + cpu
+            snapshot_by_name_rss[name] = snapshot_by_name_rss.get(name, 0.0) + rss
+            snapshot_cpu_total += cpu
+            snapshot_rss_total += rss
+
+        # Update global peaks from aggregated snapshot data
+        for name, cpu in snapshot_by_name_cpu.items():
+            if cpu > peak_cpu.get(name, 0.0):
+                peak_cpu[name] = cpu
+            
+            presence[name] = presence.get(name, 0) + 1
+            
+            if cpu >= _CPU_SPIKE_THRESHOLD_PCT:
+                spike_events.append({
+                    "timestamp": row["timestamp"],
+                    "name":      name,
+                    "cpu_pct":   cpu,
+                })
+
+        for name, rss in snapshot_by_name_rss.items():
+            if rss > peak_rss.get(name, 0.0):
+                peak_rss[name] = rss
+
+        if snapshot_cpu_total > total_tracked_cpu_pct:
+            total_tracked_cpu_pct = snapshot_cpu_total
+        if snapshot_rss_total > total_tracked_rss_mb:
+            total_tracked_rss_mb = snapshot_rss_total
+
+    # R1: Top 5 CPU consumers by peak (all processes)
+    top_cpu = sorted(
+        [{"name": n, "peak_cpu_pct": v, "snapshots": presence.get(n, 0)}
+         for n, v in peak_cpu.items()],
+        key=lambda x: -x["peak_cpu_pct"],
+    )[:5]
+
+    # R2: Top 5 RAM consumers by peak
+    # (llama-server already excluded in collection loop)
+    top_ram = sorted(
+        [{"name": n, "peak_rss_mb": v, "snapshots": presence.get(n, 0)}
+         for n, v in peak_rss.items()],
+        key=lambda x: -x["peak_rss_mb"],
+    )[:5]
+
+    # Aggregate RAM pressure from captured processes (excluding llama-server)
+    # This surfaces "death by a thousand cuts" — many mid-sized processes together
+    # representing significant total load even when no single one is dominant.
+    # Computed dynamically per-snapshot above (total_tracked_rss_mb).
+
+    # R3: Deduplicate spike events — keep highest CPU value per process
+    spike_by_name: dict[str, dict] = {}
+    for ev in spike_events:
+        name = ev["name"]
+        if name not in spike_by_name or ev["cpu_pct"] > spike_by_name[name]["cpu_pct"]:
+            spike_by_name[name] = ev
+    notable_spikes = sorted(spike_by_name.values(), key=lambda x: -x["cpu_pct"])
+
+    # R4: Known interferers — check each category against peak_cpu / presence
+    known_interferer_results: list[dict[str, Any]] = []
+    for category, substrings in _KNOWN_INTERFERERS:
+        matched_names = [
+            n for n in peak_cpu
+            if any(s in n.lower() for s in substrings)
+        ]
+        detected = len(matched_names) > 0
+        entry: dict[str, Any] = {
+            "category":      category,
+            "detected":      detected,
+            "process_names": matched_names,
+        }
+        if detected:
+            entry["peak_cpu_pct"] = max(peak_cpu[n] for n in matched_names)
+            entry["snapshots_present"] = max(presence.get(n, 0) for n in matched_names)
+            entry["presence_pct"] = round(
+                entry["snapshots_present"] / total_snapshots * 100, 1
+            )
+        known_interferer_results.append(entry)
+
+    # R5: Hardware spikes from telemetry
+    hw_cpu_spikes = 0
+    hw_gpu_spikes = 0
+    hw_throttle_events = 0
+    hw_max_cpu_temp: float | None = None
+    hw_max_gpu_temp: float | None = None
+
+    for hr in hw_rows:
+        cpu_t = hr["cpu_temp_c"]
+        gpu_t = hr["gpu_temp_c"]
+        throttle = hr["power_limit_throttling"]
+        if cpu_t is not None:
+            if hw_max_cpu_temp is None or cpu_t > hw_max_cpu_temp:
+                hw_max_cpu_temp = cpu_t
+            if cpu_t >= _HW_CPU_TEMP_SPIKE_C:
+                hw_cpu_spikes += 1
+        if gpu_t is not None:
+            if hw_max_gpu_temp is None or gpu_t > hw_max_gpu_temp:
+                hw_max_gpu_temp = gpu_t
+            if gpu_t >= _HW_GPU_TEMP_SPIKE_C:
+                hw_gpu_spikes += 1
+        if throttle:
+            hw_throttle_events += 1
+
+    # VRAM data availability flag
+    vram_available = any(
+        row["gpu_proc_vram_json"] is not None for row in rows
+    )
+
+    return {
+        "available":             True,
+        "total_snapshots":       total_snapshots,
+        "top_cpu":               top_cpu,
+        "top_ram":               top_ram,
+        "total_tracked_rss_mb":  round(total_tracked_rss_mb, 1),
+        "total_tracked_cpu_pct": round(total_tracked_cpu_pct, 1),
+        "notable_spikes":        notable_spikes,
+        "known_interferers":     known_interferer_results,
+        "defender_snapshots":    defender_snapshots,
+        "update_snapshots":      update_snapshots,
+        "indexer_snapshots":     indexer_snapshots,
+        "avscan_snapshots":      avscan_snapshots,
+        "hw_max_cpu_temp":       hw_max_cpu_temp,
+        "hw_max_gpu_temp":       hw_max_gpu_temp,
+        "hw_cpu_spike_samples":  hw_cpu_spikes,
+        "hw_gpu_spike_samples":  hw_gpu_spikes,
+        "hw_throttle_events":    hw_throttle_events,
+        "vram_tracking_available": vram_available,
+        # Aggregate interference level (LOW / MODERATE / HIGH) for quick triage.
+        # Rules: HIGH if any spike >= CPU_SPIKE_THRESHOLD; MODERATE if any known
+        # interferer detected; LOW if neither; NONE if no processes flagged.
+        "aggregate_level": (
+            "HIGH"     if notable_spikes else
+            "MODERATE" if any(r["detected"] for r in known_interferer_results) else
+            "LOW"      if any(v > 0 for v in peak_cpu.values()) else
+            "NONE"
+        ),
+    }
+
+
+def _section_background_interference(
+    bg: dict[str, Any],
+    results_dir: Path,
+    campaign_id: str,
+) -> list[str]:
+    """
+    Render the ## Background Process Activity section.
+
+    This is a top-level section, not a subsection of Environment.
+    All content is derived from _compute_background_interference().
+    Significance rules R1–R5 are applied in the computation layer;
+    this function only renders the result.
+    """
+    lines: list[str] = []
+    lines.append("## Background Process Activity\n> Type: Data\n")
+
+    if not bg.get("available"):
+        reason = bg.get("reason", "No background snapshot data found.")
+        lines.append(
+            f"_No background process data available for this campaign. {reason}_\n"
+            "\n"
+            "_Background snapshots are collected every 10 seconds during campaign runs. "
+            "If this section is empty, the campaign may have been run with an older version "
+            "of QuantMap that did not collect this data, or the database was not accessible._\n"
+        )
+        return lines
+
+    total_snap  = bg["total_snapshots"]
+    agg_level   = bg["aggregate_level"]
+    agg_emoji   = {"HIGH": "🔴", "MODERATE": "🟡", "LOW": "🟢", "NONE": "✅"}.get(agg_level, "")
+
+    lines.append(
+        f"> **Observed interference level:** {agg_emoji} **{agg_level}** "
+        f"({total_snap} snapshots across campaign)\n"
+    )
+    lines.append(
+        f"> **Peak concurrent pressure:** "
+        f"**{bg['total_tracked_cpu_pct']:.1f}% CPU** | "
+        f"**{bg['total_tracked_rss_mb']:.0f} MB RAM**\n"
+    )
+    lines.append(
+        "_Process data is captured every 10 seconds throughout each cycle. "
+        "Multiple instances of the same process name are aggregated into a single entry. "
+        "**Peak concurrent pressure** reflects the highest total load observed in any single snapshot. "
+        "On multi-core systems, total CPU may exceed 100%._\n"
+    )
+    lines.append(
+        "_Capture boundary: processes with CPU ≤ 0.5% AND RAM ≤ 50 MB are not recorded "
+        "— this is a collection boundary, not a summary filter. "
+        "Absent processes were below both thresholds at every sample point._\n"
+    )
+    lines.append(
+        "_GPU compute % per background process is **not available** via NVML or any "
+        "user-space Windows API. Per-process VRAM usage is reported below where available._\n"
+    )
+
+    # ── A. Top CPU Consumers (R1) ────────────────────────────────────────────
+    lines.append("### A. Top CPU Consumers\n")
+    if bg["top_cpu"]:
+        lines.append("| Process | Peak CPU % | Snapshots Present |")
+        lines.append("|---------|----------:|------------------:|")
+        for entry in bg["top_cpu"]:
+            lines.append(
+                f"| `{entry['name']}` "
+                f"| {entry['peak_cpu_pct']:.1f}% "
+                f"| {entry['snapshots']} / {total_snap} |"
+            )
+        lines.append("")
+    else:
+        lines.append("_No processes exceeded the CPU capture threshold during this campaign._\n")
+
+    # ── B. Top RAM Consumers (R2) (llama-server excluded) ───────────────────
+    lines.append("### B. Top RAM Consumers\n")
+    lines.append(
+        f"_llama-server excluded. "
+        f"Peak total RAM across all tracked background processes in any snapshot: "
+        f"**{bg['total_tracked_rss_mb']:.0f} MB**. "
+        f"Top entries below show peaks for aggregated process names._\n"
+    )
+    if bg["top_ram"]:
+        lines.append("| Process | Peak RSS (MB) | Snapshots Present |")
+        lines.append("|---------|-------------:|------------------:|")
+        for entry in bg["top_ram"]:
+            lines.append(
+                f"| `{entry['name']}` "
+                f"| {entry['peak_rss_mb']:.0f} MB "
+                f"| {entry['snapshots']} / {total_snap} |"
+            )
+        lines.append("")
+    else:
+        lines.append("_No background processes exceeded the RAM capture threshold._\n")
+
+    # ── C. GPU VRAM by Process (R2-VRAM) ────────────────────────────────────
+    lines.append("### C. GPU VRAM by Process\n")
+    if bg["vram_tracking_available"]:
+        lines.append(
+            "_Per-process VRAM usage captured via `nvmlDeviceGetComputeRunningProcesses()`. "
+            "GPU compute % is not attributable per-process (no user-space API exists for this)._\n"
+        )
+        lines.append(
+            "> For full per-process VRAM trace, query: "
+            f"`SELECT timestamp, gpu_proc_vram_json FROM background_snapshots "
+            f"WHERE campaign_id='{campaign_id}' ORDER BY timestamp;`\n"
+        )
+    else:
+        lines.append(
+            "_Per-process VRAM tracking was not available for this campaign. "
+            "This requires NVML to be initialized at collection time. "
+            "If NVML was available during the run, the data will be present in the database "
+            "as `gpu_proc_vram_json` in `background_snapshots`. "
+            "If this field is NULL for all rows, NVML was unavailable or the query failed._\n"
+        )
+
+    # ── D. Notable CPU Spikes (R3) ───────────────────────────────────────────
+    lines.append("### D. Notable CPU Spikes\n")
+    lines.append(
+        f"_Criterion: any process reaching ≥ {_CPU_SPIKE_THRESHOLD_PCT:.0f}% CPU in any single snapshot. "
+        "One row per unique process (highest observed value shown)._\n"
+    )
+    if bg["notable_spikes"]:
+        lines.append("| Process | Peak CPU % | Timestamp of Peak |")
+        lines.append("|---------|----------:|-------------------|")
+        for ev in bg["notable_spikes"]:
+            lines.append(
+                f"| `{ev['name']}` "
+                f"| {ev['cpu_pct']:.1f}% "
+                f"| {ev['timestamp']} |"
+            )
+        lines.append("")
+    else:
+        lines.append(
+            f"_No processes reached ≥ {_CPU_SPIKE_THRESHOLD_PCT:.0f}% CPU in any snapshot "
+            f"during this campaign._\n"
+        )
+
+    # ── E. Known Interferers (R4) ────────────────────────────────────────────
+    lines.append("### E. Known Background Interferers\n")
+    lines.append(
+        "_Checked against a fixed list of known interference sources. "
+        "Absence is stated explicitly — this is not an omission._\n"
+    )
+    lines.append("| Category | Detected | Peak CPU % | % of Snapshots |")
+    lines.append("|----------|:--------:|-----------:|---------------:|")
+    for entry in bg["known_interferers"]:
+        detected_str = "✓" if entry["detected"] else "✗"
+        if entry["detected"]:
+            lines.append(
+                f"| {entry['category']} "
+                f"| {detected_str} (`{'`, `'.join(entry['process_names'][:2])}`) "
+                f"| {entry['peak_cpu_pct']:.1f}% "
+                f"| {entry['presence_pct']}% |"
+            )
+        else:
+            lines.append(
+                f"| {entry['category']} | {detected_str} | — | 0% |"
+            )
+    lines.append("")
+
+    # ── F. Hardware Spikes (R5) ──────────────────────────────────────────────
+    lines.append("### F. Hardware Conditions\n")
+    lines.append("| Metric | Value |")
+    lines.append("|--------|-------|")
+    cpu_temp_disp = f"{bg['hw_max_cpu_temp']:.1f}°C" if bg["hw_max_cpu_temp"] is not None else "N/A"
+    gpu_temp_disp = f"{bg['hw_max_gpu_temp']:.1f}°C" if bg["hw_max_gpu_temp"] is not None else "N/A"
+    lines.append(f"| Peak CPU temperature | {cpu_temp_disp} |")
+    lines.append(f"| Peak GPU temperature | {gpu_temp_disp} |")
+    lines.append(f"| CPU temp ≥ {_HW_CPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_cpu_spike_samples']} |")
+    lines.append(f"| GPU temp ≥ {_HW_GPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_gpu_spike_samples']} |")
+    lines.append(f"| GPU power-limit throttle events | {bg['hw_throttle_events']} |")
+    lines.append("")
+
+    if bg["hw_throttle_events"] > 0:
+        lines.append(
+            f"> ⚠️ **{bg['hw_throttle_events']} GPU power-limit throttle event(s) detected.** "
+            "GPU SW_POWER_CAP throttling means the GPU was constrained to its TDP limit during "
+            "inference. Affected cycles may show artificially lower throughput. "
+            "See the `telemetry` table for sample-level timestamps.\n"
+        )
+    if bg["hw_cpu_spike_samples"] > 0:
+        lines.append(
+            f"> ⚠️ **{bg['hw_cpu_spike_samples']} sample(s) with CPU ≥ {_HW_CPU_TEMP_SPIKE_C:.0f}°C.** "
+            "High CPU temperatures during inference indicate the machine was operating near its "
+            "thermal ceiling. Affected samples are in the `telemetry` table.\n"
+        )
+
+    lines.append(
+        "\n> **Full process trace:** query `background_snapshots WHERE campaign_id='"
+        f"{campaign_id}'` for all snapshot rows with per-snapshot process lists.\n"
+    )
+    lines.append(
+        "> **Raw hardware trace:** `results/{campaign_id}/telemetry.jsonl` "
+        "(2-second hardware samples throughout the campaign).\n"
+    )
+
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Supporting Evidence / Artifact Linking
+# ---------------------------------------------------------------------------
+
+def _section_supporting_artifacts(
+    campaign_id: str,
+    results_dir: Path,
+    db_path: Path,
+    run_contexts: list[dict[str, Any]],
+) -> list[str]:
+    """
+    Render the ## Supporting Evidence section.
+
+    Lists all primary artifacts with their filesystem paths and availability.
+    If an artifact is not found, states this explicitly.
+    Includes copy-paste SQL queries for power-user inspection.
+
+    This section must appear in every report. Its purpose is to make the
+    full evidence chain discoverable without requiring users to know the
+    filesystem layout in advance.
+    """
+    lines: list[str] = []
+    lines.append("## Supporting Evidence\n> Type: Artifact Index\n")
+    lines.append(
+        "_This section lists all primary artifacts that support this report. "
+        "They are available for independent inspection and verification of any claim in the report above. "
+        "If an artifact is unavailable, this is stated explicitly — nothing is silently omitted._\n"
+    )
+
+    def _check(path: Path) -> str:
+        return "legacy_file_present" if path.exists() else "missing"
+
+    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    artifact_rows = {
+        row.get("artifact_type"): row
+        for row in load_artifact_summaries(campaign_id, db_path)
+    }
+
+    def _artifact_status(artifact_type: str, path: Path) -> str:
+        row = artifact_rows.get(artifact_type)
+        if not row:
+            return _check(path)
+        status = row.get("status") or "unknown"
+        verification = row.get("verification_source") or "unknown"
+        sha = row.get("sha256")
+        error = row.get("error_message")
+        parts = [status, f"verification={verification}"]
+        if sha:
+            parts.append(f"sha256={sha[:12]}")
+        if error:
+            parts.append(f"error={str(error)[:80]}")
+        return "; ".join(parts)
+
+    telemetry_jsonl = results_dir / "telemetry.jsonl"
+    raw_jsonl       = results_dir / "raw.jsonl"
+    report_md       = results_dir / "report.md"
+    report_v2_md    = results_dir / "report_v2.md"
+    scores_csv      = results_dir / "scores.csv"
+
+    # Count run context files
+    rc_files = sorted(results_dir.glob("*_run_context.json"))
+    rc_status = f"✓ {len(rc_files)} file(s)" if rc_files else "✗ 0 files found"
+
+    # Find most recent log
+    log_dir = db_path.parent.parent / "logs" / campaign_id
+    log_files = sorted(log_dir.glob("runner_*.log")) if log_dir.exists() else []
+    log_status = f"✓ {len(log_files)} file(s)" if log_files else "✗ Not found"
+    log_latest = f"`{log_files[-1].name}`" if log_files else "—"
+
+    lines.append("### Artifact Index\n")
+    lines.append("| Artifact | Path | Status | Contents |")
+    lines.append("|----------|------|:------:|----------|")
+    lines.append(
+        f"| Hardware trace | `{telemetry_jsonl}` | {_artifact_status('telemetry_jsonl', telemetry_jsonl)} | "
+        "CPU/GPU/RAM/disk/network samples every 2 s |"
+    )
+    lines.append(
+        f"| Request results | `{raw_jsonl}` | {_artifact_status('raw_jsonl', raw_jsonl)} | "
+        "All inference request outcomes (TTFT, TG, outcome, errors) |"
+    )
+    lines.append(
+        f"| Database | `{db_path}` | {_check(db_path)} | "
+        "All tables: telemetry, background_snapshots, requests, scores, artifacts |"
+    )
+    lines.append(
+        f"| Primary report | `{report_md}` | {_artifact_status('report_md', report_md)} | "
+        "Compact campaign report |"
+    )
+    lines.append(
+        f"| Evidence-first report | `{report_v2_md}` | {_artifact_status('report_v2_md', report_v2_md)} | "
+        "This file |"
+    )
+    lines.append(
+        f"| Scores CSV | `{scores_csv}` | {_artifact_status('scores_csv', scores_csv)} | "
+        "Per-config statistics and rankings |"
+    )
+    lines.append(
+        f"| Per-cycle environment | `{results_dir}/*_run_context.json` | {rc_status} | "
+        "Pre-cycle environment characterization per cycle |"
+    )
+    lines.append(
+        f"| Run log(s) | `{log_dir}/runner_*.log` | {log_status} | "
+        f"Full execution trace. Latest: {log_latest} |"
+    )
+    lines.append("")
+
+    lines.append("### Database Inspection Queries\n")
+    lines.append(
+        "_Copy and run against `lab.sqlite` (or the DB path above) in any SQLite client._\n"
+    )
+    lines.append(f"```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
+    lines.append(f"SELECT * FROM telemetry WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n")
+    lines.append(f"-- Background process snapshots: all notable processes every 10 s")
+    lines.append(
+        f"SELECT timestamp, all_notable_procs_json, gpu_proc_vram_json\n"
+        f"FROM background_snapshots WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n"
+    )
+    lines.append(f"-- Report generation history")
+    lines.append(
+        f"SELECT artifact_type, path, status, sha256, verification_source, error_message, created_at FROM artifacts\n"
+        f"WHERE campaign_id = '{campaign_id}' ORDER BY created_at DESC;\n"
+    )
+    lines.append(f"-- Per-config score detail")
+    lines.append(
+        f"SELECT config_id, composite_score, rank_overall, is_score_winner,\n"
+        f"       passed_filters, elimination_reason\n"
+        f"FROM scores WHERE campaign_id = '{campaign_id}' ORDER BY rank_overall;\n"
+    )
+    lines.append("```\n")
+
+    # Explicit note on what is NOT captured
+    lines.append("### What Is Not Captured\n")
+    lines.append(
+        "- **Per-process GPU compute %:** Not available via NVML or any user-space Windows API. "
+        "Only per-process VRAM usage is tracked (see `gpu_proc_vram_json` in `background_snapshots`).\n"
+        "- **Processes below capture threshold:** Processes with CPU ≤ 0.5% AND RAM ≤ 50 MB are "
+        "not recorded in `background_snapshots`. Their aggregate impact can be large but their "
+        "individual footprint was below the collection boundary at every sample point.\n"
+        "- **Elevated/protected processes:** System processes with PPL (Protected Process Light) "
+        "protection may not appear in `all_notable_procs_json` due to OS access restrictions. "
+        "Named-process flags (Defender, Windows Update) are set by name-match and are reliable.\n"
+    )
+
     return lines
 
 
@@ -1487,6 +2368,17 @@ def generate_campaign_report(
     even if the file was partially written.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
+    from src.trust_identity import (  # noqa: PLC0415
+        load_baseline_for_historical_use,
+        load_run_identity,
+    )
+    baseline, baseline_source = load_baseline_for_historical_use(
+        campaign_id,
+        db_path,
+        fallback_baseline=baseline,
+        allow_current_input=False,
+    )
+    trust_identity = load_run_identity(campaign_id, db_path)
     results_dir = effective_lab_root / "results" / campaign_id
     results_dir.mkdir(parents=True, exist_ok=True)
     report_path = results_dir / "report_v2.md"
@@ -1494,6 +2386,7 @@ def generate_campaign_report(
     # Compute analysis if not provided
     if scores_result is None:
         from src.score import score_campaign  # noqa: PLC0415
+        from src import governance
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
         stats = scores_result["stats"]
@@ -1503,10 +2396,6 @@ def generate_campaign_report(
         camp_row = conn.execute(
             "SELECT * FROM campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
-        snap_row = conn.execute(
-            "SELECT * FROM campaign_start_snapshot WHERE campaign_id=?",
-            (campaign_id,),
-        ).fetchone()
         # Build config → variable_value map for display
         cfg_rows = conn.execute(
             "SELECT id, variable_value FROM configs WHERE campaign_id=?",
@@ -1514,7 +2403,7 @@ def generate_campaign_report(
         ).fetchall()
 
     camp = dict(camp_row) if camp_row else (campaign or {})
-    snap = dict(snap_row) if snap_row else {}
+    snap = trust_identity.start_snapshot
 
     # variable_value is JSON-serialized; unwrap it for display
     config_variable_map: dict[str, Any] = {}
@@ -1528,8 +2417,18 @@ def generate_campaign_report(
         getattr(run_plan, "variable", None) if run_plan else "value"
     ) or "value"
 
-    # Load per-cycle run-context files
+    # Load per-cycle run-context files, then restrict to configs that are actually
+    # present in the current campaign (as recorded in the DB).  If the campaign
+    # YAML was edited between runs, or if the same campaign_id was re-run with
+    # fewer configs, stale run_context JSON files from removed configs remain on
+    # disk.  Including them would inflate the cycle count and skew environment
+    # quality percentages, producing a misleading Environment section.
     run_contexts = _load_run_contexts(results_dir)
+    _active_config_ids = set(config_variable_map.keys())
+    run_contexts = [
+        ctx for ctx in run_contexts
+        if ctx.get("_config_id") in _active_config_ids
+    ]
     env_agg      = _aggregate_environment(run_contexts)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -1542,7 +2441,13 @@ def generate_campaign_report(
 
     # Header (recovery: minimal title — no stub needed, always recoverable)
     try:
-        sections.extend(_section_header(campaign_id, camp, snap, run_plan, baseline, now))
+        sections.extend(
+            _section_header(
+                campaign_id, camp, snap, run_plan, baseline, now,
+                baseline_source=baseline_source,
+                trust_identity=trust_identity,
+            )
+        )
     except Exception as exc:
         logger.warning("report: header section failed: %s", exc)
         sections.append(f"# QuantMap Campaign Report — {campaign_id}\n")
@@ -1550,7 +2455,13 @@ def generate_campaign_report(
     # Methodology
     try:
         sections.extend(
-            _section_methodology(run_plan, baseline, n_tested_configs=len(stats))
+            _section_methodology(
+                run_plan,
+                baseline,
+                n_tested_configs=len(stats),
+                scores_result=scores_result,
+                methodology=trust_identity.methodology,
+            )
         )
     except Exception as exc:
         logger.warning("report: methodology section failed: %s", exc)
@@ -1587,6 +2498,16 @@ def generate_campaign_report(
         logger.warning("report: environment section failed: %s", exc)
         sections.extend(_section_failure_stub("## Environment Quality", exc))
         section_failures.append(("environment", str(exc)))
+
+    # Background Process Activity — top-level section, sourced from background_snapshots
+    # Computed here (not cached) so the report always reflects the current DB state.
+    try:
+        bg_data = _compute_background_interference(campaign_id, db_path)
+        sections.extend(_section_background_interference(bg_data, results_dir, campaign_id))
+    except Exception as exc:
+        logger.warning("report: background interference section failed: %s", exc)
+        sections.extend(_section_failure_stub("## Background Process Activity", exc))
+        section_failures.append(("background_interference", str(exc)))
 
     sections.append("\n---\n")
 
@@ -1628,6 +2549,26 @@ def generate_campaign_report(
         sections.extend(_section_failure_stub("## Appendix C — Production Commands", exc))
         section_failures.append(("appendix_c", str(exc)))
 
+    try:
+        sections.extend(
+            _appendix_historical_configs(scores_result, config_variable_map, variable_name)
+        )
+    except Exception as exc:
+        logger.warning("report: appendix D failed: %s", exc)
+        sections.extend(_section_failure_stub("## Appendix D — Historical & Abandoned Configs", exc))
+        section_failures.append(("appendix_d", str(exc)))
+
+    # Supporting Evidence — always present; must appear before Concerns so
+    # readers can follow artifact links even when other sections have failures.
+    try:
+        sections.extend(
+            _section_supporting_artifacts(campaign_id, results_dir, db_path, run_contexts)
+        )
+    except Exception as exc:
+        logger.warning("report: supporting artifacts section failed: %s", exc)
+        sections.extend(_section_failure_stub("## Supporting Evidence", exc))
+        section_failures.append(("supporting_artifacts", str(exc)))
+
     # Concerns & Warnings — always last; built after all other sections so it
     # has full visibility of every failure that occurred during rendering.
     sections.append("\n---\n")
@@ -1657,4 +2598,42 @@ def generate_campaign_report(
     md = "\n".join(sections)
     report_path.write_text(md, encoding="utf-8")
     logger.info("Campaign report (v2) written: %s", report_path)
+
+    # Record report_v2.md generation in the artifacts table.
+    # Consistent with generate_report() — any query against artifacts can now
+    # show all report files alongside their generation timestamps.
+    _now_utc = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_connection(db_path) as _art_conn:
+            # Canonicalize: Delete previous report_v2_md artifacts for this campaign
+            # to prevent DB bloat and ensure Single Source of Truth.
+            _art_conn.execute(
+                "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+                (campaign_id, "report_v2_md")
+            )
+            _report_sha = _file_sha256(report_path)
+            _report_status = "partial" if section_failures else ("complete" if _report_sha else "failed")
+            _report_error = "; ".join(f"{k}: {v}" for k, v in section_failures) or None
+            if _report_sha is None:
+                _report_error = _report_error or "artifact file missing or unreadable after report generation"
+            _art_conn.execute(
+                "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    campaign_id,
+                    "report_v2_md",
+                    str(report_path),
+                    _report_sha,
+                    _now_utc,
+                    _report_status,
+                    "src.report_campaign.generate_campaign_report",
+                    _report_error,
+                    _now_utc,
+                    "producer_hash" if _report_sha else "producer_missing",
+                ),
+            )
+            _art_conn.commit()
+    except Exception as _art_exc:
+        logger.warning("Could not record report_v2.md in artifacts table (non-fatal): %s", _art_exc)
+
     return report_path

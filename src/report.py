@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,19 @@ import pandas as pd
 
 from src.db import get_connection
 from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
-from src.score import score_campaign
 from src.run_plan import RunPlan
+from src.settings_env import optional_env_path, read_env_path
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
 
 
 def _fmt_tel(val: float | int | None, fmt: str) -> str:
@@ -117,7 +129,7 @@ logger = logging.getLogger(__name__)
 # LAB_ROOT is kept here as a module-level fallback so that tools calling
 # generate_report() without a lab_root kwarg (e.g. rescore.py) continue to
 # work unchanged. The canonical path is injected by runner.py via lab_root=.
-LAB_ROOT = Path(os.getenv("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap"))
+LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap")
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +451,16 @@ def generate_report(
     Returns the path to the generated Markdown report.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
+    from src.trust_identity import load_baseline_for_historical_use  # noqa: PLC0415
+    baseline, baseline_source = load_baseline_for_historical_use(
+        campaign_id,
+        db_path,
+        fallback_baseline=baseline,
+        allow_current_input=False,
+    )
     if scores_result is None:
+        from src.score import score_campaign  # noqa: PLC0415
+
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
         stats = scores_result["stats"]
@@ -475,10 +496,53 @@ def generate_report(
     # Generate Markdown
     md = _build_markdown(
         campaign_id, db_path, baseline, scores_result, stats,
-        campaign=campaign, run_plan=run_plan,
+        campaign=campaign, run_plan=run_plan, lab_root=effective_lab_root,
+        baseline_source=baseline_source,
     )
     md_path.write_text(md, encoding="utf-8")
     logger.info("Report written: %s", md_path)
+
+    # Record report generation in the artifacts table.
+    # This provides a DB-level audit trail: when report.md and scores.csv were
+    # last regenerated and from what DB path.  Stale-report detection is then
+    # possible by comparing artifacts.created_at against the scores table
+    # updated_at (when implemented).  Non-fatal — a broken artifacts INSERT
+    # must never suppress a valid report write.
+    _now_utc = datetime.now(timezone.utc).isoformat()
+    try:
+        with get_connection(db_path) as _art_conn:
+            for _art_type, _art_path in (
+                ("report_md",  str(md_path)),
+                ("scores_csv", str(csv_path)),
+            ):
+                _sha = _file_sha256(Path(_art_path))
+                _status = "complete" if _sha else "failed"
+                _error = None if _sha else "artifact file missing or unreadable after report generation"
+                # Canonicalize: Delete previous row of same type for this campaign
+                # to prevent artifacts table bloat.
+                _art_conn.execute(
+                    "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+                    (campaign_id, _art_type)
+                )
+                _art_conn.execute(
+                    "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        campaign_id,
+                        _art_type,
+                        _art_path,
+                        _sha,
+                        _now_utc,
+                        _status,
+                        "src.report.generate_report",
+                        _error,
+                        _now_utc,
+                        "producer_hash" if _sha else "producer_missing",
+                    ),
+                )
+            _art_conn.commit()
+    except Exception as _art_exc:
+        logger.warning("Could not record artifacts in DB (non-fatal): %s", _art_exc)
 
     return md_path
 
@@ -491,8 +555,11 @@ def _build_markdown(
     stats: dict[str, dict[str, Any]],
     campaign: dict | None = None,
     run_plan: RunPlan | None = None,
+    lab_root: Path | None = None,
+    baseline_source: str | None = None,
 ) -> str:
     """Build the full Markdown report as a string."""
+    effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
     sections: list[str] = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -501,12 +568,11 @@ def _build_markdown(
         campaign_row = conn.execute(
             "SELECT * FROM campaigns WHERE id=?", (campaign_id,)
         ).fetchone()
-        snap_row = conn.execute(
-            "SELECT * FROM campaign_start_snapshot WHERE campaign_id=?", (campaign_id,)
-        ).fetchone()
 
-    snap = dict(snap_row) if snap_row else {}
     camp = dict(campaign_row) if campaign_row else {}
+    from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+    trust_identity = load_run_identity(campaign_id, db_path)
+    snap = trust_identity.start_snapshot
 
     # -------------------------------------------------------------------------
     # Title and metadata
@@ -536,6 +602,9 @@ def _build_markdown(
     sections.append(f"| Variable | `{camp.get('variable', 'unknown')}` |")
     sections.append(f"| Type | {camp.get('campaign_type', 'unknown')} |")
     sections.append(f"| Status | {camp.get('status', 'unknown')} |")
+    if camp.get("analysis_status") or camp.get("report_status"):
+        sections.append(f"| Analysis status | {camp.get('analysis_status', 'unknown')} |")
+        sections.append(f"| Report status | {camp.get('report_status', 'unknown')} |")
     sections.append(f"| Started | {camp.get('started_at', 'unknown')} |")
     sections.append(f"| Completed | {camp.get('completed_at', 'unknown')} |")
     sections.append(f"| Machine | {machine.get('name', 'unknown')} |")
@@ -544,10 +613,30 @@ def _build_markdown(
     sections.append(f"| RAM | {machine.get('ram', 'unknown')} |")
     sections.append(f"| OS | {snap.get('os_platform', machine.get('os', 'unknown'))} |")
     sections.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', 'unknown')} |")
+    try:
+        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+
+        sections.extend(execution_environment_summary_lines(snap))
+    except Exception:
+        sections.append("| Execution support tier | `unknown` |")
+    try:
+        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+
+        sections.extend(provider_evidence_summary_lines(snap))
+    except Exception:
+        sections.append("| Telemetry provider evidence | `unknown` |")
     sections.append(f"| Build Commit | `{snap.get('build_commit', runtime.get('build_commit', 'unknown'))}` |")
+    qid = trust_identity.quantmap
+    qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
+    qcommit = qid.get("git_commit") or "unknown"
+    sections.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
+    if baseline_source:
+        sections.append(f"| Baseline identity source | `{baseline_source}` |")
     sections.append(f"| Power Plan | {snap.get('power_plan', 'unknown')} |")
-    sections.append(f"| Baseline SHA256 | `{camp.get('baseline_sha256', 'unknown')[:16]}...` |")
-    sections.append(f"| Campaign SHA256 | `{camp.get('campaign_sha256', 'unknown')[:16]}...` |")
+    baseline_sha = (camp.get('baseline_sha256') or 'unknown')
+    campaign_sha = (camp.get('campaign_sha256') or 'unknown')
+    sections.append(f"| Baseline SHA256 | `{baseline_sha[:16]}...` |")
+    sections.append(f"| Campaign SHA256 | `{campaign_sha[:16]}...` |")
     sections.append("")
 
     sections.append("### BIOS Profile at Campaign Start\n")
@@ -764,24 +853,40 @@ def _build_markdown(
     sections.append("")
 
     # View 3: Highest raw TG
+    unrankable = scores_result.get("unrankable", {})
     sections.append("### View 3 — Highest Raw TG\n")
-    if highest_tg and highest_tg in passing:
-        h_stats = passing[highest_tg]
-        sections.append(f"**Highest TG Config: `{highest_tg}`**\n")
+    if highest_tg:
+        # highest_tg can now be one of the rankable configs (in stats) or an unrankable config
+        # stats includes all configs returned by analyze_campaign.
+        h_stats = stats.get(highest_tg)
+        is_unrank = (highest_tg in unrankable)
+        unrank_note = " ⚠ **Unrankable (Evidence Only)**" if is_unrank else ""
+
+        sections.append(f"**Highest TG Config: `{highest_tg}`**{unrank_note}\n")
         if _is_custom:
             _best_label = "best tested config"
         elif _is_quick or _is_standard:
             _best_label = "top config"
         else:
             _best_label = "score winner"
+            
         if highest_tg == winner:
             sections.append(f"*Same as {_best_label}.*")
         else:
-            sections.append(
-                f"_Differs from {_best_label}. Useful if generation speed is the only priority "
-                "and TTFT is not a concern._"
-            )
-            sections.append(_config_stats_table(highest_tg, h_stats, scores_df, ref))
+            if is_unrank:
+                 sections.append(
+                    "_This configuration is the absolute performance leader for throughput, "
+                    "but is excluded from the primary ranking because one or more secondary "
+                    "metrics (e.g. latency or efficiency) could not be recorded._"
+                )
+            else:
+                sections.append(
+                    f"_Differs from {_best_label}. Useful if generation speed is the only priority "
+                    "and TTFT is not a concern._"
+                )
+            
+            if h_stats:
+                sections.append(_config_stats_table(highest_tg, h_stats, scores_df, ref))
     else:
         if _is_custom:
             sections.append("*Same as best tested config or no passing configs.*")
@@ -834,7 +939,10 @@ def _build_markdown(
             f"{'✓ PASS' if config_id in passing else 'FAIL'} |"
         )
 
-    for config_id, missing in sorted(scores_result.get("unrankable", {}).items()):
+    unrankable = scores_result.get("unrankable", {})
+    if unrankable:
+        sections.append("| | **Unrankable Configs** | | | | | | | | | |")
+    for config_id, missing in sorted(unrankable.items()):
         s = stats.get(config_id, {})
         cv_val = s.get('warm_tg_cv')
         cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
@@ -859,7 +967,10 @@ def _build_markdown(
             f"❌ unrankable: missing {missing_str} |"
         )
 
-    for config_id, reason in sorted(scores_result.get("eliminated", {}).items()):
+    eliminated = scores_result.get("eliminated", {})
+    if eliminated:
+        sections.append("| | **Eliminated Configs** | | | | | | | | | |")
+    for config_id, reason in sorted(eliminated.items()):
         s = stats.get(config_id, {})
         cv_val = s.get('warm_tg_cv')
         cv_disp = f"{cv_val:.3f}" if (cv_val is not None and s.get("valid_warm_request_count", 0) >= 3) else "N/A"
@@ -1059,6 +1170,10 @@ def _build_markdown(
         model_label = model_cfg.get("name", "unknown model")
         build_commit = snap.get("build_commit") or runtime.get("build_commit") or "unknown"
 
+        tg_str    = f"{tg:.2f} t/s"   if tg     is not None else "N/A"
+        tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
+        ttft_str  = f"{ttft:.0f}ms"    if ttft   is not None else "N/A"
+
         if _is_custom:
             # Custom mode: honest scope-limited language.
             # Never claims "validated optimal" — only "best among tested".
@@ -1066,9 +1181,6 @@ def _build_markdown(
             _tested_n = len(_rp.selected_values)
             _total_n  = len(_rp.all_campaign_values)
             _untested  = _rp.untested_values
-            tg_str    = f"{tg:.2f} t/s"   if tg     is not None else "N/A"
-            tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
-            ttft_str  = f"{ttft:.0f}ms"    if ttft   is not None else "N/A"
             sections.append(
                 f'> **Custom Run — Scope Notice:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
@@ -1189,13 +1301,19 @@ def _build_markdown(
                 (winner, campaign_id),
             ).fetchone()
 
-        server_bin = os.getenv("QUANTMAP_SERVER_BIN")
-        if server_bin is None:
-            server_bin = "<QUANTMAP_SERVER_BIN not set — copy .env.example to .env>"
-        model_path = os.getenv("QUANTMAP_MODEL_PATH")
-        if model_path is None:
-            model_path = "<QUANTMAP_MODEL_PATH not set — copy .env.example to .env>"
-        build_commit = snap.get("build_commit", runtime.get("build_commit", "afa6bfe4f"))
+        server_bin_env = read_env_path("QUANTMAP_SERVER_BIN")
+        server_bin = (
+            str(server_bin_env.path)
+            if server_bin_env.path is not None
+            else f"<{server_bin_env.message} — copy .env.example to .env>"
+        )
+        model_path_env = read_env_path("QUANTMAP_MODEL_PATH")
+        model_path = (
+            str(model_path_env.path)
+            if model_path_env.path is not None
+            else f"<{model_path_env.message} — copy .env.example to .env>"
+        )
+        build_commit = snap.get("build_commit") or runtime.get("build_commit") or "unknown"
 
         if _is_custom:
             _cmd_label = "QuantMap — Custom Run — Best Tested Config"
@@ -1353,6 +1471,22 @@ def _build_markdown(
     # Methodology note
     # -------------------------------------------------------------------------
     sections.append("## Methodology\n")
+    methodology = trust_identity.methodology
+    methodology_label = methodology_source_label(methodology)
+    sections.append(f"- **Methodology evidence:** `{methodology_label}`")
+    if methodology.get("profile_name") or methodology.get("profile_version"):
+        sections.append(
+            f"- **Experiment profile:** `{methodology.get('profile_name') or 'unknown'}` "
+            f"v{methodology.get('profile_version') or 'unknown'}"
+        )
+    if methodology.get("id") is not None:
+        sections.append(f"- **Methodology snapshot ID:** `{methodology.get('id')}`")
+    if methodology_label == "legacy_partial_methodology":
+        sections.append(
+            "- **Legacy note:** partial methodology evidence is displayed for "
+            "context only and is not complete historical scoring authority."
+        )
+    sections.append("")
     lab = baseline.get("lab", {})
     # RunPlan has the authoritative resolved schedule when available;
     # fall back to campaign YAML → baseline for backwards-compat (rescore.py).
@@ -1450,6 +1584,61 @@ def _build_markdown(
             is_quick=_is_quick,
         )
         sections.extend(ngl_lines)
+
+    # ─── Supporting Evidence ─────────────────────────────────────────────────
+    # Compact artifact index — full version in report_v2.md.
+    # Every report must link to its evidence.  Missing artifacts are stated
+    # explicitly; they are never silently omitted.
+    report_dir = effective_lab_root / "results" / campaign_id
+    _tel_jsonl = report_dir / "telemetry.jsonl"
+    _raw_jsonl  = report_dir / "raw.jsonl"
+
+    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    _artifact_rows = {
+        row.get("artifact_type"): row
+        for row in load_artifact_summaries(campaign_id, db_path)
+    }
+
+    def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
+        row = _artifact_rows.get(artifact_type)
+        if row:
+            status = row.get("status") or "unknown"
+            sha = row.get("sha256")
+            verification = row.get("verification_source") or "unknown"
+            err = row.get("error_message")
+            parts = [status, f"verification={verification}"]
+            if sha:
+                parts.append(f"sha256={sha[:12]}")
+            if err:
+                parts.append(f"error={str(err)[:80]}")
+            return "; ".join(parts)
+        return "legacy_file_present" if p.exists() else "missing"
+
+    sections.append("\n---\n")
+    sections.append("## Supporting Evidence\n")
+    sections.append(
+        "_All underlying data is available for independent verification. "
+        "See `report_v2.md` for the full artifact index and SQL inspection queries._\n"
+    )
+    sections.append("| Artifact | Path | Status |")
+    sections.append("|----------|------|:------:|")
+    sections.append(
+        f"| Hardware trace (2 s samples) | `{_tel_jsonl}` | {_artifact_status('telemetry_jsonl', _tel_jsonl)} |"
+    )
+    sections.append(
+        f"| Request results | `{_raw_jsonl}` | {_artifact_status('raw_jsonl', _raw_jsonl)} |"
+    )
+    sections.append(
+        f"| Full database | `{db_path}` | {'legacy_file_present' if db_path.exists() else 'missing'} |"
+    )
+    sections.append(
+        f"| Evidence-first report | `{report_dir / 'report_v2.md'}` | "
+        f"{_artifact_status('report_v2_md', report_dir / 'report_v2.md')} |"
+    )
+    sections.append(
+        "\n_Background process data and per-cycle environment quality are in `report_v2.md` "
+        "and queryable from `background_snapshots` and `telemetry` tables in `lab.sqlite`._\n"
+    )
 
     return "\n".join(sections)
 

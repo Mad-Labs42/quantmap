@@ -1,8 +1,10 @@
 # Lab runtime outputs — NEVER commit
 results/
 logs/
+*.log
 db/
 state/
+*.qmap
 
 # Derived files
 *.csv
@@ -10,6 +12,8 @@ state/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+trace.txt
+traceback.txt
 
 # Reports (machine-specific paths — gitignored except README)
 *.md
@@ -47,6 +51,8 @@ $RECYCLE.BIN/
 
 # Local assistant / planning artifacts
 .claude/
+.remember/
+scratch/
 phase2_prep_snapshots/
 
 # Local docs / notes not meant for repo

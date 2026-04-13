@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +204,32 @@ class RunPlan:
     requests_per_cycle_override: int | None = None
 
     # ── Derived convenience properties ────────────────────────────────────────
+
+    def to_snapshot_dict(self) -> dict[str, Any]:
+        """Return a JSON-safe representation of the effective run intent."""
+        return {
+            "parent_campaign_id": self.parent_campaign_id,
+            "effective_campaign_id": self.effective_campaign_id,
+            "run_mode": self.run_mode,
+            "variable": self.variable,
+            "all_campaign_values": self.all_campaign_values,
+            "selected_values": self.selected_values,
+            "selected_config_ids": [
+                cfg.get("config_id") for cfg in self.selected_configs
+            ],
+            "cycles_per_config": self.cycles_per_config,
+            "requests_per_cycle": self.requests_per_cycle,
+            "baseline_path": str(self.baseline_path),
+            "effective_lab_root": str(self.effective_lab_root),
+            "db_path": str(self.db_path),
+            "state_file": str(self.state_file),
+            "results_dir": str(self.results_dir),
+            "filter_overrides": self.filter_overrides,
+            "mode_flag": self.mode_flag,
+            "values_override": self.values_override,
+            "cycles_override": self.cycles_override,
+            "requests_per_cycle_override": self.requests_per_cycle_override,
+        }
 
     @property
     def is_custom(self) -> bool:

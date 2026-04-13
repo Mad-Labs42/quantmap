@@ -18,12 +18,17 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
+
+from src import ui
+
+console = ui.get_console()
 
 from src.config import CONFIGS_DIR, LAB_ROOT  # noqa: E402
 
@@ -39,16 +44,40 @@ logging.basicConfig(
 logger = logging.getLogger("rescore")
 
 
-def rescore(campaign_id: str, baseline: dict) -> bool:
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def rescore(
+    campaign_id: str,
+    baseline: dict,
+    force_new_anchors: bool = False,
+    current_input: bool = False,
+) -> bool:
     """Re-run analysis + scoring + report for one campaign. Returns True on success."""
     from src.analyze import analyze_campaign
     from src.score import score_campaign, ELIMINATION_FILTERS
     from src.report import generate_report
+    from src.report_campaign import generate_campaign_report
     from src.db import init_db, get_connection
+    from src.trust_identity import (
+        MethodologySnapshotError,
+        load_baseline_for_historical_use,
+        load_methodology_for_historical_scoring,
+        load_run_identity,
+    )
+    from src.governance import CurrentMethodologyLoadError
 
     logger.info("=" * 60)
     logger.info("Re-scoring campaign: %s", campaign_id)
-    logger.info("Active thresholds: %s", ELIMINATION_FILTERS)
+    if force_new_anchors:
+        if not current_input:
+            logger.error(
+                "--force-new-anchors requires --current-input. Snapshot-locked "
+                "rescore cannot re-anchor to current files."
+            )
+            return False
+        logger.warning("METHODOLOGY MIGRATION: Re-anchoring to current Registry/Baseline references")
 
     if not DB_PATH.exists():
         logger.error("Database not found: %s", DB_PATH)
@@ -58,6 +87,33 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     # against a DB created by an older QuantMap version that predates schema
     # versioning; init_db() handles the forward migration safely.
     init_db(DB_PATH)
+    baseline, baseline_source = load_baseline_for_historical_use(
+        campaign_id,
+        DB_PATH,
+        fallback_baseline=baseline,
+        allow_current_input=current_input,
+    )
+    if baseline_source != "snapshot" and not current_input:
+        logger.error(
+            "No snapshot baseline is available for %s. Refusing snapshot-locked "
+            "rescore. Re-run with --current-input to use the currently loaded "
+            "baseline explicitly.",
+            campaign_id,
+        )
+        return False
+    if baseline_source == "current_input_explicit":
+        logger.warning(
+            "CURRENT-INPUT RESCORE: using the currently loaded baseline/profile "
+            "rather than a complete historical snapshot for %s.",
+            campaign_id,
+        )
+    if not current_input:
+        try:
+            load_methodology_for_historical_scoring(campaign_id, DB_PATH)
+        except MethodologySnapshotError as exc:
+            logger.error("%s", exc)
+            return False
+    trust_identity = load_run_identity(campaign_id, DB_PATH)
     
     # Load campaign-level run_mode from DB to reconstruct mode overrides
     conn = get_connection(DB_PATH)
@@ -69,9 +125,14 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     run_mode = camp_row["run_mode"] if camp_row else "full"
 
     mode_filter_overrides = {}
-    if run_mode in ("custom", "quick"):
+    if run_mode == "custom":
+        # custom: single user-suppliced values, absolute floor of 1 warm sample.
         mode_filter_overrides = {"min_valid_warm_count": 1}
-    elif run_mode == "standard":
+    elif run_mode in ("quick", "standard"):
+        # quick and standard both run full value coverage; quick uses 1 cycle
+        # per config (runner.py line 1525-1528 → 3-sample floor for statistical
+        # functions).  Must match runner.py exactly so rescore produces the same
+        # winner as the original run.
         mode_filter_overrides = {"min_valid_warm_count": 3}
 
     filter_overrides = dict(mode_filter_overrides)
@@ -80,19 +141,19 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
     # This ensures rescore produces the same result as a live run would:
     # if the campaign YAML overrides a filter threshold, that override is
     # respected here too rather than falling back to global defaults. (L6 fix)
+    campaign_data = None
+    raw_campaign_yaml = trust_identity.start_snapshot.get("campaign_yaml_content")
+    if raw_campaign_yaml and not current_input:
+        try:
+            campaign_data = yaml.safe_load(raw_campaign_yaml) or {}
+        except Exception as exc:
+            logger.warning("Could not parse campaign snapshot YAML: %s", exc)
+
     campaign_yaml_path = CONFIGS_DIR / "campaigns" / f"{campaign_id}.yaml"
-    if campaign_yaml_path.exists():
+    if campaign_data is None and campaign_yaml_path.exists():
         try:
             with open(campaign_yaml_path, encoding="utf-8") as f:
                 campaign_data = yaml.safe_load(f)
-            yaml_filter_overrides = campaign_data.get("elimination_overrides") or {}
-            
-            if yaml_filter_overrides or filter_overrides:
-                filter_overrides = {**filter_overrides, **yaml_filter_overrides}
-                logger.info(
-                    "Effective filter overrides for %s mode: %s",
-                    run_mode, filter_overrides,
-                )
         except Exception as exc:
             logger.warning(
                 "Could not load campaign YAML for filter overrides (%s): %s — using global defaults",
@@ -103,23 +164,117 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
             "Campaign YAML not found at %s — using global filter defaults", campaign_yaml_path
         )
 
+    yaml_filter_overrides = (campaign_data or {}).get("elimination_overrides") or {}
+    if yaml_filter_overrides or filter_overrides:
+        filter_overrides = {**filter_overrides, **yaml_filter_overrides}
+        logger.info(
+            "Effective filter overrides for %s mode: %s",
+            run_mode, filter_overrides,
+        )
+
     try:
+        with get_connection(DB_PATH) as conn:
+            now = _utc_now()
+            conn.execute(
+                """
+                UPDATE campaigns
+                SET analysis_status='running',
+                    analysis_started_at=?,
+                    analysis_failure_reason=NULL,
+                    report_status='pending',
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (now, campaign_id),
+            )
+            conn.commit()
+
         # Avoid double-analysis — score_campaign runs analyze internally
-        scores = score_campaign(campaign_id, DB_PATH, baseline, filter_overrides=filter_overrides or None)
-        stats = scores.get("stats", {})
+        result = score_campaign(
+            campaign_id, 
+            DB_PATH, 
+            baseline=baseline, 
+            filter_overrides=filter_overrides,
+            force_new_anchors=force_new_anchors,
+            current_input=current_input,
+            current_input_reason="current_input_rescore" if current_input else "snapshot_locked",
+        )
+        # The score_campaign return dict changed in Phase 3.3/4
+        # stats, passing, unrankable, eliminated, scores_df
+        stats      = result["stats"]
+        passing    = result["passing"]
+        unrankable = result["unrankable"]
+        eliminated = result["eliminated"]
+        scores_df  = result["scores_df"]
+        winner     = result["winner"]
         
         if not stats:
             logger.error("No stats returned — campaign may not be in database: %s", campaign_id)
             return False
 
-        report_path = generate_report(campaign_id, DB_PATH, baseline, scores, stats)
+        with get_connection(DB_PATH) as conn:
+            now = _utc_now()
+            conn.execute(
+                """
+                UPDATE campaigns
+                SET analysis_status='complete',
+                    analysis_completed_at=?,
+                    report_status='running',
+                    report_started_at=?,
+                    report_failure_reason=NULL,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (now, now, campaign_id),
+            )
+            conn.commit()
 
+        report_path = generate_report(campaign_id, DB_PATH, baseline, result, stats)
         logger.info("Report written: %s", report_path)
 
+        # Regenerate the evidence-first report (report_v2.md) so it always
+        # reflects the current DB state.  Without this, report_v2.md retains
+        # conclusions (winner, eliminated, Pareto) from the prior scoring pass
+        # while report.md and the scores table are already updated — the two
+        # files would then contradict each other with no warning.
+        v2_ok = True
+        try:
+            v2_path = generate_campaign_report(
+                campaign_id, DB_PATH, baseline,
+                scores_result=result, stats=stats,
+            )
+            logger.info("Evidence-first report (v2) written: %s", v2_path)
+        except Exception as _v2_exc:
+            v2_ok = False
+            logger.warning(
+                "Evidence-first report (report_v2.md) regeneration failed (non-fatal): %s",
+                _v2_exc,
+            )
+
+        with get_connection(DB_PATH) as conn:
+            from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415
+
+            report_status = (
+                summarize_report_artifact_status(campaign_id, DB_PATH)
+                if v2_ok
+                else "partial"
+            )
+            conn.execute(
+                """
+                UPDATE campaigns
+                SET report_status=?,
+                    report_completed_at=?,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (report_status, _utc_now(), campaign_id),
+            )
+            conn.commit()
+
         # Print summary to console
-        winner = scores.get("winner")
-        passing = scores.get("passing", {})
-        eliminated = scores.get("eliminated", {})
+        winner = result.get("winner")
+        passing = result.get("passing", {})
+        eliminated = result.get("eliminated", {})
         logger.info(
             "Result: %d passing, %d eliminated. Winner: %s",
             len(passing), len(eliminated), winner or "none",
@@ -138,7 +293,47 @@ def rescore(campaign_id: str, baseline: dict) -> bool:
         return True
 
     except Exception as exc:
-        logger.error("Rescore failed for %s: %s", campaign_id, exc, exc_info=True)
+        expected_trust_block = isinstance(
+            exc, (MethodologySnapshotError, CurrentMethodologyLoadError)
+        )
+        if expected_trust_block:
+            logger.error("Rescore blocked for %s: %s", campaign_id, exc)
+        else:
+            logger.error("Rescore failed for %s: %s", campaign_id, exc, exc_info=True)
+        with get_connection(DB_PATH) as conn:
+            conn.execute(
+                """
+                UPDATE campaigns
+                SET analysis_status=CASE
+                        WHEN analysis_status='complete' THEN analysis_status
+                        ELSE 'failed'
+                    END,
+                    analysis_failed_at=CASE
+                        WHEN analysis_status='complete' THEN analysis_failed_at
+                        ELSE ?
+                    END,
+                    analysis_failure_reason=CASE
+                        WHEN analysis_status='complete' THEN analysis_failure_reason
+                        ELSE ?
+                    END,
+                    report_status=CASE
+                        WHEN analysis_status='complete' THEN 'failed'
+                        ELSE 'skipped'
+                    END,
+                    report_failed_at=CASE
+                        WHEN analysis_status='complete' THEN ?
+                        ELSE report_failed_at
+                    END,
+                    report_failure_reason=CASE
+                        WHEN analysis_status='complete' THEN ?
+                        ELSE report_failure_reason
+                    END,
+                    status_model_version=1
+                WHERE id=?
+                """,
+                (_utc_now(), str(exc), _utc_now(), str(exc), campaign_id),
+            )
+            conn.commit()
         return False
 
 
@@ -180,6 +375,16 @@ def main() -> None:
         action="store_true",
         help="Re-score all campaigns with completed data in the database",
     )
+    parser.add_argument(
+        "--force-new-anchors",
+        action="store_true",
+        help="Force re-anchoring to current Registry/Baseline references (Methodology Migration)",
+    )
+    parser.add_argument(
+        "--current-input",
+        action="store_true",
+        help="Explicitly use current baseline/campaign/profile inputs when a complete snapshot is unavailable",
+    )
     args = parser.parse_args()
 
     if not args.all and not args.campaigns:
@@ -206,19 +411,24 @@ def main() -> None:
     results = {}
     for idx, cid in enumerate(campaign_ids, start=1):
         # U5: show per-campaign progress so --all on 10+ campaigns is legible
-        print(f"[{idx}/{total}] Re-scoring: {cid}")
+        console.print(f"[{idx}/{total}] Re-scoring: {cid}")
         logger.info("Re-scoring %d/%d: %s", idx, total, cid)
-        results[cid] = rescore(cid, baseline)
+        results[cid] = rescore(
+            cid,
+            baseline,
+            force_new_anchors=args.force_new_anchors,
+            current_input=args.current_input,
+        )
 
     # Summary
     passed = [c for c, ok in results.items() if ok]
     failed = [c for c, ok in results.items() if not ok]
 
-    print()
-    print("=" * 60)
-    print(f"Re-score complete: {len(passed)} succeeded, {len(failed)} failed")
+    console.print()
+    console.print(f"{ui.SYM_DIVIDER}" * 60)
+    console.print(f"Re-score complete: {len(passed)} succeeded, {len(failed)} failed")
     if failed:
-        print(f"Failed: {failed}")
+        console.print(f"Failed: {failed}")
         sys.exit(1)
 
 

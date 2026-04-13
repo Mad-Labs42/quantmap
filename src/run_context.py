@@ -31,7 +31,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from characterization import (
+from src.characterization import (
     assess_environment_quality,
     characterize_environment,
     get_characterization_capabilities,
