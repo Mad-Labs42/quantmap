@@ -1,5 +1,4 @@
-"""
-QuantMap — analyze.py
+"""QuantMap — analyze.py
 
 Statistical analysis of campaign results from lab.sqlite.
 Computes per-config statistics from valid warm request data.
@@ -28,8 +27,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from src.db import get_connection
 
@@ -41,8 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _winsorize(data: np.ndarray, fraction: float = 0.10) -> np.ndarray:
-    """
-    True Winsorization (Section 7.5 of Design Memo).
+    """True Winsorization (Section 7.5 of Design Memo).
     Clips values at the [fraction, 1-fraction] percentiles.
     """
     if data.size == 0:
@@ -57,8 +55,7 @@ def _winsorize(data: np.ndarray, fraction: float = 0.10) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any]]:
-    """
-    Compute per-config statistics for all configs in a campaign.
+    """Compute per-config statistics for all configs in a campaign.
 
     Returns a dict mapping config_id -> stats_dict.
     Each stats_dict contains all metrics described in the module docstring.
@@ -167,7 +164,7 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
         failure_detail = cfg_row["failure_detail"]
 
         cfg_df = df[df["config_id"] == config_id]
-        
+
         # If the config failed to even generate requests (e.g. OOM, bad config),
         # return a dummy struct so it isn't completely erased from the report.
         if len(cfg_df) == 0 and status in ("oom", "skipped_oom", "failed"):
@@ -232,7 +229,7 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
             q1 = np.percentile(warm_tg, 25)
             q3 = np.percentile(warm_tg, 75)
             iqr = q3 - q1
-            
+
             # Significance floor to prevent IQR collapse (HIGH-4)
             # If the distribution is extremely tight, even minor noise is seen as outliers.
             iqr_floor = 0.05 * np.abs(np.percentile(warm_tg, 50))
@@ -349,8 +346,7 @@ def analyze_campaign(campaign_id: str, db_path: Path) -> dict[str, dict[str, Any
 
 
 def get_telemetry_summary(campaign_id: str, config_id: str, db_path: Path) -> dict[str, Any]:
-    """
-    Return telemetry summary for a specific config.
+    """Return telemetry summary for a specific config.
     Used in report.py to explain outliers via thermal/background correlation.
     """
     with get_connection(db_path) as conn:
@@ -386,8 +382,7 @@ def get_telemetry_summary(campaign_id: str, config_id: str, db_path: Path) -> di
 def get_background_interference_summary(
     campaign_id: str, config_id: str, db_path: Path
 ) -> dict[str, Any]:
-    """
-    Summarize background interference events for a config.
+    """Summarize background interference events for a config.
     Returns counts of snapshots with defender/update/antivirus activity.
     """
     with get_connection(db_path) as conn:
@@ -418,9 +413,8 @@ def get_background_interference_summary(
 def get_vram_per_config(
     campaign_id: str,
     db_path: Path,
-) -> "dict[str, dict[str, float | None]]":
-    """
-    Return peak and average GPU VRAM usage per config, plus total GPU VRAM.
+) -> dict[str, dict[str, float | None]]:
+    """Return peak and average GPU VRAM usage per config, plus total GPU VRAM.
 
     Queries telemetry.gpu_vram_used_mb grouped by config_id.
     Also reads gpu_vram_total_mb from campaign_start_snapshot.

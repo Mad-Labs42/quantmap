@@ -1,5 +1,4 @@
-"""
-Snapshot-first identity helpers for Phase 1 trust surfaces.
+"""Snapshot-first identity helpers for Phase 1 trust surfaces.
 
 This module is intentionally small: it loads persisted historical identity and
 labels legacy fallbacks. It does not own scoring, reporting, or export policy.
@@ -147,8 +146,8 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
     baseline_identity = _json_loads(snap.get("baseline_identity_json"), {})
     quantmap_identity = _json_loads(snap.get("quantmap_identity_json"), {})
     run_plan = _json_loads(snap.get("run_plan_json"), {})
-    from src.telemetry_provider import provider_evidence_from_snapshot  # noqa: PLC0415
-    from src.execution_environment import execution_environment_from_snapshot  # noqa: PLC0415
+    from src.execution_environment import execution_environment_from_snapshot
+    from src.telemetry_provider import provider_evidence_from_snapshot
 
     telemetry_provider = provider_evidence_from_snapshot(snap)
     execution_environment = execution_environment_from_snapshot(snap)
@@ -210,7 +209,7 @@ def methodology_source_label(methodology: dict[str, Any]) -> str:
 
 
 def _registry_from_yaml_content(raw_yaml: str):
-    from src import governance  # noqa: PLC0415
+    from src import governance
 
     raw = yaml.safe_load(raw_yaml) or {}
     if not isinstance(raw, dict) or "metrics" not in raw:
@@ -222,7 +221,7 @@ def _registry_from_yaml_content(raw_yaml: str):
 
 
 def _profile_from_yaml_content(raw_yaml: str):
-    from src import governance  # noqa: PLC0415
+    from src import governance
 
     raw = yaml.safe_load(raw_yaml) or {}
     if not isinstance(raw, dict):
@@ -238,14 +237,13 @@ def load_methodology_for_historical_scoring(
     profile_name: str | None = None,
     force_new_anchors: bool = False,
 ) -> tuple[Any, Any, dict[str, float], dict[str, dict[str, Any]], int | None, str]:
-    """
-    Return methodology material for scoring.
+    """Return methodology material for scoring.
 
     Historical mode requires a complete methodology snapshot. Current-input mode
     explicitly uses live governance files and returns a label that callers must
     preserve in outputs.
     """
-    from src import governance  # noqa: PLC0415
+    from src import governance
 
     if allow_current_input:
         profile, registry = governance.load_current_methodology(profile_name)
@@ -361,8 +359,7 @@ def load_baseline_for_historical_use(
     *,
     allow_current_input: bool = False,
 ) -> tuple[dict[str, Any], str]:
-    """
-    Return baseline content for historical interpretation.
+    """Return baseline content for historical interpretation.
 
     Snapshot content wins. A current fallback is only returned when explicitly
     allowed by the caller, and the source label makes that weaker truth visible.

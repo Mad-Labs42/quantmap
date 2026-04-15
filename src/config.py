@@ -1,5 +1,4 @@
-"""
-QuantMap — config.py
+"""QuantMap — config.py
 
 Shared infrastructure constants for QuantMap.
 

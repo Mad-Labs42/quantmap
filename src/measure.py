@@ -1,5 +1,4 @@
-"""
-QuantMap — measure.py
+"""QuantMap — measure.py
 Streaming request harness with TTFT measurement, token accounting,
 and request-level outcome classification.
 
@@ -34,7 +33,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -50,8 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class RequestOutcome(str, Enum):
-    """
-    Every request produces exactly one outcome. Values match the locked
+    """Every request produces exactly one outcome. Values match the locked
     strings in MDD Section 9.2 and raw.jsonl schema.
     """
 
@@ -71,8 +69,7 @@ class RequestOutcome(str, Enum):
 
 @dataclass
 class RequestResult:
-    """
-    Complete per-request measurement record.
+    """Complete per-request measurement record.
 
     All fields map 1:1 to raw.jsonl columns (MDD Section 9.2).
     None values indicate the measurement was not reachable due to an earlier
@@ -157,8 +154,7 @@ class RequestResult:
 
 
 def load_request_payload(request_file: Path) -> dict[str, Any]:
-    """
-    Load and validate a request payload from a JSON file.
+    """Load and validate a request payload from a JSON file.
 
     Validates that required fields are present and that stream=true is set.
     TTFT measurement requires streaming — non-streaming requests are rejected.
@@ -195,8 +191,7 @@ def load_request_payload(request_file: Path) -> dict[str, Any]:
 
 
 def _parse_sse_line(line: str) -> dict | None:
-    """
-    Parse a single SSE text line into a dict.
+    """Parse a single SSE text line into a dict.
 
     Accepts a fully-decoded, already-stripped text line (as produced by
     httpx's aiter_lines()).  Callers must not pass raw bytes or unstripped
@@ -228,8 +223,7 @@ def _parse_sse_line(line: str) -> dict | None:
 
 
 def _first_content_chunk(chunk: dict) -> bool:
-    """
-    Return True if this SSE chunk contains actual token content.
+    """Return True if this SSE chunk contains actual token content.
 
     Per the locked TTFT definition: we are looking for a non-empty
     delta.content or delta.reasoning_content field. Role-only chunks,
@@ -270,8 +264,7 @@ async def measure_request(
     request_index: int,
     timeout_s: float = 300.0,
 ) -> RequestResult:
-    """
-    Send a single streaming request and return a fully populated RequestResult.
+    """Send a single streaming request and return a fully populated RequestResult.
 
     TTFT is measured as wall-clock milliseconds from first-byte-sent to the
     first SSE chunk containing actual token content (see _first_content_chunk).
@@ -294,7 +287,7 @@ async def measure_request(
         RequestResult with all fields populated.
     """
     is_cold = request_index == 1
-    timestamp_start = datetime.now(timezone.utc).isoformat()
+    timestamp_start = datetime.now(UTC).isoformat()
 
     # Sentinel values — replaced on success or partial success
     outcome = RequestOutcome.TIMEOUT
@@ -578,7 +571,7 @@ async def measure_request(
             exc,
         )
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         outcome = RequestOutcome.MALFORMED_STREAM
         error_detail = f"Unexpected error: {exc}"
         total_wall_ms = (time.perf_counter() - wall_start) * 1000
@@ -619,8 +612,7 @@ def _build_result(
     request_index: int,
     request_type: str,
 ) -> RequestResult:
-    """
-    Construct a RequestResult from the local namespace of measure_request.
+    """Construct a RequestResult from the local namespace of measure_request.
     Uses .get() with None defaults so partial measurements are preserved.
     """
     return RequestResult(
@@ -685,8 +677,7 @@ def measure_request_sync(
     request_index: int,
     timeout_s: float = 300.0,
 ) -> RequestResult:
-    """
-    Synchronous wrapper around measure_request for use in runner.py.
+    """Synchronous wrapper around measure_request for use in runner.py.
 
     runner.py is a synchronous orchestrator and does not maintain an async
     event loop. This wrapper creates a fresh event loop per call.

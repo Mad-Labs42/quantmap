@@ -1,5 +1,4 @@
-"""
-QuantMap settings/environment path helpers.
+"""QuantMap settings/environment path helpers.
 
 This module is intentionally narrow and stdlib-only. It normalizes environment
 path semantics so required runtime paths never silently become Path('.').
@@ -7,8 +6,8 @@ path semantics so required runtime paths never silently become Path('.').
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 

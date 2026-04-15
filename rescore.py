@@ -1,5 +1,4 @@
-"""
-QuantMap — rescore.py
+"""QuantMap — rescore.py
 
 Re-runs the analysis + scoring + report pipeline for a completed campaign
 using data already in lab.sqlite. Does NOT re-run any experiments.
@@ -18,8 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 
 import yaml
 from dotenv import load_dotenv  # type: ignore[import]
@@ -45,7 +43,7 @@ logger = logging.getLogger("rescore")
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def rescore(
@@ -55,18 +53,17 @@ def rescore(
     current_input: bool = False,
 ) -> bool:
     """Re-run analysis + scoring + report for one campaign. Returns True on success."""
-    from src.analyze import analyze_campaign
-    from src.score import score_campaign, ELIMINATION_FILTERS
+    from src.db import get_connection, init_db
+    from src.governance import CurrentMethodologyLoadError
     from src.report import generate_report
     from src.report_campaign import generate_campaign_report
-    from src.db import init_db, get_connection
+    from src.score import score_campaign
     from src.trust_identity import (
         MethodologySnapshotError,
         load_baseline_for_historical_use,
         load_methodology_for_historical_scoring,
         load_run_identity,
     )
-    from src.governance import CurrentMethodologyLoadError
 
     logger.info("=" * 60)
     logger.info("Re-scoring campaign: %s", campaign_id)
@@ -114,14 +111,14 @@ def rescore(
             logger.error("%s", exc)
             return False
     trust_identity = load_run_identity(campaign_id, DB_PATH)
-    
+
     # Load campaign-level run_mode from DB to reconstruct mode overrides
     conn = get_connection(DB_PATH)
     try:
         camp_row = conn.execute("SELECT run_mode FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
     finally:
         conn.close()
-        
+
     run_mode = camp_row["run_mode"] if camp_row else "full"
 
     mode_filter_overrides = {}
@@ -191,9 +188,9 @@ def rescore(
 
         # Avoid double-analysis — score_campaign runs analyze internally
         result = score_campaign(
-            campaign_id, 
-            DB_PATH, 
-            baseline=baseline, 
+            campaign_id,
+            DB_PATH,
+            baseline=baseline,
             filter_overrides=filter_overrides,
             force_new_anchors=force_new_anchors,
             current_input=current_input,
@@ -207,7 +204,7 @@ def rescore(
         eliminated = result["eliminated"]
         scores_df  = result["scores_df"]
         winner     = result["winner"]
-        
+
         if not stats:
             logger.error("No stats returned — campaign may not be in database: %s", campaign_id)
             return False
@@ -252,7 +249,7 @@ def rescore(
             )
 
         with get_connection(DB_PATH) as conn:
-            from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415
+            from src.trust_identity import summarize_report_artifact_status
 
             report_status = (
                 summarize_report_artifact_status(campaign_id, DB_PATH)
@@ -338,8 +335,7 @@ def rescore(
 
 
 def get_completed_campaigns() -> list[str]:
-    """
-    Return campaign IDs that have at least one complete config in the DB.
+    """Return campaign IDs that have at least one complete config in the DB.
 
     NOTE (LOW-12 — pre-release): This returns campaigns where ANY config has
     status='complete', which includes partially-run campaigns (e.g. 3 of 5

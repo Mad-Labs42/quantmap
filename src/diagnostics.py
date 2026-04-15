@@ -1,5 +1,4 @@
-"""
-QuantMap — diagnostics.py
+"""QuantMap — diagnostics.py
 
 Core diagnostic infrastructure.
 Defines shared readiness models, status enums, and check result structures
@@ -8,9 +7,9 @@ used by 'init', 'doctor', and 'self-test'.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum, auto
-from dataclasses import dataclass, field
-from typing import List, Optional
+
 
 class Status(Enum):
     PASS = auto()
@@ -43,7 +42,7 @@ class CheckResult:
             Status.SKIP: "[dim]-[/dim]",
             Status.INFO: "[cyan]i[/cyan]"
         }.get(self.status, " ")
-        
+
         color = {
             Status.PASS: "green",
             Status.WARN: "yellow",
@@ -51,15 +50,15 @@ class CheckResult:
             Status.SKIP: "dim",
             Status.INFO: "cyan"
         }.get(self.status, "white")
-        
+
         return f"  {sym} [{color}]{self.label}[/{color}]: {self.message}"
 
 class DiagnosticReport:
     """A collection of CheckResults that collapses into a final Readiness state."""
-    
+
     def __init__(self, title: str):
         self.title = title
-        self.results: List[CheckResult] = []
+        self.results: list[CheckResult] = []
 
     def add(self, result: CheckResult):
         self.results.append(result)
@@ -77,9 +76,9 @@ class DiagnosticReport:
         """Standardized CLI summary rendering."""
         from src import ui
         console = ui.get_console()
-        
+
         ui.print_banner(self.title)
-        
+
         # Print results grouped by status (optional, but let's do linear for now)
         for r in self.results:
             console.print(r.to_rich_line())
@@ -90,7 +89,7 @@ class DiagnosticReport:
                     console.print(f"    [blue]Recommendation: {r.recommendation}[/blue]")
 
         console.print("\n" + ui.SYM_DIVIDER * 60)
-        
+
         final = self.readiness
         if final == Readiness.READY:
             console.print(f"[bold green]{ui.SYM_OK} ENVIRONMENT READY[/bold green]")

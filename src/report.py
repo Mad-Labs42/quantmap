@@ -1,5 +1,4 @@
-"""
-QuantMap — report.py
+"""QuantMap — report.py
 
 Generates the campaign report in Markdown + CSV formats.
 
@@ -23,21 +22,20 @@ The report is gitignored (*.md rule). It is regenerable from lab.sqlite.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
-import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.analyze import get_background_interference_summary, get_telemetry_summary
+from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 from src.db import get_connection
-from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
-from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -52,8 +50,7 @@ def _file_sha256(path: Path) -> str | None:
 
 
 def _fmt_tel(val: float | int | None, fmt: str) -> str:
-    """
-    Format a telemetry value; return 'N/A' when the value is None.
+    """Format a telemetry value; return 'N/A' when the value is None.
 
     Using `or 0` to fill missing telemetry silently misrepresents the data —
     a user seeing '0.0' thinks the GPU was idle, not that the metric was
@@ -66,8 +63,7 @@ def _fmt_tel(val: float | int | None, fmt: str) -> str:
 
 
 def _fmt_ambient(value: str | None) -> str:
-    """
-    Format an ambient env-var value for display in the report's batch block.
+    """Format an ambient env-var value for display in the report's batch block.
 
     Preserves the three-way distinction that matters for GPU device selection:
       null (not set)  → "<not set — all GPUs visible>"
@@ -82,8 +78,7 @@ def _fmt_ambient(value: str | None) -> str:
 
 
 def _config_to_server_args_for_report(config: dict) -> list[str]:
-    """
-    Reconstruct llama-server args from a stored config_values_json dict.
+    """Reconstruct llama-server args from a stored config_values_json dict.
     Mirrors runner._config_to_server_args but lives here to avoid circular import.
     """
     args: list[str] = []
@@ -142,8 +137,7 @@ def _kv_bytes_per_token(
     baseline: dict,
     n_gpu_layers: int,
 ) -> float | None:
-    """
-    Estimate KV cache bytes consumed per token for a given n_gpu_layers.
+    """Estimate KV cache bytes consumed per token for a given n_gpu_layers.
 
     Formula:
         bytes_per_token = n_kv_layers_on_gpu * 2 * n_kv_heads * head_dim * bytes_per_element
@@ -186,13 +180,12 @@ def _ngl_sweep_section(
     is_standard: bool = False,
     is_quick: bool = False,
 ) -> list[str]:
-    """
-    Build the 'GPU Layer Sweep — Throughput vs. VRAM' section for NGL campaigns.
+    """Build the 'GPU Layer Sweep — Throughput vs. VRAM' section for NGL campaigns.
 
     Returns a list of Markdown lines to be joined with newlines.
     Called from _build_markdown() when campaign.variable == 'n_gpu_layers'.
     """
-    from src.analyze import get_vram_per_config  # noqa: PLC0415
+    from src.analyze import get_vram_per_config
 
     sections: list[str] = []
     sections.append("## GPU Layer Sweep — Throughput vs. VRAM\n")
@@ -438,8 +431,7 @@ def generate_report(
     lab_root: Path | None = None,
     run_plan: RunPlan | None = None,
 ) -> Path:
-    """
-    Generate Markdown + CSV reports for a completed campaign.
+    """Generate Markdown + CSV reports for a completed campaign.
 
     If scores_result and stats are provided (from score_campaign()), they are
     used directly. Otherwise, analysis is re-run from the database.
@@ -453,7 +445,7 @@ def generate_report(
     Returns the path to the generated Markdown report.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
-    from src.trust_identity import load_baseline_for_historical_use  # noqa: PLC0415
+    from src.trust_identity import load_baseline_for_historical_use
     baseline, baseline_source = load_baseline_for_historical_use(
         campaign_id,
         db_path,
@@ -461,7 +453,7 @@ def generate_report(
         allow_current_input=False,
     )
     if scores_result is None:
-        from src.score import score_campaign  # noqa: PLC0415
+        from src.score import score_campaign
 
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
@@ -519,7 +511,7 @@ def generate_report(
     # possible by comparing artifacts.created_at against the scores table
     # updated_at (when implemented).  Non-fatal — a broken artifacts INSERT
     # must never suppress a valid report write.
-    _now_utc = datetime.now(timezone.utc).isoformat()
+    _now_utc = datetime.now(UTC).isoformat()
     try:
         with get_connection(db_path) as _art_conn:
             for _art_type, _art_path in (
@@ -572,7 +564,7 @@ def _build_markdown(
     """Build the full Markdown report as a string."""
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
     sections: list[str] = []
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     # Load campaign metadata from DB
     with get_connection(db_path) as conn:
@@ -581,7 +573,7 @@ def _build_markdown(
         ).fetchone()
 
     camp = dict(campaign_row) if campaign_row else {}
-    from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+    from src.trust_identity import load_run_identity, methodology_source_label
     trust_identity = load_run_identity(campaign_id, db_path)
     snap = trust_identity.start_snapshot
 
@@ -608,7 +600,7 @@ def _build_markdown(
     sections.append(f"| Campaign ID | `{campaign_id}` |")
     _db_run_mode = camp.get("run_mode") or (run_plan.run_mode if run_plan else None)
     if _db_run_mode:
-        from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
+        from src.run_plan import MODE_LABELS as _ML
         sections.append(f"| Run mode | {_ML.get(_db_run_mode, _db_run_mode.title())} |")
     sections.append(f"| Variable | `{camp.get('variable', 'unknown')}` |")
     sections.append(f"| Type | {camp.get('campaign_type', 'unknown')} |")
@@ -625,13 +617,13 @@ def _build_markdown(
     sections.append(f"| OS | {snap.get('os_platform', machine.get('os', 'unknown'))} |")
     sections.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', 'unknown')} |")
     try:
-        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+        from src.execution_environment import execution_environment_summary_lines
 
         sections.extend(execution_environment_summary_lines(snap))
     except Exception:
         sections.append("| Execution support tier | `unknown` |")
     try:
-        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+        from src.telemetry_provider import provider_evidence_summary_lines
 
         sections.extend(provider_evidence_summary_lines(snap))
     except Exception:
@@ -880,7 +872,7 @@ def _build_markdown(
             _best_label = "top config"
         else:
             _best_label = "score winner"
-            
+
         if highest_tg == winner:
             sections.append(f"*Same as {_best_label}.*")
         else:
@@ -895,7 +887,7 @@ def _build_markdown(
                     f"_Differs from {_best_label}. Useful if generation speed is the only priority "
                     "and TTFT is not a concern._"
                 )
-            
+
             if h_stats:
                 sections.append(_config_stats_table(highest_tg, h_stats, scores_df, ref))
     else:
@@ -1203,7 +1195,7 @@ def _build_markdown(
                 f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
                 f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
                 f'and **{outliers_disp}** outlier(s) on '
-                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+                f'{datetime.now(UTC).strftime("%Y-%m-%d")}."'
             )
             if _untested:
                 sections.append(
@@ -1230,7 +1222,7 @@ def _build_markdown(
                 f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
                 f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
                 f'and **{outliers_disp}** outlier(s) on '
-                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+                f'{datetime.now(UTC).strftime("%Y-%m-%d")}."'
             )
             sections.append(
                 f'>\n> ⚡ **Broad but shallow:** Quick mode uses {_q_c} {_q_cw} per config '
@@ -1256,7 +1248,7 @@ def _build_markdown(
                 f'(**{tg_p10_str}** P10) and **{ttft_str}** warm TTFT median '
                 f'across **{n_warm}** warm request(s) with **{thermal_disp}** thermal events '
                 f'and **{outliers_disp}** outlier(s) on '
-                f'{datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+                f'{datetime.now(UTC).strftime("%Y-%m-%d")}."'
             )
             sections.append(
                 f'>\n> ℹ️ **Development-grade:** Standard mode uses {_rp.cycles_per_config} cycles per config '
@@ -1275,7 +1267,7 @@ def _build_markdown(
                 f'delivering **{tg_str}** warm TG median (**{tg_p10_str}** P10) '
                 f'and **{ttft_str}** warm TTFT median, validated across '
                 f'**{n_warm}** warm requests with **{thermal_disp}** thermal events and '
-                f'**{outliers_disp}** outliers on {datetime.now(timezone.utc).strftime("%Y-%m-%d")}."'
+                f'**{outliers_disp}** outliers on {datetime.now(UTC).strftime("%Y-%m-%d")}."'
             )
         sections.append(divergence_note)
         sections.append("")
@@ -1284,7 +1276,7 @@ def _build_markdown(
         # Production command
         # -----------------------------------------------------------------------
         sections.append("## Production Command\n")
-        from src.config import DEFAULT_HOST, PRODUCTION_PORT  # noqa: PLC0415
+        from src.config import DEFAULT_HOST, PRODUCTION_PORT
         if _is_custom:
             sections.append(
                 f"Command for `{winner}` — best tested config in this Custom run. "
@@ -1335,7 +1327,7 @@ def _build_markdown(
         sections.append("```batch")
         sections.append(f"rem {_cmd_label}")
         sections.append(f"rem Campaign: {campaign_id} | Config: {winner}")
-        sections.append(f"rem Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} | Warm requests: {n_warm}")
+        sections.append(f"rem Generated: {datetime.now(UTC).strftime('%Y-%m-%d')} | Warm requests: {n_warm}")
         sections.append(f"rem Warm TG P10: {tg_p10:.2f} t/s | CV: {cv:.3f} | Thermal events: {thermal}")
         sections.append(f"rem Machine: {machine.get('name','DEEP THOUGHT')} ({machine.get('cpu','i9-12900K')} + {machine.get('gpu','RTX 3090')} + {machine.get('ram','128GB DDR4-3200')})")
         if _is_custom and run_plan is not None:
@@ -1613,13 +1605,13 @@ def _build_markdown(
     _tel_jsonl = measurements_dir / "telemetry.jsonl"
     _raw_jsonl  = measurements_dir / "raw.jsonl"
 
-    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    from src.trust_identity import load_artifact_summaries
     _artifact_rows = {
         row.get("artifact_type"): row
         for row in load_artifact_summaries(campaign_id, db_path)
     }
 
-    def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
+    def _artifact_status(artifact_type: str, p: Path) -> str:
         row = _artifact_rows.get(artifact_type)
         if row:
             status = row.get("status") or "unknown"

@@ -12,7 +12,6 @@ import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-
 STATUS_AVAILABLE = "available"
 STATUS_MISSING = "missing"
 STATUS_DEGRADED = "degraded"

@@ -30,15 +30,15 @@ def enforce_current_run_readiness() -> dict[str, Any]:
     compatibility, but runner calls this policy seam rather than provider
     internals. Future provider policy changes should land here.
     """
-    from src import telemetry  # noqa: PLC0415
+    from src import telemetry
 
     return telemetry.startup_check()
 
 
 def probe_provider_readiness() -> dict[str, Any]:
     """Return non-throwing provider readiness for doctor/status surfaces."""
-    from src.telemetry_hwinfo import probe_hwinfo_provider  # noqa: PLC0415
-    from src.telemetry_nvml import probe_nvml_provider  # noqa: PLC0415
+    from src.telemetry_hwinfo import probe_hwinfo_provider
+    from src.telemetry_nvml import probe_nvml_provider
 
     providers = [probe_hwinfo_provider(), probe_nvml_provider()]
     provider_dicts = [asdict(provider) for provider in providers]

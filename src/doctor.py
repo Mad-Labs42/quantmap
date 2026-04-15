@@ -1,5 +1,4 @@
-"""
-QuantMap — doctor.py
+"""QuantMap — doctor.py
 
 Environment wellness checks and pre-benchmarking diagnostics.
 Uses the shared 'diagnostics' readiness model.
@@ -11,12 +10,9 @@ import json
 import logging
 import subprocess
 import sys
-import os
 from pathlib import Path
-from typing import List
 
-from src import ui
-from src.diagnostics import Status, CheckResult, DiagnosticReport, Readiness
+from src.diagnostics import CheckResult, DiagnosticReport, Readiness, Status
 
 logger = logging.getLogger("doctor")
 
@@ -42,7 +38,7 @@ def check_lab_structure(
     required_dirs = ["results", "logs", "db", "state"]
     missing = []
     created = []
-    
+
     for d in required_dirs:
         p = lab_root / d
         if not p.is_dir():
@@ -54,13 +50,13 @@ def check_lab_structure(
                     missing.append(f"{d} (fix failed: {e})")
             else:
                 missing.append(d)
-                
+
     if not missing:
         msg = "All lab directories present"
         if created:
             msg += f" (created: {', '.join(created)})"
         return CheckResult("Lab Structure", Status.PASS, msg)
-    
+
     return CheckResult(
         "Lab Structure",
         Status.FAIL,
@@ -73,12 +69,12 @@ def check_lab_structure(
 def check_registry_load() -> CheckResult:
     """Verify metrics registry can be loaded."""
     try:
-        from src.governance import get_builtin_registry  # noqa: PLC0415
+        from src.governance import get_builtin_registry
 
         registry = get_builtin_registry()
         return CheckResult(
-            "Metric Registry", 
-            Status.PASS, 
+            "Metric Registry",
+            Status.PASS,
             f"Loaded {len(registry)} metrics"
         )
     except Exception as e:
@@ -94,7 +90,7 @@ def check_registry_load() -> CheckResult:
 def check_default_profile_load() -> CheckResult:
     """Verify the default current methodology profile can be loaded."""
     try:
-        from src.governance import get_default_profile  # noqa: PLC0415
+        from src.governance import get_default_profile
 
         profile = get_default_profile()
         return CheckResult(
@@ -136,7 +132,7 @@ def check_server_binary(server_bin: Path | None, detail: str | None = None) -> C
         )
 
     try:
-        from src.backend_execution_policy import assess_backend_execution  # noqa: PLC0415
+        from src.backend_execution_policy import assess_backend_execution
 
         assessment = assess_backend_execution(server_bin)
         if not assessment.allowed:
@@ -175,7 +171,7 @@ def check_backend_execution_policy(server_bin: Path | None) -> CheckResult:
         )
 
     try:
-        from src.backend_execution_policy import assess_backend_execution  # noqa: PLC0415
+        from src.backend_execution_policy import assess_backend_execution
 
         assessment = assess_backend_execution(server_bin)
     except Exception as exc:
@@ -229,7 +225,7 @@ def check_model_path(model_path: Path | None, detail: str | None = None) -> Chec
 # Section 3: System Risks (Defender, Search, etc.)
 # ---------------------------------------------------------------------------
 
-def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, lab_root: Path | None) -> List[CheckResult]:
+def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, lab_root: Path | None) -> list[CheckResult]:
     """Warn if Windows Defender may be scanning benchmark paths."""
     results = []
     if sys.platform != "win32":
@@ -252,7 +248,7 @@ def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, 
             return [CheckResult("Defender", Status.SKIP, "Could not query Defender (PowerShell error)")]
 
         data = json.loads(res.stdout.strip()) if res.stdout.strip() else {}
-        
+
         # 1. Real-time protection
         if not data.get("DisableRealtimeMonitoring", False):
             results.append(CheckResult(
@@ -266,7 +262,7 @@ def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, 
         # 2. Path exclusions
         excl_raw = data.get("ExclusionPath", [])
         exclusions = [str(e).rstrip("\\/ ").lower() for e in ([excl_raw] if isinstance(excl_raw, str) else list(excl_raw or []))]
-        
+
         paths = [
             ("Binary", server_bin.parent),
             ("Models", model_path.parent),
@@ -277,7 +273,7 @@ def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, 
             p_lower = str(p).rstrip("\\/ ").lower()
             if not any(p_lower.startswith(e) or e.startswith(p_lower) for e in exclusions):
                 missing.append(label)
-        
+
         if missing:
             results.append(CheckResult(
                 "Defender Exclusions",
@@ -291,7 +287,7 @@ def check_defender_exclusions(server_bin: Path | None, model_path: Path | None, 
 
     except Exception as e:
         results.append(CheckResult("Defender", Status.SKIP, f"Defender check failed: {e}"))
-        
+
     return results
 
 def check_windows_search() -> CheckResult:
@@ -323,7 +319,7 @@ def check_windows_search() -> CheckResult:
 def check_hwinfo_shared_memory() -> CheckResult:
     """Check HWiNFO Shared Memory availability."""
     try:
-        from src.telemetry_hwinfo import probe_hwinfo_provider  # noqa: PLC0415
+        from src.telemetry_hwinfo import probe_hwinfo_provider
 
         provider = probe_hwinfo_provider()
     except Exception as exc:
@@ -347,7 +343,7 @@ def check_hwinfo_shared_memory() -> CheckResult:
 def check_telemetry_provider_readiness() -> CheckResult:
     """Check provider-neutral telemetry readiness for current measurement."""
     try:
-        from src.telemetry_policy import probe_provider_readiness  # noqa: PLC0415
+        from src.telemetry_policy import probe_provider_readiness
 
         readiness = probe_provider_readiness()
     except Exception as exc:
@@ -423,7 +419,7 @@ def run_doctor(
 ) -> bool:
     """Execute the full diagnostic suite and return success."""
     if env_details is None:
-        from src.settings_env import read_env_path  # noqa: PLC0415
+        from src.settings_env import read_env_path
 
         env_details = {
             name: read_env_path(name)
@@ -434,7 +430,7 @@ def run_doctor(
         model_path = model_path if model_path is not None else env_details["QUANTMAP_MODEL_PATH"].path
 
     report = DiagnosticReport("QuantMap Doctor — Environment Diagnostics")
-    
+
     # 1. Struct/Configs
     report.add(
         check_lab_structure(
@@ -445,26 +441,26 @@ def run_doctor(
     )
     report.add(check_registry_load())
     report.add(check_default_profile_load())
-    
+
     # 2. Runtime
     report.add(check_server_binary(server_bin, detail=env_details["QUANTMAP_SERVER_BIN"].message))
     report.add(check_backend_execution_policy(server_bin))
     report.add(check_model_path(model_path, detail=env_details["QUANTMAP_MODEL_PATH"].message))
-    
+
     # 3. System
     for r in check_defender_exclusions(server_bin, model_path, lab_root):
         report.add(r)
     report.add(check_windows_search())
-    
+
     # 4. Telemetry
     report.add(check_telemetry_provider_readiness())
-    
+
     # 5. UI
     report.add(check_ui_health())
-    
+
     # Print results
     report.print_summary()
-    
+
     return report.readiness != Readiness.BLOCKED # Strictly, any FAIL makes it not successful
 
 if __name__ == "__main__":

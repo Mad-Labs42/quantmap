@@ -1,5 +1,4 @@
-"""
-QuantMap — server.py
+"""QuantMap — server.py
 Server lifecycle manager for llama-server (Build B, MKL runtime).
 
 Forked from: alexziskind1/llama-throughput-lab/tests/llama_server_test_utils.py
@@ -40,7 +39,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any
 
@@ -48,10 +47,10 @@ from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
 
+from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
+from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: E402
 from src.config import DEFAULT_HOST, LAB_ROOT, PRODUCTION_PORT  # noqa: E402
 from src.settings_env import require_env_path  # noqa: E402
-from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: E402
-from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -141,8 +140,7 @@ _OOM_LOW_CONFIDENCE: tuple[str, ...] = ("GGML_ASSERT",)
 
 
 class ServerOOMError(RuntimeError):
-    """
-    Raised by start_server() when the server startup fails due to GPU OOM.
+    """Raised by start_server() when the server startup fails due to GPU OOM.
 
     Distinguishes OOM crashes from other startup failures (bad binary path,
     model format error, port conflict).  Is a RuntimeError subclass so existing
@@ -164,8 +162,7 @@ class ServerOOMError(RuntimeError):
 
 
 def _classify_startup_failure(log_path: Path) -> tuple[bool, str]:
-    """
-    Scan the server log for known CUDA OOM strings.
+    """Scan the server log for known CUDA OOM strings.
 
     Returns (is_oom, snippet).
     - is_oom: True if a high-confidence OOM string was found.
@@ -180,7 +177,7 @@ def _classify_startup_failure(log_path: Path) -> tuple[bool, str]:
 
     try:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return False, ""
 
     # Find the first high-confidence OOM line.
@@ -219,8 +216,7 @@ def _classify_startup_failure(log_path: Path) -> tuple[bool, str]:
 
 
 def _load_mkl_env() -> dict[str, str]:
-    """
-    Build the environment dict required to run Build B.
+    """Build the environment dict required to run Build B.
 
     Build B links against Intel oneAPI MKL. The DLLs are not on the default
     Windows PATH, so they must be injected before the subprocess is launched.
@@ -278,8 +274,7 @@ def _load_mkl_env() -> dict[str, str]:
 
 
 def get_runtime_env_summary() -> dict[str, object]:
-    """
-    Return the environment snapshot relevant to inference reproducibility.
+    """Return the environment snapshot relevant to inference reproducibility.
 
     Two categories are captured:
 
@@ -356,8 +351,7 @@ def get_runtime_env_summary() -> dict[str, object]:
 
 
 def get_production_command(extra_args: list[str]) -> str:
-    """
-    Build the canonical copy-paste production command string for a config.
+    """Build the canonical copy-paste production command string for a config.
 
     Uses the fixed PRODUCTION_PORT (not the dynamic lab port) so the stored
     resolved_command is immediately runnable without editing.
@@ -393,8 +387,7 @@ def _log_path(
     attempt: int,
     logs_dir: Path | None = None,
 ) -> Path:
-    """
-    Return the log file path for a given campaign / config / cycle / attempt.
+    """Return the log file path for a given campaign / config / cycle / attempt.
 
     Both warmup attempts for the same cycle share the same config/cycle stem
     and are differentiated by _attempt1 / _attempt2. This keeps downstream
@@ -424,7 +417,7 @@ def _log_path(
         campaign_id,
         create=True,
     )
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     return log_dir / f"server_{config_id}_cycle{cycle:02d}_attempt{attempt}_{ts}.log"
 
 
@@ -434,8 +427,7 @@ def _log_path(
 
 
 def _pick_port() -> int:
-    """
-    Ask the OS for a free port by binding to port 0.
+    """Ask the OS for a free port by binding to port 0.
 
     Best-effort: there is a narrow race window between the OS returning the
     port number and the subprocess binding to it. Acceptable for lab isolation;
@@ -460,8 +452,7 @@ def _wait_for_server(
     timeout_s: int,
     process: subprocess.Popen | None = None,
 ) -> None:
-    """
-    Poll until any readiness endpoint responds or timeout expires.
+    """Poll until any readiness endpoint responds or timeout expires.
 
     Checks /health first, then /v1/models. Returns as soon as either responds
     with a qualifying status code. This confirms the HTTP layer is active but
@@ -495,7 +486,7 @@ def _wait_for_server(
                 if exc.code in {200, 404}:
                     return
                 last_error = exc
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 last_error = exc
         time.sleep(0.5)
 
@@ -511,8 +502,7 @@ def _wait_for_completion_ready(
     timeout_s: int,
     process: subprocess.Popen | None = None,
 ) -> None:
-    """
-    Send a minimal completion request to confirm the model is fully loaded.
+    """Send a minimal completion request to confirm the model is fully loaded.
 
     /health returning 200 only means the HTTP layer is up. This function
     sends a real (minimal) completion request and waits for a successful
@@ -555,7 +545,7 @@ def _wait_for_completion_ready(
                 continue
             data = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"HTTP error {exc.code}: {data}") from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             last_error = exc
             time.sleep(0.5)
 
@@ -572,8 +562,7 @@ def _launch_server(
     env: dict[str, str],
     log_file: Path,
 ) -> tuple[subprocess.Popen, IO[str]]:
-    """
-    Launch llama-server as a subprocess, routing stdout/stderr to log_file.
+    """Launch llama-server as a subprocess, routing stdout/stderr to log_file.
 
     Returns (process, log_handle). The caller MUST close log_handle after
     the process exits. Opened with buffering=1 (line-buffered) so diagnostic
@@ -583,7 +572,7 @@ def _launch_server(
     """
     log_file.parent.mkdir(parents=True, exist_ok=True)
     # line-buffered so server diagnostics appear promptly in the log
-    log_handle: IO[str] = open(log_file, "w", encoding="utf-8", buffering=1)  # noqa: WPS515
+    log_handle: IO[str] = open(log_file, "w", encoding="utf-8", buffering=1)
 
     logger.debug("Server log: %s", log_file)
     logger.debug("Command argv: %s", cmd)
@@ -615,8 +604,7 @@ def start_server(
     ready_timeout_s: int = SERVER_READY_TIMEOUT_S,
     logs_dir: Path | None = None,
 ):
-    """
-    Context manager that starts llama-server and yields connection info.
+    """Context manager that starts llama-server and yields connection info.
 
     On entry:
       - Loads MKL environment and logs resolved paths
@@ -704,7 +692,7 @@ def start_server(
     attempt = 1
     no_warmup = False
     log_file = _log_path(campaign_id, config_id, cycle, attempt, logs_dir=logs_dir)
-    launch_ts = datetime.now(timezone.utc)
+    launch_ts = datetime.now(UTC)
     process, log_handle = _launch_server(base_cmd, env, log_file)
     active_cmd = base_cmd
 
@@ -758,7 +746,7 @@ def start_server(
                 )
 
                 log_file = _log_path(campaign_id, config_id, cycle, attempt, logs_dir=logs_dir)
-                launch_ts = datetime.now(timezone.utc)
+                launch_ts = datetime.now(UTC)
                 process, log_handle = _launch_server(no_warmup_cmd, env, log_file)
                 active_cmd = no_warmup_cmd
 
@@ -779,7 +767,7 @@ def start_server(
                 ) from exc
             raise
 
-        ready_ts = datetime.now(timezone.utc)
+        ready_ts = datetime.now(UTC)
         startup_duration = (ready_ts - launch_ts).total_seconds()
 
         logger.info(
@@ -816,7 +804,7 @@ def start_server(
         # before attempt 2 launched; this closes attempt 2's handle.
         try:
             log_handle.close()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         if process.poll() is None:
@@ -868,8 +856,7 @@ def extract_tokens_per_second(response: dict[str, Any]) -> float:
 
 
 def extract_timings(response: dict[str, Any]) -> dict[str, Any]:
-    """
-    Extract the full timings block from a llama.cpp completion response.
+    """Extract the full timings block from a llama.cpp completion response.
     Returns a flat dict with all available timing fields, or empty dict.
     Used by measure.py to capture prompt_n, prompt_ms, predicted_n,
     predicted_ms, predicted_per_second, and cache_n in one call.

@@ -1,5 +1,4 @@
-"""
-QuantMap — compare.py
+"""QuantMap — compare.py
 
 Forensic cross-campaign comparison engine.
 Produces a structured CompareResult (JSON-serializable) covering:
@@ -12,14 +11,11 @@ Produces a structured CompareResult (JSON-serializable) covering:
 
 from __future__ import annotations
 
-import json
 import logging
-from dataclasses import dataclass, asdict, field
-from datetime import datetime
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, TypedDict
 
-from src import ui
 from src import audit_methodology
 from src.db import get_connection
 
@@ -34,14 +30,14 @@ class CampaignMeta(TypedDict):
     name: str
     status: str
     created_at: str
-    run_mode: Optional[str]
+    run_mode: str | None
 
 class MethodologyResult(TypedDict):
     grade: str  # compatible | warnings | mismatch
     compatibility_score: float
     registry_version_match: bool
-    anchor_deltas: List[Dict[str, Any]]
-    warnings: List[str]
+    anchor_deltas: list[dict[str, Any]]
+    warnings: list[str]
 
 class EnvDelta(TypedDict):
     category: str
@@ -61,39 +57,39 @@ class ConfigDelta(TypedDict):
     cv_a: float
     cv_b: float
     significance_label: str  # inside noise band | likely meaningful | low confidence
-    flags: List[str]
+    flags: list[str]
 
 @dataclass
 class CompareResult:
     campaign_a: CampaignMeta
     campaign_b: CampaignMeta
-    
+
     # Methodology
     methodology: MethodologyResult
-    
+
     # Environment
-    env_deltas: List[EnvDelta]
-    
+    env_deltas: list[EnvDelta]
+
     # Winners
-    winner_a: Optional[Dict[str, Any]] = None
-    winner_b: Optional[Dict[str, Any]] = None
-    winner_shift_tg_pct: Optional[float] = None
-    
+    winner_a: dict[str, Any] | None = None
+    winner_b: dict[str, Any] | None = None
+    winner_shift_tg_pct: float | None = None
+
     # Intersection Set (Shared Configs)
-    shared_configs: List[ConfigDelta] = field(default_factory=list)
+    shared_configs: list[ConfigDelta] = field(default_factory=list)
     median_shared_tg_shift_pct: float = 0.0
-    
+
     # Elimination / Reach
-    lost_in_b: List[str] = field(default_factory=list)
-    gained_in_b: List[str] = field(default_factory=list)
-    elimination_counts_a: Dict[str, int] = field(default_factory=dict)
-    elimination_counts_b: Dict[str, int] = field(default_factory=dict)
-    
+    lost_in_b: list[str] = field(default_factory=list)
+    gained_in_b: list[str] = field(default_factory=list)
+    elimination_counts_a: dict[str, int] = field(default_factory=dict)
+    elimination_counts_b: dict[str, int] = field(default_factory=dict)
+
     # Interpretation
     primary_finding: str = ""
     overall_confidence: str = "medium"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 # ---------------------------------------------------------------------------
@@ -101,14 +97,13 @@ class CompareResult:
 # ---------------------------------------------------------------------------
 
 def calculate_significance(delta_pct: float, cv_a: float, cv_b: float) -> str:
-    """
-    Uncertainty-aware labeling logic.
+    """Uncertainty-aware labeling logic.
     Refined beyond simple delta > CV.
     """
     abs_delta = abs(delta_pct)
     # Heuristic: the 'noise floor' is roughly the combined CV
     noise_floor = (cv_a + cv_b) * 100.0 / 2.0  # approximate combined % noise floor
-    
+
     if abs_delta < noise_floor:
         return "inside noise band"
     if abs_delta > noise_floor * 3.0:
@@ -117,12 +112,12 @@ def calculate_significance(delta_pct: float, cv_a: float, cv_b: float) -> str:
 
 def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
     row = conn.execute(
-        "SELECT id, name, status, created_at, run_mode FROM campaigns WHERE id=?", 
+        "SELECT id, name, status, created_at, run_mode FROM campaigns WHERE id=?",
         (campaign_id,)
     ).fetchone()
     if not row:
         raise ValueError(f"Campaign {campaign_id} not found in database.")
-    
+
     d = dict(row)
     return {
         "id": d["id"],
@@ -132,22 +127,22 @@ def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
         "run_mode": d.get("run_mode")
     }
 
-def get_config_scores(conn: Any, campaign_id: str) -> Dict[str, Dict[str, Any]]:
+def get_config_scores(conn: Any, campaign_id: str) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
         "SELECT * FROM scores WHERE campaign_id=?", (campaign_id,)
     ).fetchall()
     # Explicitly convert each row to a dict for .get() support later
     return {r["config_id"]: dict(r) for r in rows}
 
-def get_eliminations(conn: Any, campaign_id: str) -> Dict[str, str]:
+def get_eliminations(conn: Any, campaign_id: str) -> dict[str, str]:
     rows = conn.execute(
         "SELECT id, elimination_reason FROM configs WHERE campaign_id=? AND status='eliminated'",
         (campaign_id,)
     ).fetchall()
     return {r["id"]: r["elimination_reason"] for r in rows}
 
-def get_start_snapshot(db_path: Path, campaign_id: str) -> Dict[str, Any]:
-    from src.trust_identity import load_run_identity  # noqa: PLC0415
+def get_start_snapshot(db_path: Path, campaign_id: str) -> dict[str, Any]:
+    from src.trust_identity import load_run_identity
 
     return load_run_identity(campaign_id, db_path).start_snapshot
 
@@ -155,7 +150,7 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
     """Wraps audit_methodology to produce a graded compatibility result."""
     m1 = audit_methodology.get_methodology(campaign_a_id, db_path)
     m2 = audit_methodology.get_methodology(campaign_b_id, db_path)
-    
+
     if not m1 or not m2:
         return {
             "grade": "mismatch",
@@ -164,7 +159,7 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
             "anchor_deltas": [],
             "warnings": ["Methodology snapshots missing."]
         }
-    
+
     v1 = m1.get("version", "unknown")
     v2 = m2.get("version", "unknown")
     registry_match = (v1 == v2)
@@ -175,15 +170,15 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
         quality_warnings.append(
             f"Methodology evidence is incomplete: {campaign_a_id}={q1}, {campaign_b_id}={q2}"
         )
-    
+
     refs1 = m1.get("references", {})
     refs2 = m2.get("references", {})
     all_metrics = sorted(set(refs1.keys()) | set(refs2.keys()))
-    
+
     anchor_deltas = []
     mismatches = 0
     drifts = []
-    
+
     for m in all_metrics:
         r1 = refs1.get(m, {})
         r2 = refs2.get(m, {})
@@ -194,7 +189,7 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
             status = "drift"
             mismatches += 1
             drifts.append(f"Anchor {m} drifted: {v1_val} -> {v2_val}")
-            
+
         anchor_deltas.append({
             "metric": m,
             "val_a": v1_val,
@@ -213,7 +208,7 @@ def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> 
     warnings = quality_warnings + drifts
     if not registry_match:
         warnings.insert(0, f"Registry version mismatch: {v1} vs {v2}")
-        
+
     return {
         "grade": grade,
         "compatibility_score": 1.0 - (mismatches / max(len(all_metrics), 1)),
@@ -227,19 +222,19 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     with get_connection(db_path) as conn:
         meta_a = get_campaign_meta(conn, id_a)
         meta_b = get_campaign_meta(conn, id_b)
-        
+
         scores_a = get_config_scores(conn, id_a)
         scores_b = get_config_scores(conn, id_b)
-        
+
         elim_a = get_eliminations(conn, id_a)
         elim_b = get_eliminations(conn, id_b)
-        
+
     snap_a = get_start_snapshot(db_path, id_a)
     snap_b = get_start_snapshot(db_path, id_b)
 
     # 1. Methodology
     meth = grade_methodology(id_a, id_b, db_path)
-    
+
     # 2. Environment Deltas
     env_deltas = []
     for key, label in [
@@ -260,7 +255,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
             })
 
     try:
-        from src.execution_environment import execution_environment_from_snapshot  # noqa: PLC0415
+        from src.execution_environment import execution_environment_from_snapshot
 
         env_a = execution_environment_from_snapshot(snap_a)
         env_b = execution_environment_from_snapshot(snap_b)
@@ -276,7 +271,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
         pass
 
     try:
-        from src.telemetry_provider import provider_evidence_label  # noqa: PLC0415
+        from src.telemetry_provider import provider_evidence_label
 
         provider_a = provider_evidence_label(snap_a)
         provider_b = provider_evidence_label(snap_b)
@@ -290,7 +285,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
             })
     except Exception:
         pass
-            
+
     # Thermal trend
     temp_a = snap_a.get("cpu_temp_at_start_c")
     temp_b = snap_b.get("cpu_temp_at_start_c")
@@ -307,23 +302,23 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     shared_ids = sorted(set(scores_a.keys()) & set(scores_b.keys()))
     config_deltas = []
     tg_shifts = []
-    
+
     for cid in shared_ids:
         s_a = scores_a[cid]
         s_b = scores_b[cid]
-        
+
         tg_a = s_a.get("warm_tg_median") or 0.0
         tg_b = s_b.get("warm_tg_median") or 0.0
         ttft_a = s_a.get("warm_ttft_median_ms") or 0.0
         ttft_b = s_b.get("warm_ttft_median_ms") or 0.0
         cv_a = s_a.get("warm_tg_cv") or 0.0
         cv_b = s_b.get("warm_tg_cv") or 0.0
-        
+
         tg_delta_pct = (tg_b - tg_a) / tg_a * 100.0 if tg_a > 0 else 0.0
         ttft_delta_pct = (ttft_b - ttft_a) / ttft_a * 100.0 if ttft_a > 0 else 0.0
-        
+
         tg_shifts.append(tg_delta_pct)
-        
+
         config_deltas.append({
             "config_id": cid,
             "tg_a": tg_a,
@@ -340,14 +335,14 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
 
     import statistics
     median_shift = statistics.median(tg_shifts) if tg_shifts else 0.0
-    
+
     # 4. Winners
     winner_a_id = next((cid for cid, s in scores_a.items() if s.get("is_score_winner")), None)
     winner_b_id = next((cid for cid, s in scores_b.items() if s.get("is_score_winner")), None)
-    
+
     w_a = scores_a.get(winner_a_id) if winner_a_id else None
     w_b = scores_b.get(winner_b_id) if winner_b_id else None
-    
+
     winner_shift_tg_pct = None
     if w_a and w_b:
         tg_wa = w_a.get("warm_tg_median") or 0.0
@@ -358,7 +353,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     # 5. Elimination Diff
     lost_in_b = sorted(set(elim_b.keys()) - set(elim_a.keys()))
     gained_in_b = sorted(set(elim_a.keys()) - set(elim_b.keys()))
-    
+
     def count_reasons(elim_dict):
         counts = {}
         for r in elim_dict.values():

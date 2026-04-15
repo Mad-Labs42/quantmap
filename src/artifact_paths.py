@@ -10,7 +10,6 @@ import os
 import re
 from pathlib import Path
 
-
 APPROVED_ARTIFACT_TYPES = {"logs", "measurements", "reports", "environment"}
 
 _SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")

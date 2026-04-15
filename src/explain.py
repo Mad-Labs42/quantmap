@@ -1,5 +1,4 @@
-"""
-QuantMap — explain.py
+"""QuantMap — explain.py
 
 Briefing engine for natural language outcome rationales.
 Heuristic-driven, deterministic, and evidence-bound.
@@ -7,16 +6,15 @@ Heuristic-driven, deterministic, and evidence-bound.
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import sqlite3
-from enum import Enum, auto
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
-from typing import List, Dict, Any, Optional
 
-from src.db import get_connection
 from src import ui
+from src.db import get_connection
 
 logger = logging.getLogger("explain")
 
@@ -32,11 +30,11 @@ class Briefing:
     margin_of_victory: str = ""
     top_constraint: str = ""
     elimination_summary: str = ""
-    watchlist: List[str] = field(default_factory=list)
+    watchlist: list[str] = field(default_factory=list)
     confidence: Confidence = Confidence.MODERATE
     confidence_rationale: str = ""
     copy_summary: str = ""
-    evidence_lines: List[str] = field(default_factory=list)
+    evidence_lines: list[str] = field(default_factory=list)
 
 # Normalized buckets for elimination
 REASON_BUCKETS = {
@@ -66,7 +64,7 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
     methodology_label = "methodology_unknown"
     trust_evidence_lines: list[str] = []
     try:
-        from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+        from src.trust_identity import load_run_identity, methodology_source_label
 
         identity = load_run_identity(campaign_id, db_path)
         methodology_label = methodology_source_label(identity.methodology)
@@ -129,19 +127,19 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
 
     with get_connection(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        
+
         # 1. Load Winners
         winners = conn.execute(
-            "SELECT * FROM scores WHERE campaign_id=? AND is_score_winner=1", 
+            "SELECT * FROM scores WHERE campaign_id=? AND is_score_winner=1",
             (campaign_id,)
         ).fetchall()
-        
+
         # 2. Load Top Passing Candidates (to find runner-up)
         passers = conn.execute(
             "SELECT * FROM scores WHERE campaign_id=? AND passed_filters=1 ORDER BY composite_score DESC LIMIT 5",
             (campaign_id,)
         ).fetchall()
-        
+
         # 3. Load Eliminations
         eliminated = conn.execute(
             "SELECT config_id, elimination_reason FROM scores WHERE campaign_id=? AND passed_filters=0",
@@ -157,8 +155,8 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
     # --- NO WINNER Path ---
     if not winners:
         b = Briefing(
-            campaign_id, 
-            f"[bold red]NO VALID WINNER EMERGED[/bold red]", 
+            campaign_id,
+            "[bold red]NO VALID WINNER EMERGED[/bold red]",
             margin_of_victory="No passing configs found.",
             confidence=Confidence.CAUTION,
             confidence_rationale="Campaign produced zero valid candidates meeting quality gates."
@@ -168,10 +166,10 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
             for row in eliminated:
                 bucket = normalize_reason(row["elimination_reason"])
                 counts[bucket] = counts.get(bucket, 0) + 1
-            
+
             summary_parts = [f"{v}x {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])]
             b.elimination_summary = f"Main failure modes: {'; '.join(summary_parts)}"
-            
+
             # Identify the "Closest Failure"
             # (In a real implementation, we'd query configurations and see which was closest to gates)
             b.top_constraint = "Primary gate rejection: Stability or Latency floors."
@@ -180,19 +178,19 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
     # --- WINNER Path ---
     winner = winners[0]
     runner_up = passers[1] if len(passers) > 1 else None
-    
+
     b = Briefing(campaign_id, f"Winner Identification: [bold]{winner['config_id']}[/bold]")
-    
+
     # Margin of Victory
     if runner_up:
         tg_diff = ((winner['warm_tg_median'] - runner_up['warm_tg_median']) / (runner_up['warm_tg_median'] or 1.0)) * 100
         lat_diff = ((winner['warm_ttft_p90_ms'] - runner_up['warm_ttft_p90_ms']) / (runner_up['warm_ttft_p90_ms'] or 1.0)) * 100
-        
+
         b.margin_of_victory = (
             f"Winner outperformed runner-up ({runner_up['config_id']}) by {tg_diff:+.1f}% in throughput "
             f"while Latency (P90) shifted by {lat_diff:+.1f}%."
         )
-        
+
         # Confidence logic
         if tg_diff > 10 and winner['warm_tg_cv'] < 0.03:
             b.confidence = Confidence.HIGH
@@ -216,7 +214,7 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
             counts[bucket] = counts.get(bucket, 0) + 1
         summary_parts = [f"{v}x {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])]
         b.elimination_summary = f"Out of {len(passers) + len(eliminated)} configs, {len(eliminated)} were rejected: {', '.join(summary_parts)}."
-        
+
         # Top Constraint
         top_bucket = sorted(counts.items(), key=lambda x: -x[1])[0][0]
         b.top_constraint = f"The primary operational constraint was [bold]{top_bucket}[/bold]."
@@ -244,7 +242,7 @@ def print_briefing(b: Briefing, evidence_mode: bool = False):
     """Render a briefing to the console."""
     console = ui.get_console()
     ui.print_banner(f"Technical Briefing: {b.title}")
-    
+
     console.print(f"[bold]Outcome:[/bold]           {b.headline}")
     if b.margin_of_victory:
         console.print(f"[bold]Margin of Victory:[/bold] {b.margin_of_victory}")
@@ -252,7 +250,7 @@ def print_briefing(b: Briefing, evidence_mode: bool = False):
         console.print(f"[bold]Top Constraint:[/bold]    {b.top_constraint}")
     if b.elimination_summary:
         console.print(f"[bold]Eliminations:[/bold]      {b.elimination_summary}")
-    
+
     if b.watchlist:
         console.print("\n[bold]Watchlist (Borderline):[/bold]")
         for item in b.watchlist:
@@ -270,7 +268,7 @@ def print_briefing(b: Briefing, evidence_mode: bool = False):
         console.print("  [dim]Heuristic Engine: Quantitative Lead Analysis (v1.1) active.[/dim]")
         for line in b.evidence_lines:
             console.print(f"  [dim]{line}[/dim]")
-    
+
     # Copy-paste block
     console.print(f"\n[bold]{ui.SYM_DIVIDER}[/bold] Copy-Paste Summary:")
     console.print(f"[dim]{b.copy_summary}[/dim]")
@@ -285,7 +283,7 @@ def get_compare_briefing(id_a: str, id_b: str, db_path: Path) -> Briefing:
         winner_b = conn.execute("SELECT config_id, warm_tg_median FROM scores WHERE campaign_id=? AND is_score_winner=1", (id_b,)).fetchone()
 
     b = Briefing(f"Shift Analysis: {id_a} vs {id_b}", "Comparative Briefing")
-    
+
     if winner_a and winner_b:
         if winner_a["config_id"] != winner_b["config_id"]:
             b.headline = f"Winner Pivot: [yellow]{winner_a['config_id']} -> {winner_b['config_id']}[/yellow]"
@@ -293,10 +291,10 @@ def get_compare_briefing(id_a: str, id_b: str, db_path: Path) -> Briefing:
         else:
             b.headline = f"Winner Retained: [green]{winner_a['config_id']}[/green]"
             b.margin_of_victory = "The champion configuration remained stable between both runs."
-            
+
         tg_delta = ((winner_b["warm_tg_median"] - winner_a["warm_tg_median"]) / (winner_a["warm_tg_median"] or 1.0)) * 100
         b.top_constraint = f"Observed shared-config throughput shift: [bold]{tg_delta:+.1f}%[/bold]."
-        
+
         b.confidence = Confidence.MODERATE
         b.confidence_rationale = "Heuristic comparison of winner snapshots and median deltas."
     else:

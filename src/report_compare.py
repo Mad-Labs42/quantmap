@@ -1,5 +1,4 @@
-"""
-QuantMap — report_compare.py
+"""QuantMap — report_compare.py
 
 Markdown renderer for cross-campaign comparisons.
 Follows the evidence-first philosophy.
@@ -7,13 +6,10 @@ Follows the evidence-first philosophy.
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, List
 
-from src.compare import CompareResult, EnvDelta, ConfigDelta
-from src import ui
+from src.compare import CompareResult
 
 # Semantic Labels
 _L_CONT = "CONTEXT"
@@ -37,7 +33,7 @@ def _delta_style(pct: float, significance: str, invert: bool = False) -> str:
     """invert=True means higher is worse (e.g. TTFT)"""
     if significance == "inside noise band":
         return "white"
-    
+
     is_improvement = pct > 0 if not invert else pct < 0
     if abs(pct) < 0.5: return "white"
     return "green" if is_improvement else "red"
@@ -48,15 +44,15 @@ def render_compare_markdown(result: CompareResult) -> str:
     a = res["campaign_a"]
     b = res["campaign_b"]
     meth = res["methodology"]
-    
+
     lines = []
     lines.append(f"# QuantMap Forensic Comparison: {a['id']} vs {b['id']}")
-    lines.append(f"\nGenerated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    lines.append(f"\nGenerated: {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}")
 
     # --- CONTEXT ---
     lines.append(f"\n## [{_L_CONT}] Comparison Scope")
-    lines.append(f"| Metric | Campaign A (Baseline) | Campaign B (Subject) |")
-    lines.append(f"| :--- | :--- | :--- |")
+    lines.append("| Metric | Campaign A (Baseline) | Campaign B (Subject) |")
+    lines.append("| :--- | :--- | :--- |")
     lines.append(f"| **ID** | {a['id']} | {b['id']} |")
     lines.append(f"| **Name** | {a['name']} | {b['name']} |")
     lines.append(f"| **Date** | {a['created_at'][:16]} | {b['created_at'][:16]} |")
@@ -72,7 +68,7 @@ def render_compare_markdown(result: CompareResult) -> str:
     }
     lines.append(f"\n## [{_L_METH}] Compatibility Audit")
     lines.append(f"**Status: {grade_map.get(meth['grade'], meth['grade'])}**")
-    
+
     if meth["warnings"]:
         lines.append("\n> [!WARNING]")
         for w in meth["warnings"]:
@@ -103,13 +99,13 @@ def render_compare_markdown(result: CompareResult) -> str:
         wa = res["winner_a"]
         wb = res["winner_b"]
         lines.append(f"| Metric | Winner A (`{wa['config_id']}`) | Winner B (`{wb['config_id']}`) | Delta (%) |")
-        lines.append(f"| :--- | ---: | ---: | ---: |")
-        
+        lines.append("| :--- | ---: | ---: | ---: |")
+
         tg_a = wa.get("warm_tg_median")
         tg_b = wb.get("warm_tg_median")
         tg_d = res["winner_shift_tg_pct"]
         lines.append(f"| Throughput (TG) | {_fmt(tg_a, '.2f')} t/s | {_fmt(tg_b, '.2f')} t/s | **{_fmt(tg_d, '+.1f')}%** |")
-        
+
         tt_a = wa.get("warm_ttft_median_ms")
         tt_b = wb.get("warm_ttft_median_ms")
         tt_d = (tt_b - tt_a) / tt_a * 100 if (tt_a and tt_b and tt_a > 0) else None
@@ -121,7 +117,7 @@ def render_compare_markdown(result: CompareResult) -> str:
     lines.append(f"\n## [{_L_DATA}: SHARED_CONFIGS] Intersection Set Deltas")
     lines.append("> [!NOTE]")
     lines.append("> Values marked with `~` are inside the measured noise band (CV) and may not represent meaningful performance changes.")
-    
+
     if not res["shared_configs"]:
         lines.append("\nNo identical configurations found between these campaigns.")
     else:
@@ -141,7 +137,7 @@ def render_compare_markdown(result: CompareResult) -> str:
     gained = len(res["gained_in_b"])
     lines.append(f"- **Configs lost in B**: {lost} {'(regression in reach)' if lost > 0 else ''}")
     lines.append(f"- **Configs gained in B**: {gained} {'(improvement in reach)' if gained > 0 else ''}")
-    
+
     if lost > 0:
         lines.append("\n| Lost Config | Potential Reason |")
         lines.append("| :--- | :--- |")

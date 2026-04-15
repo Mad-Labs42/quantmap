@@ -1,5 +1,4 @@
-"""
-QuantMap — run_plan.py
+"""QuantMap — run_plan.py
 
 Resolved execution plan for a single QuantMap run.
 
@@ -33,7 +32,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Mode resolution
 # ---------------------------------------------------------------------------
@@ -46,8 +44,7 @@ QUICK_CYCLES_PER_CONFIG: int = 1
 
 
 def resolve_run_mode(values_override: list | None, mode_flag: str | None = None) -> str:
-    """
-    Resolve the effective run mode for this execution.
+    """Resolve the effective run mode for this execution.
 
       --mode quick                               →  "quick"
       --mode standard                            →  "standard"
@@ -88,10 +85,9 @@ MODE_DESCRIPTIONS: dict[str, str] = {
 
 @dataclass
 class RunPlan:
-    """
-    Resolved execution plan for a single QuantMap run.
+    """Resolved execution plan for a single QuantMap run.
 
-    Attributes
+    Attributes:
     ----------
     parent_campaign_id : str
         The YAML campaign ID (e.g. "NGL_sweep").  Identifies the source
@@ -263,8 +259,7 @@ class RunPlan:
 
     @property
     def untested_values(self) -> list:
-        """
-        Values from the full campaign that are NOT being tested in this run.
+        """Values from the full campaign that are NOT being tested in this run.
         Empty for Full, Standard, and Quick runs (all cover the full campaign value list).
         """
         selected_set = {str(v) for v in self.selected_values}
@@ -272,8 +267,7 @@ class RunPlan:
 
     @property
     def coverage_fraction(self) -> float:
-        """
-        Fraction of campaign values covered by this run (0.0–1.0).
+        """Fraction of campaign values covered by this run (0.0–1.0).
         1.0 for Full, Standard, and Quick runs; <1.0 for Custom runs.
         """
         if not self.all_campaign_values:
@@ -282,8 +276,7 @@ class RunPlan:
 
     @property
     def warm_samples_per_config(self) -> int:
-        """
-        Total warm request slots per config across all cycles.
+        """Total warm request slots per config across all cycles.
 
         This counts all warm requests (i.e. requests_per_cycle − 1 cold per cycle),
         including the speed_medium warm request injected as the final slot of the

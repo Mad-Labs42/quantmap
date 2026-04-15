@@ -1,5 +1,4 @@
-"""
-QuantMap code identity capture.
+"""QuantMap code identity capture.
 
 This module captures the identity of the QuantMap code that started a run.
 It deliberately does not describe backend binaries; llama-server identity
@@ -10,12 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from src.version import __methodology_version__, __version__
-
 
 _REPO_ROOT = Path(__file__).parent.parent
 
@@ -30,7 +28,7 @@ def _run_git(args: list[str]) -> tuple[str | None, str | None]:
             check=False,
             timeout=5,
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return None, str(exc)
     if proc.returncode != 0:
         return None, (proc.stderr or proc.stdout).strip() or f"git exited {proc.returncode}"
@@ -58,7 +56,7 @@ def _source_tree_hash() -> tuple[str | None, str | None]:
             h.update(data)
             h.update(b"\0")
             count += 1
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return None, str(exc)
 
     if count == 0:
@@ -104,6 +102,6 @@ def capture_quantmap_identity() -> dict[str, Any]:
         "git_describe": describe,
         "source_tree_sha256": tree_hash,
         "identity_source": source,
-        "capture_time_utc": datetime.now(timezone.utc).isoformat(),
+        "capture_time_utc": datetime.now(UTC).isoformat(),
         "capture_errors": errors,
     }

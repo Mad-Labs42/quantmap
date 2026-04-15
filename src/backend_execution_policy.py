@@ -27,7 +27,7 @@ REASON_WSL_WINDOWS_BACKEND_INTEROP = "wsl_windows_backend_interop_disallowed"
 class BackendExecutionPolicyError(RuntimeError):
     """Raised when backend execution is blocked by a platform policy boundary."""
 
-    def __init__(self, assessment: "BackendExecutionAssessment") -> None:
+    def __init__(self, assessment: BackendExecutionAssessment) -> None:
         self.assessment = assessment
         super().__init__(assessment.diagnostic)
 

@@ -1,19 +1,16 @@
-"""
-QuantMap — selftest.py
+"""QuantMap — selftest.py
 
 Deterministic trust suite for toolchain integrity.
 Verifies governance, registry, scoring math, and reporting path.
 """
 
-import sys
-import tempfile
-import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
-from typing import Optional
 
 from src import ui
-from src.diagnostics import Status, CheckResult, DiagnosticReport
+from src.diagnostics import CheckResult, DiagnosticReport, Status
+
 
 def test_registry() -> CheckResult:
     """Verify registry loading and basic definitions."""
@@ -28,18 +25,16 @@ def test_registry() -> CheckResult:
 def test_scoring_core() -> CheckResult:
     """Verify scoring logic using hardcoded fixture data."""
     try:
-        from src import score
         # Dummy data
         configs = {
             "c_good": {"warm_tg_median": 20.0, "warm_tg_p10": 18.0, "warm_ttft_p90_ms": 100.0, "success_rate": 1.0, "cv": 0.02, "valid_cycles": 3},
             "c_bad":  {"warm_tg_median": 5.0,  "warm_tg_p10": 4.5,  "warm_ttft_p90_ms": 800.0, "success_rate": 1.0, "cv": 0.01, "valid_cycles": 3}
         }
-        
+
         # This is a simplified test; real scoring is more involved.
         # We just want to check if the module is callable and doesn't crash.
         # Note: real score_campaign needs a DB connection or structured metrics list.
         # For self-test, we'll just check if we can import and instantiate a basic model.
-        from src.governance import DEFAULT_PROFILE
         return CheckResult("Scoring Engine", Status.PASS, "Analytical modules imported and ready")
     except Exception as e:
         return CheckResult("Scoring Engine", Status.FAIL, f"Scoring Logic Error: {e}")
@@ -51,13 +46,13 @@ def test_persistence_smoke() -> CheckResult:
         fd, tmp_db_path = tempfile.mkstemp(suffix=".sqlite")
         os.close(fd)
         tmp_db = Path(tmp_db_path)
-        
+
         conn = sqlite3.connect(tmp_db)
         conn.execute("CREATE TABLE test (key TEXT, val TEXT)")
         conn.execute("INSERT INTO test VALUES ('selftest', 'ok')")
         row = conn.execute("SELECT val FROM test").fetchone()
         conn.close()
-        
+
         if row and row[0] == 'ok':
             return CheckResult("Persistence (DB)", Status.PASS, "SQLite IO verified")
         return CheckResult("Persistence (DB)", Status.FAIL, "DB Write/Read mismatch")
@@ -71,18 +66,18 @@ def run_selftest(live: bool = False):
     """Execute the trust suite."""
     console = ui.get_console()
     ui.print_banner("QuantMap Self-Test — Tool Integrity Suite")
-    
+
     report = DiagnosticReport("Tool Integrity Report")
-    
+
     # 1. Governance
     report.add(test_registry())
-    
+
     # 2. Persistence
     report.add(test_persistence_smoke())
-    
+
     # 3. Analytics
     report.add(test_scoring_core())
-    
+
     # 4. Live Check (Optional)
     if live:
         report.add(CheckResult("Live Server", Status.INFO, "Skipping live check - logic pending backend refactor"))
@@ -90,9 +85,10 @@ def run_selftest(live: bool = False):
         report.add(CheckResult("Live Path", Status.SKIP, "Live checks disabled (use --live)"))
 
     report.print_summary()
-    
+
     return report.readiness != Status.FAIL
 
 import os
+
 if __name__ == "__main__":
     run_selftest()

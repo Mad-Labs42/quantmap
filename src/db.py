@@ -1,5 +1,4 @@
-"""
-QuantMap — db.py
+"""QuantMap — db.py
 
 SQLite schema definition and initialization for lab.sqlite.
 All tables are created here. This module is the single source of truth
@@ -23,9 +22,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 logger = logging.getLogger(__name__)
 
@@ -368,8 +367,7 @@ SCHEMA_VERSION: int = 12
 
 
 class SchemaVersionError(RuntimeError):
-    """
-    Raised when the database schema version is newer than the code expects.
+    """Raised when the database schema version is newer than the code expects.
     This means an older version of QuantMap is being run against a database
     that was created or migrated by a newer version.  Safe to catch and report,
     but the caller must not proceed — the DB may contain columns or data the
@@ -418,14 +416,13 @@ def _assert_no_duplicate_campaign_start_snapshots(conn: sqlite3.Connection) -> N
 
 
 def _backfill_legacy_methodology_snapshots(conn: sqlite3.Connection) -> None:
-    """
-    Bridge legacy notes_json methodology into formal partial snapshot rows.
+    """Bridge legacy notes_json methodology into formal partial snapshot rows.
 
     These rows make legacy evidence visible to every reader without pretending
     that partial notes can reproduce complete historical scoring semantics.
     """
     campaigns = conn.execute("SELECT id, notes_json FROM campaigns").fetchall()
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
     for campaign_id, notes_raw in campaigns:
         if not notes_raw:
             continue
@@ -642,8 +639,7 @@ _MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
 # ---------------------------------------------------------------------------
 
 def init_db(db_path: Path) -> None:
-    """
-    Create the database and all tables if they don't exist.
+    """Create the database and all tables if they don't exist.
     Safe to call multiple times — uses CREATE TABLE IF NOT EXISTS throughout.
     Applies all pending schema migrations and enforces version compatibility.
     Call once at campaign start before any reads or writes.
@@ -657,8 +653,7 @@ def init_db(db_path: Path) -> None:
 
 
 def _get_schema_version(conn: sqlite3.Connection) -> int:
-    """
-    Read the current schema version from the database.
+    """Read the current schema version from the database.
 
     Returns 0 if the schema_version table is absent (pre-versioning legacy DB)
     or empty (newly created DB where the DDL ran but no version was stamped yet).
@@ -675,15 +670,14 @@ def _get_schema_version(conn: sqlite3.Connection) -> int:
 
 def _set_schema_version(conn: sqlite3.Connection, version: int) -> None:
     """Write (or overwrite) the single schema_version row."""
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    now = datetime.now(UTC).isoformat()
     conn.execute("DELETE FROM schema_version")
     conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (?, ?)", (version, now))
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """
-    Apply all pending migrations in version order.
+    """Apply all pending migrations in version order.
 
     Forward migration (older DB → newer code):
         Runs every migration whose target_version > current DB version, in order.
@@ -769,8 +763,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 class ClosingConnection(sqlite3.Connection):
-    """
-    SQLite connection that automatically closes itself when exiting a context manager.
+    """SQLite connection that automatically closes itself when exiting a context manager.
     Standard sqlite3.Connection only commits/rolls back on __exit__, which leaks
     file descriptors and Windows file locks during long multi-step pipelines.
     """
@@ -781,8 +774,7 @@ class ClosingConnection(sqlite3.Connection):
             self.close()
 
 def get_connection(db_path: Path) -> sqlite3.Connection:
-    """
-    Return a new SQLite connection with recommended settings for the lab.
+    """Return a new SQLite connection with recommended settings for the lab.
     Automatically closes when used as `with get_connection(...) as conn:`.
     """
     conn = sqlite3.connect(db_path, timeout=30.0, factory=ClosingConnection)
@@ -818,13 +810,12 @@ def write_raw_jsonl(jsonl_path: Path, record: dict) -> None:
 
 
 def write_jsonl_marker(jsonl_path: Path, marker_type: str, details: dict[str, Any]) -> None:
-    """
-    Append a metadata marker to a JSONL file.
+    """Append a metadata marker to a JSONL file.
     Preserves forensic history by avoiding rewrites while providing clear boundaries.
     """
     marker = {
         "meta": marker_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         **details,
     }
     write_raw_jsonl(jsonl_path, marker)

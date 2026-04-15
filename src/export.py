@@ -1,5 +1,4 @@
-"""
-QuantMap — export.py
+"""QuantMap — export.py
 
 Portable forensic case file generator (.qmap).
 Bundles campaign data, methodology, and telemetry into a single SQLite file.
@@ -7,12 +6,13 @@ Bundles campaign data, methodology, and telemetry into a single SQLite file.
 
 from __future__ import annotations
 
-import sqlite3
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
 from src import ui
+
 
 def run_export(
     campaign_id: str,
@@ -25,7 +25,7 @@ def run_export(
     """Export a campaign to a standalone .qmap SQLite file."""
     console = ui.get_console()
     ui.print_banner(f"QuantMap Export: {campaign_id}")
-    
+
     # Ensure source exists
     if not source_db.exists():
         console.print(f"[red]Error: Source database not found at {source_db}[/red]")
@@ -76,7 +76,7 @@ def run_export(
         if not lite:
             tables.append("telemetry")
             tables.append("background_snapshots")
-        
+
         # We also need a metadata table
         dest_conn.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, val TEXT)")
 
@@ -87,7 +87,7 @@ def run_export(
         # 3. Optional Stripping
         redaction_status = "not_requested"
         if strip_env:
-            console.print(f"  [dim]Redacting environment metadata...[/dim]")
+            console.print("  [dim]Redacting environment metadata...[/dim]")
             redaction_status = _redact_env(dest_conn, redaction_root)
 
         # 4. Write Manifest
@@ -100,10 +100,10 @@ def run_export(
             redaction_status=redaction_status,
             redaction_root=redaction_root,
         )
-        
+
         dest_conn.close()
         src_conn.close()
-        
+
         # 5. Final Summary
         size_mb = output_path.stat().st_size / (1024 * 1024)
         console.print(f"\n[bold green]{ui.SYM_OK} EXPORT COMPLETE[/bold green]")
@@ -116,7 +116,7 @@ def run_export(
             else "Original (Internal)"
         )
         console.print(f"  [bold]Privacy:[/bold]         {privacy_label}")
-        
+
         return True
 
     except Exception as e:
@@ -132,10 +132,10 @@ def _migrate_with_introspection(src: sqlite3.Connection, dest: sqlite3.Connectio
     if not sql_row:
         # Table not found (might be telemetry in an older DB)
         return
-    
+
     # 2. Create table in destination
     dest.execute(sql_row["sql"])
-    
+
     # 3. Fetch and insert data
     column_rows = src.execute(f"PRAGMA table_info({table})").fetchall()
     column_names = {r[1] for r in column_rows}
@@ -149,11 +149,11 @@ def _migrate_with_introspection(src: sqlite3.Connection, dest: sqlite3.Connectio
         rows = src.execute(f"SELECT * FROM {table}").fetchall()
     if not rows:
         return
-        
+
     columns = rows[0].keys()
     placeholders = ", ".join(["?"] * len(columns))
     insert_sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
-    
+
     dest.executemany(insert_sql, [tuple(r) for r in rows])
     dest.commit()
 
@@ -167,13 +167,13 @@ def _write_manifest(
     redaction_root: Path | None,
 ):
     """Write the case-file manifest to the metadata table."""
-    from src.version import __version__, __methodology_version__
     from src.code_identity import capture_quantmap_identity
     from src.trust_identity import (
         load_artifact_summaries,
         load_run_identity,
         methodology_source_label,
     )
+    from src.version import __methodology_version__, __version__
 
     run_identity = load_run_identity(campaign_id, source_db)
     exporter_identity = capture_quantmap_identity()
@@ -204,7 +204,7 @@ def _write_manifest(
             and methodology_label == "snapshot_complete"
         ),
     }
-    
+
     manifest = {
         "bundle_kind": "campaign",
         "campaign_id": campaign_id,
@@ -230,7 +230,7 @@ def _write_manifest(
             for variant in {lab_path, lab_path.replace("\\", "/"), json.dumps(lab_path)[1:-1]}:
                 text = text.replace(variant, "<REDACTED>")
         return text
-    
+
     for k, v in manifest.items():
         conn.execute("INSERT INTO metadata (key, val) VALUES (?, ?)", (k, _manifest_value(v)))
     conn.commit()

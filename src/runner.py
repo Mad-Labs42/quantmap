@@ -1,5 +1,4 @@
-"""
-QuantMap — runner.py
+"""QuantMap — runner.py
 
 Campaign orchestrator. Runs one campaign YAML from start to finish:
   1. Loads baseline.yaml + campaign YAML, validates purity (one variable only)
@@ -45,37 +44,37 @@ USAGE:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
-import hashlib
 import os
 import statistics
-import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 from dotenv import load_dotenv  # type: ignore[import]
+
 from src import ui
 
 load_dotenv()
 
 # Internal modules
-from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa: E402
-from src.measure import load_request_payload, measure_request_sync, RequestOutcome
-from src import telemetry as tele
-from src import doctor
-from src.db import init_db, get_connection, write_request, write_raw_jsonl
-from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
-from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
-from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
-
 # Rich components
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
 from rich.table import Table  # type: ignore[import]
+
+from src import doctor
+from src import telemetry as tele
+from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
+from src.config import CONFIGS_DIR, LAB_ROOT  # noqa: E402
+from src.db import get_connection, init_db, write_raw_jsonl, write_request
+from src.measure import RequestOutcome, load_request_payload, measure_request_sync
+from src.run_plan import QUICK_CYCLES_PER_CONFIG, STANDARD_CYCLES_PER_CONFIG, RunPlan, resolve_run_mode  # noqa: E402
+from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
 
 console = ui.get_console()
 logger = logging.getLogger(__name__)
@@ -104,8 +103,7 @@ CAMPAIGNS_DIR = CONFIGS_DIR / "campaigns"
 # ---------------------------------------------------------------------------
 
 def _derive_lab_root(baseline_path: Path) -> Path:
-    """
-    Derive the effective lab root for a given baseline file.
+    """Derive the effective lab root for a given baseline file.
 
     Rules:
       - Default baseline (configs/baseline.yaml): use LAB_ROOT unchanged.
@@ -133,8 +131,7 @@ def _derive_effective_campaign_id(
     values_override: list | None,
     mode_flag: str | None = None,
 ) -> str:
-    """
-    Return the stable, scoped run identity for this execution.
+    """Return the stable, scoped run identity for this execution.
 
     Standard runs get a __standard suffix so their DB rows, progress state,
     and reports are isolated from any Full run of the same campaign.
@@ -183,8 +180,7 @@ def _hash_file(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 class CampaignPurityViolationError(ValueError):
-    """
-    Raised when a campaign YAML changes more than one field from baseline.yaml.
+    """Raised when a campaign YAML changes more than one field from baseline.yaml.
     One campaign = one variable. This rule is enforced before any measurement
     is taken.
     """
@@ -219,8 +215,7 @@ def validate_campaign_purity(
     baseline: dict[str, Any],
     campaign: dict[str, Any],
 ) -> str:
-    """
-    Verify that the campaign changes exactly one config field from baseline.
+    """Verify that the campaign changes exactly one config field from baseline.
     Returns the variable name being swept.
     Raises CampaignPurityViolationError if zero or >1 fields differ.
     """
@@ -255,8 +250,7 @@ def build_config_list(
     baseline: dict[str, Any],
     campaign: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """
-    Build the list of configs to test for this campaign.
+    """Build the list of configs to test for this campaign.
 
     Each entry is a dict containing:
       - config_id: string (e.g., "C01_TB04")
@@ -311,8 +305,7 @@ def build_config_list(
 
 
 def _config_to_server_args(config: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
-    """
-    Convert a merged config dict to a llama-server argument list.
+    """Convert a merged config dict to a llama-server argument list.
     Does not include --host, --port, or --model (added by server.py).
     """
     args: list[str] = []
@@ -408,8 +401,7 @@ def _get_affinity_mask(config: dict[str, Any], campaign: dict[str, Any]) -> str 
 # ---------------------------------------------------------------------------
 
 def list_campaigns() -> None:
-    """
-    Print a summary table of all campaigns in CONFIGS_DIR/campaigns/.
+    """Print a summary table of all campaigns in CONFIGS_DIR/campaigns/.
     Exposed for unified CLI use (quantmap list).
     """
     db_path = DB_PATH
@@ -450,7 +442,7 @@ def list_campaigns() -> None:
         console.print("[yellow]No campaigns in database yet.[/yellow]")
         return
 
-    from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
+    from src.run_plan import MODE_LABELS as _ML
 
     tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
     tbl.add_column("Campaign", style="cyan", no_wrap=True)
@@ -524,8 +516,7 @@ def _build_request_schedule(
     lab_config: dict[str, Any],
     request_files: dict[str, Path],
 ) -> list[tuple[int, str, Path]]:
-    """
-    Return the ordered list of (request_index, request_type, payload_path)
+    """Return the ordered list of (request_index, request_type, payload_path)
     for a given cycle.
 
     Cycles 1–4: 6 × speed_short (1 cold + 5 warm)
@@ -574,7 +565,7 @@ def _write_progress(state: dict[str, Any], state_dir: Path, state_file: Path) ->
     progress.json in a truncated or partially-valid state.  The previous good
     state is preserved until the new write is fully committed.
     """
-    import os  # noqa: PLC0415 — already imported at module level but safe to re-import
+    import os
     state_dir.mkdir(parents=True, exist_ok=True)
     tmp_file = state_file.with_suffix(".tmp")
     with open(tmp_file, "w", encoding="utf-8") as f:
@@ -589,7 +580,7 @@ def _clear_progress(state_file: Path) -> None:
     Uses the same atomic temp-rename pattern as _write_progress to prevent
     a partial write from making the file unreadable on the next run.
     """
-    import os  # noqa: PLC0415
+    import os
     if state_file.is_file():
         tmp_file = state_file.with_suffix(".tmp")
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -606,8 +597,7 @@ def _enforce_cooldown(
     config_label: str,
     console: Console,
 ) -> None:
-    """
-    Wait for inter-config cooldown:
+    """Wait for inter-config cooldown:
       - Minimum: lab_config.cooldown_between_configs_s (300s)
       - Temperature gate: both CPU and GPU below cooldown_temp_target_c
       - Hard cap: lab_config.cooldown_max_s (600s)
@@ -707,8 +697,7 @@ def _enforce_cooldown(
 # ---------------------------------------------------------------------------
 
 def _apply_cpu_affinity(pid: int, mask: str | None) -> bool:
-    """
-    Set CPU affinity on the given process.
+    """Set CPU affinity on the given process.
     mask: None = no change (OS default); "0-15" = P-cores only
     Returns True if set successfully.
     """
@@ -746,8 +735,7 @@ def validate_campaign(
     baseline_path: Path = BASELINE_YAML,
     mode_flag: str | None = None,
 ) -> bool:
-    """
-    Perform pre-flight checks: files, purity, environment.
+    """Perform pre-flight checks: files, purity, environment.
     Exposed for unified CLI use (quantmap run --validate).
     """
     console.print(f"\n[bold]QuantMap validation: {campaign_id}[/bold]")
@@ -891,7 +879,8 @@ def validate_campaign(
     #
     # Import here (not at module top) to avoid import-time side effects when
     # src.server is loaded — it reads env vars and resolves paths at import.
-    from src.server import SERVER_BIN as _server_bin, MODEL_PATH as _model_path  # noqa: PLC0415
+    from src.server import MODEL_PATH as _model_path
+    from src.server import SERVER_BIN as _server_bin
 
     # Server binary: exists, is a file, non-zero (zero-byte = failed/incomplete build)
     bin_exists = _server_bin.is_file()
@@ -1101,8 +1090,7 @@ def _run_cycle(
     console: Console,
     logs_dir: Path | None = None,
 ) -> tuple[bool, list[dict]]:
-    """
-    Run one cycle (server start + N requests).
+    """Run one cycle (server start + N requests).
     Returns (thermal_event_occurred, list_of_result_dicts).
 
     On any crash:
@@ -1126,7 +1114,7 @@ def _run_cycle(
     results: list[dict] = []
     thermal_event = False
 
-    from src.server import start_server  # noqa: PLC0415 — lazy: avoids EnvironmentError on --list/--validate
+    from src.server import start_server
 
     try:
         with start_server(
@@ -1165,7 +1153,7 @@ def _run_cycle(
                     (
                         server_pid,
                         str(server_log),
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         int(srv["no_warmup"]),
                         srv["attempt_count"],
                         srv["startup_duration_s"],
@@ -1251,21 +1239,21 @@ def _run_cycle(
 
     except Exception as exc:
         from src.server import ServerOOMError
-        
+
         # Determine if this was an OOM
         is_oom = isinstance(exc, ServerOOMError)
         log_snippet = str(exc)
-        
+
         # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
         if not is_oom:
             try:
-                server_log = Path(request_files.get("speed_short")).parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
+                server_log = Path(request_files.get("speed_short")).parent.parent.parent / "logs" # approximation or we can just use the config's last srv log
                 # actually srv["log_file"] was defined inside the `with` block, we might not have it.
                 # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
                 pass
             except Exception:
                 pass
-            
+
             # Use `server_log` if it is in locals and exists
             try:
                 if 'server_log' in locals() and server_log and server_log.is_file():
@@ -1307,7 +1295,7 @@ def _run_cycle(
     try:
         conn.execute(
             "UPDATE cycles SET status='complete', completed_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), cycle_id),
+            (datetime.now(UTC).isoformat(), cycle_id),
         )
         conn.commit()
     except Exception as exc:
@@ -1355,8 +1343,7 @@ def _run_config(
     logs_dir: Path | None = None,
     environment_dir: Path | None = None,
 ) -> bool | str:
-    """
-    Run all cycles for one config. Returns True if config completed without
+    """Run all cycles for one config. Returns True if config completed without
     thermal abort.
 
     When oom_boundary_sweep=True: returns "oom" if the server startup fails
@@ -1374,7 +1361,7 @@ def _run_config(
     _eff_environment_dir = environment_dir if environment_dir is not None else raw_jsonl_path.parent
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
-    
+
     try:
         thermal_events_total = conn.execute(
             "SELECT COUNT(*) FROM telemetry WHERE config_id=? AND campaign_id=? AND (power_limit_throttling=1 OR cpu_temp_c >= 100.0)",
@@ -1382,7 +1369,7 @@ def _run_config(
         ).fetchone()[0]
     except Exception:
         thermal_events_total = 0
-    
+
     all_results: list[dict] = []
 
     console.print(
@@ -1395,7 +1382,7 @@ def _run_config(
     # Register config in DB (Phase 2 Scoped)
     try:
         full_config_json = json.dumps(config["full_config"])
-        from src.server import get_production_command, get_runtime_env_summary  # noqa: PLC0415
+        from src.server import get_production_command, get_runtime_env_summary
         resolved_cmd = get_production_command(config["server_args"])
         runtime_env_json = json.dumps(get_runtime_env_summary())
         conn.execute(
@@ -1411,7 +1398,7 @@ def _run_config(
                 resolved_cmd,
                 runtime_env_json,
                 config.get("cpu_affinity_mask"),
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
         conn.commit()
@@ -1425,7 +1412,7 @@ def _run_config(
             # Update crash recovery state
             progress_state["current_config"] = config_id
             progress_state["current_cycle"] = cycle_number
-            progress_state["last_update"] = datetime.now(timezone.utc).isoformat()
+            progress_state["last_update"] = datetime.now(UTC).isoformat()
             _write_progress(progress_state, _eff_state_dir, _eff_state_file)
 
             console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
@@ -1455,7 +1442,7 @@ def _run_config(
                     "Cycle %d/%s found in state '%s' — discarding partial data and restarting",
                     cycle_number, config_id, existing_status,
                 )
-                from src.db import write_jsonl_marker  # noqa: PLC0415
+                from src.db import write_jsonl_marker
                 write_jsonl_marker(
                     raw_jsonl_path,
                     "RESTART_CYCLE",
@@ -1493,8 +1480,8 @@ def _run_config(
             # Failure is non-fatal: log it and let the cycle proceed.
             _ctx_path = _eff_environment_dir / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
             try:
-                from src.run_context import create_run_context  # noqa: PLC0415
-                from src.server import MODEL_PATH as _ctx_model_path  # noqa: PLC0415
+                from src.run_context import create_run_context
+                from src.server import MODEL_PATH as _ctx_model_path
                 logger.info(
                     "Capturing run context for cycle %d/%s ...",
                     cycle_number, config_id,
@@ -1534,7 +1521,7 @@ def _run_config(
 
             all_results.extend(results)
 
-    from src.server import ServerOOMError  # noqa: PLC0415
+    from src.server import ServerOOMError
     try:
         _run_cycles()
     except ServerOOMError as exc:
@@ -1565,7 +1552,7 @@ def _run_config(
     try:
         conn.execute(
             "UPDATE configs SET status='complete', completed_at=? WHERE id=? AND campaign_id=?",
-            (datetime.now(timezone.utc).isoformat(), config_id, campaign_id),
+            (datetime.now(UTC).isoformat(), config_id, campaign_id),
         )
         conn.commit()
     except Exception as exc:
@@ -1626,8 +1613,7 @@ def run_campaign(
     baseline_path: Path = BASELINE_YAML,
     mode_flag: str | None = None,
 ) -> None:
-    """
-    Run a complete campaign from start to finish (or resume if interrupted).
+    """Run a complete campaign from start to finish (or resume if interrupted).
 
     This is the main entry point. Call from CLI or directly.
 
@@ -1954,7 +1940,7 @@ def run_campaign(
     # -------------------------------------------------------------------------
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
-        from src.telemetry_policy import enforce_current_run_readiness  # noqa: PLC0415
+        from src.telemetry_policy import enforce_current_run_readiness
         availability = enforce_current_run_readiness()
         console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
@@ -1967,7 +1953,8 @@ def run_campaign(
     # -------------------------------------------------------------------------
     # Import the resolved paths from server.py so we check the same binary and
     # model that will actually be used, respecting .env overrides.
-    from src.server import SERVER_BIN as _sb_pre, MODEL_PATH as _mp_pre  # noqa: PLC0415
+    from src.server import MODEL_PATH as _mp_pre
+    from src.server import SERVER_BIN as _sb_pre
     _run_preflight_checks(_sb_pre, _mp_pre, _effective_lab_root)
 
     # -------------------------------------------------------------------------
@@ -2005,7 +1992,7 @@ def run_campaign(
     # --resume), records from multiple distinct runs accumulate in the file with no
     # record-level marker differentiating them.  The sentinel provides a clear
     # boundary: any downstream reader can split the file on _run_separator=true.
-    _run_start_iso = datetime.now(timezone.utc).isoformat()
+    _run_start_iso = datetime.now(UTC).isoformat()
     write_raw_jsonl(raw_jsonl_path, {
         "_run_separator":  True,
         "campaign_id":     effective_campaign_id,
@@ -2023,7 +2010,7 @@ def run_campaign(
         # -------------------------------------------------------------------------
         # Register or resume campaign in DB (Phase 2 Scoped)
         # -------------------------------------------------------------------------
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now_iso = datetime.now(UTC).isoformat()
         # Scoped connection used directly here
         existing = conn.execute(
             "SELECT status FROM campaigns WHERE id=?", (effective_campaign_id,)
@@ -2067,7 +2054,7 @@ def run_campaign(
 
         # Forensics: Mark the start of a resumed run in the logs.
         if resume and existing is not None:
-            from src.db import write_jsonl_marker  # noqa: PLC0415
+            from src.db import write_jsonl_marker
             write_jsonl_marker(
                 raw_jsonl_path,
                 "RESUME_CAMPAIGN",
@@ -2085,11 +2072,12 @@ def run_campaign(
         # -------------------------------------------------------------------------
         # Use SERVER_BIN and MODEL_PATH from server.py — they are the llama.cpp
         # backend constants and the authoritative source for these paths.
-        from src.server import SERVER_BIN as _server_bin, MODEL_PATH as _model_path  # noqa: PLC0415
+        from src.server import MODEL_PATH as _model_path
+        from src.server import SERVER_BIN as _server_bin
 
         campaign_yaml_path = CAMPAIGNS_DIR / f"{campaign_id}.yaml"
         sampling_params = baseline.get("sampling", {})
-        from src.code_identity import capture_quantmap_identity  # noqa: PLC0415
+        from src.code_identity import capture_quantmap_identity
 
         snap = tele.collect_campaign_start_snapshot(
             campaign_id=effective_campaign_id,
@@ -2109,11 +2097,11 @@ def run_campaign(
         # Add gpu_vram_total_mb for NGL sweep VRAM headroom reporting.
         # Provider-specific NVML access lives behind the Phase 3 helper.
         try:
-            from src.telemetry_nvml import get_gpu_vram_total_mb  # noqa: PLC0415
+            from src.telemetry_nvml import get_gpu_vram_total_mb
             snap["gpu_vram_total_mb"] = get_gpu_vram_total_mb()
             if snap["gpu_vram_total_mb"] is not None:
                 logger.info("gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"])
-        except Exception as _exc:  # noqa: BLE001
+        except Exception as _exc:
             snap["gpu_vram_total_mb"] = None
             logger.warning("Could not capture gpu_vram_total_mb: %s", _exc)
 
@@ -2162,7 +2150,7 @@ def run_campaign(
         # targets before any config/cycle/server launch. The run-start snapshot
         # above is already persisted, so the failure has durable context.
         try:
-            from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: PLC0415
+            from src.backend_execution_policy import assert_backend_execution_allowed
 
             execution_environment = {}
             try:
@@ -2171,7 +2159,7 @@ def run_campaign(
                 execution_environment = {}
             assert_backend_execution_allowed(_server_bin, execution_environment=execution_environment)
         except Exception as exc:
-            from src.backend_execution_policy import BackendExecutionPolicyError  # noqa: PLC0415
+            from src.backend_execution_policy import BackendExecutionPolicyError
 
             if not isinstance(exc, BackendExecutionPolicyError):
                 raise
@@ -2191,7 +2179,7 @@ def run_campaign(
             except Exception as marker_exc:
                 logger.warning("Could not write backend execution policy marker: %s", marker_exc)
 
-            now_fail = datetime.now(timezone.utc).isoformat()
+            now_fail = datetime.now(UTC).isoformat()
             conn.execute(
                 """
                 UPDATE campaigns
@@ -2363,9 +2351,9 @@ def run_campaign(
                                 config_id, consecutive_ooms,
                             )
                             console.print(
-                                f"\n[bold red]OOM boundary confirmed[/bold red] "
-                                f"(2 consecutive OOM failures). Terminating sweep.\n"
-                                f"All remaining configs will be marked skipped_oom."
+                                "\n[bold red]OOM boundary confirmed[/bold red] "
+                                "(2 consecutive OOM failures). Terminating sweep.\n"
+                                "All remaining configs will be marked skipped_oom."
                             )
                             # Mark all remaining configs skipped_oom in DB + progress
                             # BEFORE break, so crash recovery skips them on resume.
@@ -2385,7 +2373,7 @@ def run_campaign(
                                                 json.dumps(rc["variable_value"]),
                                                 json.dumps(rc["full_config"]),
                                                 detail,
-                                                datetime.now(timezone.utc).isoformat(),
+                                                datetime.now(UTC).isoformat(),
                                             ),
                                         )
                                     conn.commit()
@@ -2422,7 +2410,7 @@ def run_campaign(
             try:
                 conn.execute(
                     "UPDATE campaigns SET status='failed', failed_at=?, failure_reason=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), str(exc), effective_campaign_id),
+                    (datetime.now(UTC).isoformat(), str(exc), effective_campaign_id),
                 )
                 conn.commit()
             except Exception as db_exc:
@@ -2443,7 +2431,7 @@ def run_campaign(
     with get_connection(_eff_db_path) as conn_final:
         conn_final.execute(
             "UPDATE campaigns SET status='complete', completed_at=? WHERE id=?",
-            (datetime.now(timezone.utc).isoformat(), effective_campaign_id),
+            (datetime.now(UTC).isoformat(), effective_campaign_id),
         )
         conn_final.commit()
 
@@ -2462,9 +2450,8 @@ def run_campaign(
     report_ok = False
     analysis_ok = False
     try:
-        from src.analyze import analyze_campaign
-        from src.score import score_campaign
         from src.report import generate_report
+        from src.score import score_campaign
 
         # Build the effective filter_overrides for scoring:
         #   1. Start with mode-level overrides (from RunPlan — e.g. Custom relaxes
@@ -2485,7 +2472,7 @@ def run_campaign(
         # (e.g. "NGL_sweep__v30"), so analyze/score/report operate only on the
         # rows this run actually inserted — no cross-contamination from prior
         # broader runs.
-        _analysis_started = datetime.now(timezone.utc).isoformat()
+        _analysis_started = datetime.now(UTC).isoformat()
         with get_connection(_eff_db_path) as _status_conn:
             _status_conn.execute(
                 """
@@ -2511,7 +2498,7 @@ def run_campaign(
         stats = scores["stats"]
         analysis_ok = True
         with get_connection(_eff_db_path) as _status_conn:
-            now_status = datetime.now(timezone.utc).isoformat()
+            now_status = datetime.now(UTC).isoformat()
             _status_conn.execute(
                 """
                 UPDATE campaigns
@@ -2540,7 +2527,7 @@ def run_campaign(
         # Failure here is non-fatal — the primary report above is the critical path.
         v2_ok = True
         try:
-            from src.report_campaign import generate_campaign_report  # noqa: PLC0415
+            from src.report_campaign import generate_campaign_report
             v2_path = generate_campaign_report(
                 effective_campaign_id, _eff_db_path, baseline, scores, stats,
                 campaign=campaign,
@@ -2555,7 +2542,7 @@ def run_campaign(
             )
             try:
                 with get_connection(_eff_db_path) as _art_conn:
-                    _now_utc = datetime.now(timezone.utc).isoformat()
+                    _now_utc = datetime.now(UTC).isoformat()
                     _art_conn.execute(
                         "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
                         (effective_campaign_id, "report_v2_md"),
@@ -2583,7 +2570,7 @@ def run_campaign(
                 logger.warning("Could not record report_v2.md failure artifact: %s", _art_exc)
 
         with get_connection(_eff_db_path) as _status_conn:
-            from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415
+            from src.trust_identity import summarize_report_artifact_status
 
             report_status = (
                 summarize_report_artifact_status(effective_campaign_id, _eff_db_path)
@@ -2600,7 +2587,7 @@ def run_campaign(
                 """,
                 (
                     report_status,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     effective_campaign_id,
                 ),
             )
@@ -2612,7 +2599,7 @@ def run_campaign(
             f"[bold red]Analysis failed (raw data is safe — run rescore.py to retry):[/bold red]\n{exc}"
         )
         with get_connection(_eff_db_path) as _status_conn:
-            now_status = datetime.now(timezone.utc).isoformat()
+            now_status = datetime.now(UTC).isoformat()
             if analysis_ok:
                 _status_conn.execute(
                     """
@@ -2675,7 +2662,7 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
         campaign_id,
         create=True,
     )
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     log_file = log_dir / f"{log_prefix}_{ts}.log"
 
     fmt = "%(asctime)s %(levelname)-8s %(name)s %(message)s"
@@ -2710,8 +2697,7 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
 
 def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False) -> None:
     """Run environment checks and print a compact summary if issues are found."""
-    from src import doctor
-    from src.diagnostics import DiagnosticReport, Status
+    from src.diagnostics import Status
 
     results = []
     # 0. Backend execution boundary
@@ -2748,8 +2734,7 @@ def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is
 
 
 def _parse_values_arg(raw: str) -> list:
-    """
-    Parse the --values string into a typed list.
+    """Parse the --values string into a typed list.
 
     Tries int conversion first; keeps original string on failure.
     Example: "30,80,999" → [30, 80, 999]

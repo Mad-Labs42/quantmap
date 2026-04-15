@@ -1,5 +1,4 @@
-"""
-QuantMap — version.py
+"""QuantMap — version.py
 
 Software and Methodology versioning.
 Separated namespaces to distinguish between tool/CLI updates

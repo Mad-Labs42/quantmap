@@ -1,5 +1,4 @@
-"""
-QuantMap — governance.py
+"""QuantMap — governance.py
 
 Phase 3 Metric Governance layer.
 
@@ -92,8 +91,7 @@ class EstimatorType(str, Enum):
 
 
 class OutlierPolicy(str, Enum):
-    """
-    QuantMap uses TRUE WINSORIZATION (capping extreme values at fence
+    """QuantMap uses TRUE WINSORIZATION (capping extreme values at fence
     percentiles, preserving N) — never trimming (dropping values, reducing N).
     The 'winsorize' option caps; 'flag_symmetric' flags without modifying.
     There is no 'trim' option by design.
@@ -158,8 +156,7 @@ class CompositeBasis(str, Enum):
 # ---------------------------------------------------------------------------
 
 class MetricDefinition(BaseModel):
-    """
-    Canonical definition of a single metric variable.
+    """Canonical definition of a single metric variable.
 
     This model is the schema for each entry in configs/metrics.yaml.
     It defines what a metric IS, independent of any campaign or profile.
@@ -220,8 +217,7 @@ class MetricDefinition(BaseModel):
 # ---------------------------------------------------------------------------
 
 class MetricRegistry:
-    """
-    Container for all metric definitions. Loaded from configs/metrics.yaml.
+    """Container for all metric definitions. Loaded from configs/metrics.yaml.
 
     This is a read-only singleton. It does not support dynamic modification
     or runtime reload.
@@ -256,8 +252,7 @@ class MetricRegistry:
         return [m for m in self._metrics.values() if m.score_capable]
 
     def get_required_score_metrics(self) -> frozenset[str]:
-        """
-        Return canonical names of metrics that are both required AND score-capable.
+        """Return canonical names of metrics that are both required AND score-capable.
         This is the Registry-derived equivalent of the legacy _PRIMARY_SCORE_METRICS.
         """
         return frozenset(
@@ -266,8 +261,7 @@ class MetricRegistry:
         )
 
     def get_optional_score_metrics(self) -> tuple[str, ...]:
-        """
-        Return canonical names of metrics that are optional (or conditionally
+        """Return canonical names of metrics that are optional (or conditionally
         applicable) AND score-capable.
         This is the Registry-derived equivalent of the legacy _SECONDARY_SCORE_METRICS.
         """
@@ -292,8 +286,7 @@ class MetricRegistry:
 # ---------------------------------------------------------------------------
 
 class ExperimentProfile(BaseModel):
-    """
-    Campaign-specific scoring configuration.
+    """Campaign-specific scoring configuration.
 
     Defines HOW metrics are used for a specific evaluation goal, without
     redefining what those metrics are. See Section 5 of the Phase 3 Design Memo.
@@ -345,7 +338,7 @@ class ExperimentProfile(BaseModel):
         return v
 
     @model_validator(mode="after")
-    def _metrics_consistency(self) -> "ExperimentProfile":
+    def _metrics_consistency(self) -> ExperimentProfile:
         """Validate that primary/secondary/weights reference active metrics."""
         active = set(self.active_metrics)
 
@@ -403,8 +396,7 @@ def validate_profile_against_registry(
     profile: ExperimentProfile,
     registry: MetricRegistry,
 ) -> None:
-    """
-    Enforce the override boundary from Section 5.2 of the Design Memo.
+    """Enforce the override boundary from Section 5.2 of the Design Memo.
 
     Raises ProfileValidationError if the profile violates any Registry constraint.
     This function MUST be called at load time, not lazily during scoring.
@@ -473,8 +465,7 @@ def validate_profile_against_registry(
 # ---------------------------------------------------------------------------
 
 def load_registry(yaml_path: Path | None = None) -> MetricRegistry:
-    """
-    Load the Metric Registry from configs/metrics.yaml.
+    """Load the Metric Registry from configs/metrics.yaml.
 
     Fails loudly and immediately if the YAML is missing, malformed, or
     any metric definition fails schema validation.
@@ -489,7 +480,7 @@ def load_registry(yaml_path: Path | None = None) -> MetricRegistry:
             f"This file is required for QuantMap to operate."
         )
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     if not isinstance(raw, dict) or "metrics" not in raw:
@@ -515,8 +506,7 @@ def load_profile(
     profile_name: str,
     profiles_dir: Path | None = None,
 ) -> ExperimentProfile:
-    """
-    Load an Experiment Profile from configs/profiles/<name>.yaml.
+    """Load an Experiment Profile from configs/profiles/<name>.yaml.
 
     Fails loudly if the file is missing or the profile fails validation.
     Does NOT validate against the Registry — call validate_profile_against_registry()
@@ -530,7 +520,7 @@ def load_profile(
             f"Experiment Profile '{profile_name}' not found at {path}."
         )
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
 
     if not isinstance(raw, dict):
@@ -675,8 +665,7 @@ def get_legacy_elimination_filters() -> dict[str, float]:
 
 
 def get_legacy_primary_score_metrics() -> frozenset[str]:
-    """
-    Return the set of required + score_capable metric names from the Registry.
+    """Return the set of required + score_capable metric names from the Registry.
 
     This MUST match the legacy _PRIMARY_SCORE_METRICS frozenset:
         {"warm_tg_median", "warm_tg_p10"}
@@ -700,8 +689,7 @@ def get_legacy_primary_score_metrics() -> frozenset[str]:
 
 
 def get_legacy_secondary_score_metrics() -> tuple[str, ...]:
-    """
-    Return the tuple of optional + score_capable metric names from the Registry.
+    """Return the tuple of optional + score_capable metric names from the Registry.
 
     This MUST match the legacy _SECONDARY_SCORE_METRICS tuple:
         ("warm_ttft_median_ms", "warm_ttft_p90_ms", "cold_ttft_median_ms", "pp_median")

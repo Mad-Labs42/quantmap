@@ -1,5 +1,4 @@
-"""
-QuantMap — report_campaign.py
+"""QuantMap — report_campaign.py
 
 Campaign-level report generator following the evidence-first philosophy.
 
@@ -25,17 +24,16 @@ Public API:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
-import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 from src.db import get_connection
 from src.settings_env import optional_env_path
-from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +123,7 @@ def _confidence_qualifier(assessment_confidence: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 def _section_end_block(scope_prefix: str, items: dict[str, list[str]]) -> list[str]:
-    """
-    Build a section-end summary block containing labeled sub-sections.
+    """Build a section-end summary block containing labeled sub-sections.
 
     Args:
         scope_prefix: The semantic scope to identify these interpretations 
@@ -149,8 +146,7 @@ def _section_end_block(scope_prefix: str, items: dict[str, list[str]]) -> list[s
 
 
 def _section_failure_stub(heading: str, exc: Exception) -> list[str]:
-    """
-    Return a minimal section replacement used when a section builder raises.
+    """Return a minimal section replacement used when a section builder raises.
 
     Every major section MUST appear in the report — this stub ensures sections
     are never silently omitted when generation fails.  The stub preserves the
@@ -171,8 +167,7 @@ def _section_failure_stub(heading: str, exc: Exception) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _load_run_contexts(results_dir: Path) -> list[dict[str, Any]]:
-    """
-    Load all per-cycle run_context JSON files from the campaign results directory.
+    """Load all per-cycle run_context JSON files from the campaign results directory.
 
     Files follow the naming convention:
         {config_id}_cycle{N:02d}_run_context.json
@@ -208,8 +203,7 @@ def _load_run_contexts(results_dir: Path) -> list[dict[str, Any]]:
 
 
 def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Compute campaign-level environment statistics from per-cycle run_context dicts.
+    """Compute campaign-level environment statistics from per-cycle run_context dicts.
 
     Returns a summary dict used both for the environment section and for
     scaling interpretation language in other sections.
@@ -375,12 +369,12 @@ def _section_header(
     lines.append(f"| OS | {snap.get('os_version', machine.get('os', '—'))} |")
     lines.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', '—')} |")
     try:
-        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+        from src.execution_environment import execution_environment_summary_lines
         lines.extend(execution_environment_summary_lines(snap))
     except Exception:
         lines.append("| Execution support tier | `unknown` |")
     try:
-        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+        from src.telemetry_provider import provider_evidence_summary_lines
 
         lines.extend(provider_evidence_summary_lines(snap))
     except Exception:
@@ -419,15 +413,15 @@ def _section_methodology(
     methodology: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
-    from src.trust_identity import methodology_source_label  # noqa: PLC0415
+    from src.trust_identity import methodology_source_label
     methodology = methodology or {}
     methodology_label = methodology_source_label(methodology)
-    
+
     lines.append("> [!NOTE]")
     lines.append("> **QuantMap Governance Methodology v1.0 (Stable)**")
     lines.append("> Methodology: v1.0 (Winsorized Means + LCB + Absolute Anchors)")
     lines.append("")
-    
+
     lines.append(f"## Test Protocol\n> Type: {_L_METH}\n")
 
     lab_cfg = baseline.get("lab", {})
@@ -509,15 +503,15 @@ def _section_methodology(
         "The composite score represents the **Lower Confidence Bound (LCB)**, penalizing configs "
         "with high performance variance across cycles. Higher LCB = more stable performance._\n"
     )
-    
+
     # LCB Method Disclosure
     lcb_method = "unknown"
     scores_df = scores_result.get("scores_df")
     if scores_df is not None and not scores_df.empty:
         lcb_method = scores_df["lcb_method"].iloc[0]
-    
+
     lines.append(f"> **LCB Computation Method:** {lcb_method}\n")
-    
+
     sw = (
         methodology.get("weights")
         or getattr(profile_obj, "weights", {})
@@ -540,7 +534,7 @@ def _section_methodology(
         "_QuantMap Governance Methodology v1.0 follows absolute fixed-reference normalization to ensure cross-campaign "
         "comparability. Scores are measured against governed hardware or baseline anchors._\n"
     )
-    
+
     governance_snapshot = methodology.get("anchors") or scores_result.get("governance_methodology")
     if governance_snapshot:
         lines.append("| Metric | Anchor Value | Source | Provenance/Version |")
@@ -551,16 +545,16 @@ def _section_methodology(
             val = ref.get("value")
             source = ref.get("source", "unknown")
             provenance = ref.get("provenance", "N/A")
-            
+
             val_str = f"{val:.1f}" if val is not None else "BATCH-BEST"
-            
+
             # Format source labels for clarity
             source_label = source
             if source == "baseline_yaml":
                 source_label = "**BASELINE OVERRIDE**"
             elif source == "best-in-batch":
                 source_label = "FALLBACK (Cohort-Relative) [!CAUTION]"
-            
+
             lines.append(f"| {m_name.replace('_', ' ').title()} | {val_str} | {source_label} | {provenance} |")
         lines.append("")
     else:
@@ -672,17 +666,17 @@ def _section_primary_results(
     if highest_tg:
         is_unrank = (highest_tg in unrankable)
         unrank_note = " ⚠ **Unrankable (Evidence Only)**" if is_unrank else ""
-        
+
         var_val = config_variable_map.get(highest_tg, highest_tg)
         tg   = cfg_s(highest_tg).get("warm_tg_median")
         ttft = cfg_s(highest_tg).get("warm_ttft_median_ms")
         sc   = score_field(highest_tg, "composite_score")
-        
+
         if highest_tg == winner:
             lines.append(
-                f"| Highest raw TG | _(same as score winner)_ | — | — | — "
-                f"| TG leader and score leader are the same config "
-                f"(based on TG Median and Composite Score columns) |"
+                "| Highest raw TG | _(same as score winner)_ | — | — | — "
+                "| TG leader and score leader are the same config "
+                "(based on TG Median and Composite Score columns) |"
             )
         else:
             lines.append(
@@ -700,11 +694,11 @@ def _section_primary_results(
             if cid in unrankable:
                 return f"`{cid}` (⚠)"
             return f"`{cid}`"
-            
+
         frontier_display = ", ".join(_brand(c) for c in pareto_frontier[:4])
         if len(pareto_frontier) > 4:
             frontier_display += f" +{len(pareto_frontier) - 4} more"
-        
+
         lines.append(
             f"| Pareto frontier | {frontier_display} | — | — | — "
             "| Not dominated on both TG median and TTFT median simultaneously "
@@ -830,13 +824,13 @@ def _section_primary_results(
         if env_agg.get("available"):
             config_confidences = env_agg.get("config_confidences", {})
             winner_env_conf = config_confidences.get(winner, "medium")
-            
+
         if run_plan is not None:
             if getattr(run_plan, "is_quick", False):
                 winner_env_conf = "low"
             elif getattr(run_plan, "is_standard", False) and winner_env_conf == "high":
                 winner_env_conf = "medium"
-                
+
         qualifier = _confidence_qualifier(winner_env_conf)
 
         interp.append(
@@ -861,10 +855,10 @@ def _section_primary_results(
                 diff_note = f" ({diff_pct:.1f}% higher raw TG than score winner)"
             else:
                 diff_note = f" ({diff_pct:.1f}% lower raw TG than score winner)"
-        
+
         tradeoff_text = (
-            f"If this throughput difference exceeds the observed run-to-run variability (CV), "
-            f"it may represent a throughput/score tradeoff."
+            "If this throughput difference exceeds the observed run-to-run variability (CV), "
+            "it may represent a throughput/score tradeoff."
         ) if n_h >= 3 else "CV is mathematically unreliable at this sample size, preventing strict stability comparisons."
 
         interp.append(
@@ -990,7 +984,7 @@ def _section_variability(
     passing_cv = [
         (cid, stats[cid]["warm_tg_cv"])
         for cid in stats
-        if cid not in eliminated 
+        if cid not in eliminated
         and stats[cid].get("warm_tg_cv") is not None
         and stats[cid].get("valid_warm_request_count", 0) >= 3
     ]
@@ -1244,8 +1238,7 @@ def _section_concerns_and_warnings(
     contexts:         list[dict[str, Any]],
     run_plan:         Any,
 ) -> list[str]:
-    """
-    Aggregate all concerns into a single section at the end of the report.
+    """Aggregate all concerns into a single section at the end of the report.
 
     Items are sorted into High / Moderate / Low severity buckets so readers
     can triage quickly. Every item cites the source data that triggered it.
@@ -1479,7 +1472,7 @@ def _appendix_full_stats(
             elim = "⚠ "
         cv_frac = s.get("warm_tg_cv")
         cv_disp = f"{cv_frac * 100:.1f}%" if (cv_frac is not None and n_warm >= 3) else "N/A"
-        
+
         lines.append(
             f"| {elim}`{cid}` | {var_val} "
             f"| {_fmt(s.get('warm_tg_median'), '.2f')} "
@@ -1537,7 +1530,7 @@ def _appendix_eliminations(
     # These were previously hidden or mixed with filters.
     collapsed = scores_result.get("collapsed_dimensions", [])
     nan_invalid = scores_result.get("nan_invalid_ids", [])
-    
+
     degraded = {cid: s.get("elimination_reason") for cid, s in scores_result.get("stats", {}).items() if s.get("config_status") == "degraded"}
     high_nan_warns = scores_result.get("high_nan_warnings", [])
 
@@ -1548,7 +1541,7 @@ def _appendix_eliminations(
             "rather than policy filters. These exclusions indicate that the underlying measurements were either "
             "physically impossible to collect (OOM/Degraded) or mathematically invalid for comparison (NaNs).\n"
         )
-        
+
         if collapsed:
             lines.append("#### [WARNING] Sensor Collapse Detected\n")
             lines.append(
@@ -1585,7 +1578,7 @@ def _appendix_eliminations(
             )
             lines.append(f"| Config | {variable_name} | Exclusion Reason | Basis |")
             lines.append("|--------|----------|------------------|-------|")
-            
+
             # Combine for sorting
             all_exclusions: list[tuple[str, str, str]] = []
             for cid in nan_invalid:
@@ -1593,7 +1586,7 @@ def _appendix_eliminations(
             for cid, reason in degraded.items():
                 # Use the structured reason from the DB
                 all_exclusions.append((cid, "instrumentation_degraded", reason or "degraded"))
-                
+
             for cid, category, reason in sorted(all_exclusions):
                 var_val = config_variable_map.get(cid, "—")
                 lines.append(f"| `{cid}` | {var_val} | {category} | {reason} |")
@@ -1607,8 +1600,7 @@ def _appendix_historical_configs(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
-    """
-    Render Appendix D for configurations found in the DB but missing from the current YAML.
+    """Render Appendix D for configurations found in the DB but missing from the current YAML.
     """
     abandoned = scores_result.get("abandoned", [])
     if not abandoned:
@@ -1684,8 +1676,7 @@ def _compute_background_interference(
     campaign_id: str,
     db_path: Path,
 ) -> dict[str, Any]:
-    """
-    Derive background interference summary from background_snapshots DB records.
+    """Derive background interference summary from background_snapshots DB records.
 
     This function applies the explicit significance rules defined above (R1–R5).
     It never modifies or discards stored data — it is a pure read layer.
@@ -1787,11 +1778,11 @@ def _compute_background_interference(
 
         for p in procs:
             name = p.get("name") or "unknown"
-            
+
             # Exclude server from all background logic
             if any(sub in name.lower() for sub in _SERVER_NAME_SUBSTRINGS):
                 continue
-                
+
             cpu = p.get("cpu_pct") or 0.0
             rss = p.get("rss_mb") or 0.0
 
@@ -1804,9 +1795,9 @@ def _compute_background_interference(
         for name, cpu in snapshot_by_name_cpu.items():
             if cpu > peak_cpu.get(name, 0.0):
                 peak_cpu[name] = cpu
-            
+
             presence[name] = presence.get(name, 0) + 1
-            
+
             if cpu >= _CPU_SPIKE_THRESHOLD_PCT:
                 spike_events.append({
                     "timestamp": row["timestamp"],
@@ -1937,8 +1928,7 @@ def _section_background_interference(
     results_dir: Path,
     campaign_id: str,
 ) -> list[str]:
-    """
-    Render the ## Background Process Activity section.
+    """Render the ## Background Process Activity section.
 
     This is a top-level section, not a subsection of Environment.
     All content is derived from _compute_background_interference().
@@ -2141,8 +2131,7 @@ def _section_supporting_artifacts(
     db_path: Path,
     run_contexts: list[dict[str, Any]],
 ) -> list[str]:
-    """
-    Render the ## Supporting Evidence section.
+    """Render the ## Supporting Evidence section.
 
     Lists all primary artifacts with their filesystem paths and availability.
     If an artifact is not found, states this explicitly.
@@ -2163,7 +2152,7 @@ def _section_supporting_artifacts(
     def _check(path: Path) -> str:
         return "legacy_file_present" if path.exists() else "missing"
 
-    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    from src.trust_identity import load_artifact_summaries
     artifact_rows = {
         row.get("artifact_type"): row
         for row in load_artifact_summaries(campaign_id, db_path)
@@ -2251,19 +2240,19 @@ def _section_supporting_artifacts(
     lines.append(
         "_Copy and run against `lab.sqlite` (or the DB path above) in any SQLite client._\n"
     )
-    lines.append(f"```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
+    lines.append("```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
     lines.append(f"SELECT * FROM telemetry WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n")
-    lines.append(f"-- Background process snapshots: all notable processes every 10 s")
+    lines.append("-- Background process snapshots: all notable processes every 10 s")
     lines.append(
         f"SELECT timestamp, all_notable_procs_json, gpu_proc_vram_json\n"
         f"FROM background_snapshots WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n"
     )
-    lines.append(f"-- Report generation history")
+    lines.append("-- Report generation history")
     lines.append(
         f"SELECT artifact_type, path, status, sha256, verification_source, error_message, created_at FROM artifacts\n"
         f"WHERE campaign_id = '{campaign_id}' ORDER BY created_at DESC;\n"
     )
-    lines.append(f"-- Per-config score detail")
+    lines.append("-- Per-config score detail")
     lines.append(
         f"SELECT config_id, composite_score, rank_overall, is_score_winner,\n"
         f"       passed_filters, elimination_reason\n"
@@ -2354,8 +2343,7 @@ def generate_campaign_report(
     run_plan:      Any = None,
     lab_root:      Path | None = None,
 ) -> Path:
-    """
-    Generate the QuantMap campaign report (evidence-first philosophy).
+    """Generate the QuantMap campaign report (evidence-first philosophy).
 
     If scores_result and stats are not provided, they are computed from
     the database. The report is written to the canonical reports family:
@@ -2381,7 +2369,7 @@ def generate_campaign_report(
     even if the file was partially written.
     """
     effective_lab_root = lab_root if lab_root is not None else LAB_ROOT
-    from src.trust_identity import (  # noqa: PLC0415
+    from src.trust_identity import (
         load_baseline_for_historical_use,
         load_run_identity,
     )
@@ -2419,8 +2407,7 @@ def generate_campaign_report(
 
     # Compute analysis if not provided
     if scores_result is None:
-        from src.score import score_campaign  # noqa: PLC0415
-        from src import governance
+        from src.score import score_campaign
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
         stats = scores_result["stats"]
@@ -2465,7 +2452,7 @@ def generate_campaign_report(
     ]
     env_agg      = _aggregate_environment(run_contexts)
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
     # Build sections — every section MUST appear; failures emit stubs not silence
     sections: list[str] = []
@@ -2643,7 +2630,7 @@ def generate_campaign_report(
     # Record report_v2.md generation in the artifacts table.
     # Consistent with generate_report() — any query against artifacts can now
     # show all report files alongside their generation timestamps.
-    _now_utc = datetime.now(timezone.utc).isoformat()
+    _now_utc = datetime.now(UTC).isoformat()
     try:
         with get_connection(db_path) as _art_conn:
             # Canonicalize: Delete previous report_v2_md artifacts for this campaign

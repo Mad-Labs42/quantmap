@@ -1,5 +1,4 @@
-"""
-QuantMap — score.py
+"""QuantMap — score.py
 
 Elimination filtering and composite scoring for campaign results.
 
@@ -48,17 +47,18 @@ import hashlib
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Callable, Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import yaml
 
-from src.db import get_connection
-from src.analyze import analyze_campaign
 from src import governance
+from src.analyze import analyze_campaign
+from src.db import get_connection
 from src.trust_identity import (
     MethodologySnapshotError,
     load_methodology_for_historical_scoring,
@@ -164,8 +164,7 @@ Absolute-Reference Normalization Active
 
 
 def rank_overall(passing_dict: dict[str, dict[str, Any]]) -> pd.DataFrame:
-    """
-    Convenience wrapper for compute_scores used primarily by determinism tests.
+    """Convenience wrapper for compute_scores used primarily by determinism tests.
     Takes a dict of config stats and returns the ranked DataFrame.
     """
     scores_df, _, _, _ = compute_scores(
@@ -185,8 +184,7 @@ def apply_elimination_filters(
     stats: dict[str, dict[str, Any]],
     filters: dict[str, float] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
-    """
-    Apply elimination filters to config stats.
+    """Apply elimination filters to config stats.
 
     Args:
         stats:   per-config statistics dict from analyze_campaign()
@@ -228,7 +226,6 @@ def apply_elimination_filters(
 
 def _check_filters(config_id: str, s: dict[str, Any], f: dict[str, float]) -> str | None:
     """Return elimination reason string, or None if the config passes all filters."""
-
     # Fatal startup errors (OOMs, crashes) or instrumentation degradation (Severity B)
     status = s.get("config_status")
     if status in ("oom", "skipped_oom", "failed", "degraded"):
@@ -310,8 +307,7 @@ def _split_by_rankability(
     dict[str, str],              # integrity_failures: primary metric(s) missing
     dict[str, list[str]],        # unrankable: secondary metric(s) missing
 ]:
-    """
-    Partition passing configs by whether they can be compositely scored.
+    """Partition passing configs by whether they can be compositely scored.
 
     Three outcome buckets:
 
@@ -380,8 +376,7 @@ def _apply_utility_transform(
     registry: governance.MetricRegistry,
     provided_reference: float | None = None,
 ) -> float:
-    """
-    Apply the Registry-governed transform to map raw metrics into [0, 1] utility space.
+    """Apply the Registry-governed transform to map raw metrics into [0, 1] utility space.
     """
     if value is None or np.isnan(value):
         return 0.0
@@ -422,7 +417,7 @@ def _apply_utility_transform(
         if params.get("curve_type") == "piecewise_linear":
             x_sat = params.get("x_saturated", 100.0 if "cold" in metric_name else 50.0)
             x_zero = params.get("x_zero", 2500.0 if "cold" in metric_name else 500.0)
-            
+
             if direction == governance.ObjectiveDirection.minimize:
                 if value <= x_sat: return 1.0
                 if value >= x_zero: return 0.0
@@ -432,7 +427,7 @@ def _apply_utility_transform(
                 if value <= x_zero: return 0.0
                 return float((value - x_zero) / (x_sat - x_zero))
 
-    # Warning: No specific transform matched. 
+    # Warning: No specific transform matched.
     # Must NOT return raw value as it corrupts composite scores.
     logger.warning("No utility transform matched for %s (type: %s). Defaulting to 1.0 (optimistic)", metric_name, transform)
     return 1.0
@@ -446,8 +441,7 @@ def _compute_config_lcb(
     registry: governance.MetricRegistry,
     provided_references: dict[str, float],
 ) -> tuple[float, float, str]:
-    """
-    Compute LCB composite score using either the Preferred (Cycle-Level)
+    """Compute LCB composite score using either the Preferred (Cycle-Level)
     or Fallback (Metric-SE) method.
     
     Returns: (lcb_score, composite_se, method_label)
@@ -468,7 +462,7 @@ def _compute_config_lcb(
                 u = _apply_utility_transform(val, m_name, rankable_stats, registry, provided_references.get(m_name))
                 comp += u * w
             cycle_composites.append(comp)
-        
+
         mean_comp = np.mean(cycle_composites)
         se_comp = np.std(cycle_composites, ddof=1) / np.sqrt(len(cycle_composites))
         lcb = mean_comp - k * se_comp
@@ -484,14 +478,14 @@ def _compute_config_lcb(
         ref_val = provided_references.get(m_name)
         u = _apply_utility_transform(val, m_name, rankable_stats, registry, ref_val)
         point_est_comp += u * w
-        
+
         # Standard Error of the metric
         # We need the std of the estimator. For mean, SE = std / sqrt(N)
         std_val = s.get(f"{m_name}_winsorized_std") or s.get(f"{m_name.replace('_median', '_std')}") or 0.0
         # Wait, if it's a p10, SE is complex. Fallback uses mean SE as proxy.
         n = s.get("valid_warm_request_count", 1)
         se_m = std_val / np.sqrt(n) if n > 0 else 0.0
-        
+
         # Uncertainty (SE) propagation — Phase 3.2 Refinement
         # Scale raw SE by the transform sensitivity to get utility SE.
         mdef = registry.get(m_name)
@@ -501,7 +495,7 @@ def _compute_config_lcb(
             if anchor is None:
                 all_vals = [st.get(m_name) for st in rankable_stats.values() if st.get(m_name) is not None]
                 anchor = max(all_vals) if mdef.objective_direction == governance.ObjectiveDirection.maximize else min(all_vals)
-            
+
             u_se = se_m / anchor if anchor and anchor > 0 else 0.0
         elif mdef.default_transform == governance.TransformFamily.saturating_utility:
             params = mdef.transform_params or {}
@@ -510,9 +504,9 @@ def _compute_config_lcb(
             u_se = se_m / abs(x_zero - x_sat) if x_zero != x_sat else 0.0
         else:
             u_se = 0.0
-            
+
         var_sum += (w * u_se) ** 2
-        
+
     se_comp = np.sqrt(var_sum)
     lcb = point_est_comp - k * se_comp
     logger.debug("LCB Result for %s: point=%f, se=%f, lcb=%f", config_id, point_est_comp, se_comp, lcb)
@@ -531,8 +525,7 @@ def compute_scores(
     registry:          governance.MetricRegistry,
     provided_references: dict[str, float],
 ) -> pd.DataFrame:
-    """
-    Compute composite scores for rankable configs and identify performance
+    """Compute composite scores for rankable configs and identify performance
     leaders across the full evidence set (rankable + unrankable).
 
     - Recommendation Set: rankable_stats. Config IDs that passed all gates.
@@ -575,7 +568,7 @@ def compute_scores(
     for metric in profile.weights.keys():
         if metric not in df_rankable.columns: continue
         nan_count = df_rankable[metric].isnull().sum()
-        
+
         # Collapse rule: 100% NaN AND reaching minimum config sample size
         if nan_count == total_configs and total_configs >= DIMENSION_FAILURE_MIN_CONFIGS:
             collapsed_dimensions.append(metric)
@@ -600,19 +593,19 @@ def compute_scores(
 
     # The clean set for scoring and Pareto
     df_clean = df_rankable[~is_nan_invalid].copy()
-            
+
     if not df_clean.empty:
         # Phase 3.2 Confidence-Aware Scoring (LCB)
         lcb_series = pd.Series(0.0, index=df_clean.index)
         se_series = pd.Series(0.0, index=df_clean.index)
         method_series = pd.Series("", index=df_clean.index)
-        
+
         for cid in df_clean.index:
             lcb, se, method = _compute_config_lcb(cid, full_stats, rankable_stats, profile, registry, provided_references)
             lcb_series[cid] = lcb
             se_series[cid] = se
             method_series[cid] = method
-            
+
         df_clean["composite_score"] = lcb_series
         df_clean["composite_se"] = se_series
         df_clean["lcb_method"] = method_series
@@ -659,19 +652,19 @@ def compute_scores(
             # Pareto frontier calculation over the valid subset
             tg_vals   = df_valid_pareto["warm_tg_median"]
             ttft_vals = df_valid_pareto["warm_ttft_median_ms"]
-            
+
             for cid in df_valid_pareto.index:
                 tg = tg_vals[cid]
                 ttft = ttft_vals[cid]
-                
+
                 dominated = False
                 for other in df_valid_pareto.index:
                     if other == cid:
                         continue
-                    
+
                     otg = tg_vals[other]
                     ottft = ttft_vals[other]
-                    
+
                     # Hard NaN guards in dominance logic (Phase 2)
                     if not (np.isfinite(otg) and np.isfinite(ottft) and np.isfinite(tg) and np.isfinite(ttft)):
                         continue
@@ -679,16 +672,16 @@ def compute_scores(
                     # Hybrid tolerance checks
                     is_tg_near = np.isclose(otg, tg, atol=1e-9, rtol=1e-4)
                     is_ttft_near = np.isclose(ottft, ttft, atol=1e-9, rtol=1e-4)
-                    
+
                     be_tg = (otg >= tg) or is_tg_near
                     be_ttft = (ottft <= ttft) or is_ttft_near
                     sb_tg = (otg > tg) and not is_tg_near
                     sb_ttft = (ottft < ttft) and not is_ttft_near
-                    
+
                     if be_tg and be_ttft and (sb_tg or sb_ttft):
                         dominated = True
                         break
-                        
+
                 df_evidence.at[cid, "pareto_dominated"] = dominated
         else:
             logger.warning("Truthfulness Leak: No configs have finite TG/TTFT metrics for Pareto calculation.")
@@ -700,7 +693,7 @@ def compute_scores(
     final_df["pareto_dominated"] = df_evidence["pareto_dominated"]
     # Re-fill is_score_winner for unrankables as False
     final_df["is_score_winner"]  = final_df["is_score_winner"].fillna(False).astype(bool)
-    
+
     # Add back warm metrics into final_df for those that were unrankable and thus NaN'd by reindex
     for cid in unrankable_id_map:
         final_df.at[cid, "warm_tg_median"] = full_stats[cid]["warm_tg_median"]
@@ -709,8 +702,8 @@ def compute_scores(
     # Final sort to ensure deterministic row order in the report/database
     # Rankable configs first (by rank), ties or unrankables by config_id
     final_df = final_df.sort_values(
-        ["rank_overall", "config_id"], 
-        ascending=[True, True], 
+        ["rank_overall", "config_id"],
+        ascending=[True, True],
         na_position="last"
     )
 
@@ -730,8 +723,7 @@ def compute_scores(
 # ---------------------------------------------------------------------------
 
 def check_speed_medium_flags(stats: dict[str, dict[str, Any]]) -> dict[str, bool]:
-    """
-    Return dict mapping config_id -> True if speed_medium degradation > 5%.
+    """Return dict mapping config_id -> True if speed_medium degradation > 5%.
     Flagged configs are highlighted in the report for human review.
     """
     flags: dict[str, bool] = {}
@@ -765,8 +757,7 @@ def score_campaign(
     current_input: bool = False,
     current_input_reason: str = "initial_scoring",
 ) -> dict[str, Any]:
-    """
-    Run the full analysis + scoring pipeline for a completed campaign.
+    """Run the full analysis + scoring pipeline for a completed campaign.
 
     Args:
         campaign_id:      campaign to score
@@ -888,7 +879,7 @@ def score_campaign(
             capture_quality="complete",
             capture_source=f"score_campaign:{current_input_reason}",
         )
-    
+
     # Legacy ref vars for report logic (kept for backward compatibility with return dict/display)
     ref_warm_tg = provided_references.get("warm_tg_median")
     ref_warm_ttft = provided_references.get("warm_ttft_median_ms")
@@ -902,7 +893,7 @@ def score_campaign(
     abandoned_ids: set[str] = set()
     if campaign:
         try:
-            from src.runner import build_config_list  # noqa: PLC0415
+            from src.runner import build_config_list
             active_configs = build_config_list(baseline, campaign)
             active_ids = {c["config_id"] for c in active_configs}
             abandoned_ids = set(stats.keys()) - active_ids
@@ -946,8 +937,8 @@ def score_campaign(
 
     # Score only the rankable configs, but compute evidence flags over evidence set
     scores_df, collapsed_dims, high_nan_warns, nan_invalid_ids = compute_scores(
-        rankable, 
-        unrankable, 
+        rankable,
+        unrankable,
         stats,
         profile,
         registry,
@@ -1026,14 +1017,13 @@ def _persist_methodology_snapshot(
     capture_quality: str,
     capture_source: str,
 ) -> int:
-    """
-    Persist the methodology snapshot used to interpret a campaign.
+    """Persist the methodology snapshot used to interpret a campaign.
 
     Also keeps the legacy notes_json block updated as a transitional reader
     bridge until all consumers have moved to methodology_snapshots.
     """
-    profile_path = Path(getattr(governance, "_PROFILES_DIR")) / f"{profile.name}.yaml"
-    registry_path = Path(getattr(governance, "_METRICS_YAML"))
+    profile_path = Path(governance._PROFILES_DIR) / f"{profile.name}.yaml"
+    registry_path = Path(governance._METRICS_YAML)
 
     def _read_text(path: Path) -> str | None:
         try:
@@ -1051,7 +1041,7 @@ def _persist_methodology_snapshot(
     actual_capture_quality = capture_quality
     if capture_quality == "complete" and (profile_text is None or registry_text is None):
         actual_capture_quality = "partial"
-    now_utc = datetime.now(timezone.utc).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
 
     conn = sqlite3.connect(db_path, timeout=30.0)
     try:
@@ -1060,7 +1050,7 @@ def _persist_methodology_snapshot(
             # Need to provide NOT NULL columns: name, created_at
             now_str = now_utc
             conn.execute(
-                "INSERT OR IGNORE INTO campaigns (id, name, created_at, run_mode) VALUES (?, ?, ?, 'standard')", 
+                "INSERT OR IGNORE INTO campaigns (id, name, created_at, run_mode) VALUES (?, ?, ?, 'standard')",
                 (campaign_id, campaign_id, now_str)
             )
 
@@ -1103,7 +1093,7 @@ def _persist_methodology_snapshot(
                 ),
             )
             snapshot_id = int(cur.lastrowid)
-            
+
             # Load existing notes
             curr = conn.execute("SELECT notes_json FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
             notes = {}
@@ -1112,7 +1102,7 @@ def _persist_methodology_snapshot(
                     notes = json.loads(curr[0])
                 except (json.JSONDecodeError, TypeError):
                     notes = {"legacy_notes": curr[0]}
-            
+
             # Merge snapshot into a namespaced block
             notes["governance_methodology"] = {
                 "version": "1.0",
@@ -1121,7 +1111,7 @@ def _persist_methodology_snapshot(
                 "methodology_snapshot_id": snapshot_id,
                 "capture_quality": actual_capture_quality,
             }
-            
+
             conn.execute(
                 "UPDATE campaigns SET notes_json=? WHERE id=?",
                 (json.dumps(notes), campaign_id)
@@ -1332,8 +1322,7 @@ _CAMPAIGN_VARIABLES: dict[str, list[str]] = {
 
 
 def generate_c08(db_path: Path, output_path: Path) -> bool:
-    """
-    Generate C08_interaction.yaml from C01-C07 winners.
+    """Generate C08_interaction.yaml from C01-C07 winners.
 
     For each completed campaign in C01-C07, extracts the score winner's
     variable value(s). Combines all winners into a single interaction config
@@ -1381,10 +1370,10 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
         logger.info("  %s winner: %s = %s", campaign_id, var_name, var_value)
 
     if missing:
-        print(f"ERROR: The following campaigns are not yet complete (no score winner):")
+        print("ERROR: The following campaigns are not yet complete (no score winner):")
         for m in missing:
             print(f"  - {m}")
-        print(f"\nComplete these campaigns first, then re-run --generate-c08.")
+        print("\nComplete these campaigns first, then re-run --generate-c08.")
         return False
 
     # Build the combined interaction config value
@@ -1396,7 +1385,7 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
     # Build the output YAML
     c08_data = {
         "campaign_id": "C08_interaction",
-        "description": f"Interaction validation: winners from C01-C07 combined",
+        "description": "Interaction validation: winners from C01-C07 combined",
         "variable": "interaction",
         "values": [interaction_value],
         "type": "interaction",
@@ -1420,11 +1409,11 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
         yaml.dump(c08_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     print(f"Generated {output_path}")
-    print(f"\nWinners combined into interaction config:")
+    print("\nWinners combined into interaction config:")
     for var_name, var_value in sorted(winners.items()):
         print(f"  {var_name}: {var_value}")
-    print(f"\nTotal configs: 1 (combined winner)")
-    print(f"Validate with: python -m src.runner --validate C08_interaction")
+    print("\nTotal configs: 1 (combined winner)")
+    print("Validate with: python -m src.runner --validate C08_interaction")
     return True
 
 
@@ -1433,8 +1422,7 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def generate_finalist(db_path: Path, output_path: Path) -> bool:
-    """
-    Generate Finalist.yaml from C08_interaction winner.
+    """Generate Finalist.yaml from C08_interaction winner.
 
     The Finalist campaign runs the C08 winner through an exhaustive validation:
     10 cycles × full request matrix to confirm the champion config with high
@@ -1498,8 +1486,8 @@ def generate_finalist(db_path: Path, output_path: Path) -> bool:
 
     print(f"Generated {output_path}")
     print(f"\nChampion config from C08: {winner_config_id}")
-    print(f"Cycles: 10 (exhaustive validation)")
-    print(f"Validate with: python -m src.runner --validate Finalist")
+    print("Cycles: 10 (exhaustive validation)")
+    print("Validate with: python -m src.runner --validate Finalist")
     return True
 
 

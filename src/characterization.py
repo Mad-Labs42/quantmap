@@ -1,5 +1,4 @@
-"""
-QuantMap — characterization.py
+"""QuantMap — characterization.py
 
 Pre-run environment characterization. Captures a structured, deterministic
 snapshot of the system at run start. Attached to every run for debugging,
@@ -21,13 +20,12 @@ AVAILABILITY:
 from __future__ import annotations
 
 import logging
-import os
 import platform
 import subprocess
 import sys
 import time
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,8 +41,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def characterize_environment(model_path: str | Path | None = None) -> dict[str, Any]:
-    """
-    Capture a structured snapshot of the system environment at run start.
+    """Capture a structured snapshot of the system environment at run start.
 
     Args:
         model_path: Path to the model file. If None, falls back to the
@@ -64,7 +61,7 @@ def characterize_environment(model_path: str | Path | None = None) -> dict[str, 
     gpu_info, gpu_temp = _probe_nvml(warnings)
 
     return {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "hardware": _probe_hardware(warnings),
         "system": _probe_system(warnings),
         "runtime": _probe_runtime(warnings),
@@ -250,8 +247,7 @@ def _probe_memory(warnings: list[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _probe_nvml(warnings: list[str]) -> tuple[dict[str, Any], float | None]:
-    """
-    Open one NVML session to read baseline GPU state.
+    """Open one NVML session to read baseline GPU state.
 
     Captures static facts (name, VRAM) and a point-in-time snapshot
     (utilization, power, clocks) so callers can see the GPU's at-rest
@@ -381,8 +377,7 @@ def _probe_background_load(warnings: list[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _probe_cpu_temp(warnings: list[str]) -> float | None:
-    """
-    Read CPU temperature via psutil.sensors_temperatures().
+    """Read CPU temperature via psutil.sensors_temperatures().
 
     Available on Linux and macOS. Returns None on Windows without warning —
     the absence is expected and not an error.
@@ -497,8 +492,7 @@ _SYSTEM_NAMES: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 def _open_nvml_session(warnings: list[str]) -> tuple[Any, Any]:
-    """
-    Initialize pynvml and return (pynvml_module, gpu0_handle).
+    """Initialize pynvml and return (pynvml_module, gpu0_handle).
     Both are None if pynvml is unavailable or the GPU cannot be opened.
     Caller is responsible for calling _close_nvml_session when done.
     """
@@ -549,14 +543,13 @@ def _take_one_sample(
     prev_disk: Any,
     warnings: list[str],
 ) -> tuple[dict[str, Any], Any]:
-    """
-    Collect one lightweight system snapshot.
+    """Collect one lightweight system snapshot.
 
     Returns (sample_dict, curr_disk_counters). The caller stores curr_disk
     and passes it back as prev_disk on the next call to produce deltas.
     """
     sample: dict[str, Any] = {
-        "timestamp":              datetime.now(timezone.utc).isoformat(),
+        "timestamp":              datetime.now(UTC).isoformat(),
         "cpu_percent":            None,
         "cpu_freq_current_mhz":  None,
         "available_ram":          None,
@@ -710,8 +703,7 @@ def sample_environment_window(
     duration_s: float = 5.0,
     interval_s: float = 1.0,
 ) -> dict[str, Any]:
-    """
-    Collect lightweight system samples over a time window.
+    """Collect lightweight system samples over a time window.
 
     Samples CPU utilization, RAM, GPU metrics, disk I/O, and top processes
     at each interval. NVML is initialized once and held for the full window
@@ -922,8 +914,7 @@ def _detect_interference(
 # ---------------------------------------------------------------------------
 
 def summarize_environment_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Reduce a list of environment samples into meaningful signals.
+    """Reduce a list of environment samples into meaningful signals.
 
     Args:
         samples: The list returned in sample_environment_window()["samples"].
@@ -1040,8 +1031,7 @@ _DISTORTED_THRESHOLD  = 7  # score >= this → distorted
 # ---------------------------------------------------------------------------
 
 def _compute_disk_throughput(samples: list[dict[str, Any]]) -> dict[str, Any]:
-    """
-    Derive read/write throughput from per-sample byte deltas and timestamps.
+    """Derive read/write throughput from per-sample byte deltas and timestamps.
 
     Returns:
         avg_read_bps, avg_write_bps, max_total_bps  (bytes/second, or None)
@@ -1108,8 +1098,7 @@ def _categorize_process(name_lower: str) -> str | None:
 
 
 def _rank_interferers(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Build a ranked list of non-system processes that appeared in top CPU
+    """Build a ranked list of non-system processes that appeared in top CPU
     across the sample window.
 
     Each entry contains: name, category, recurrence, peak_cpu_percent,
@@ -1180,8 +1169,7 @@ def assess_environment_quality(
     sample_window: dict[str, Any],
     summary: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Synthesize the three characterization layers into a structured quality judgment.
+    """Synthesize the three characterization layers into a structured quality judgment.
 
     Args:
         baseline:      Output of characterize_environment().
@@ -1378,8 +1366,7 @@ def assess_environment_quality(
 # ===========================================================================
 
 def _probe_nvml_capabilities() -> dict[str, Any]:
-    """
-    Probe which NVML metrics are actually available on this GPU.
+    """Probe which NVML metrics are actually available on this GPU.
 
     Attempts a lightweight NVML init, queries each metric category once,
     then shuts NVML down.  Returns a dict mapping capability names to one of:
@@ -1447,7 +1434,7 @@ def _probe_nvml_capabilities() -> dict[str, Any]:
                 if k != "pynvml_available":
                     caps[k] = _IN
             return caps
-        
+
         handle = pynvml.nvmlDeviceGetHandleByIndex(0)
     except Exception:
         pynvml.nvmlShutdown()
@@ -1490,8 +1477,7 @@ def _probe_nvml_capabilities() -> dict[str, Any]:
 
 
 def get_characterization_capabilities() -> dict[str, Any]:
-    """
-    Report which characterization probes are available in this environment.
+    """Report which characterization probes are available in this environment.
 
     Returns a flat dict of capability names mapped to one of these states:
         "supported"                — probe is available and expected to work
@@ -1620,7 +1606,8 @@ def get_characterization_capabilities() -> dict[str, Any]:
     # llama-cpp-python version
     # ------------------------------------------------------------------
     try:
-        from importlib.metadata import version as _ver, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError
+        from importlib.metadata import version as _ver
         for pkg in ("llama-cpp-python", "llama_cpp_python", "llama_cpp"):
             try:
                 _ver(pkg)

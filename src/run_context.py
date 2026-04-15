@@ -1,5 +1,4 @@
-"""
-QuantMap — run_context.py
+"""QuantMap — run_context.py
 
 Lifecycle integration layer: orchestrates the characterization pipeline and
 binds all environment data to a single, structured run context object.
@@ -28,7 +27,7 @@ Dependency rule:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from src.characterization import (
@@ -81,8 +80,7 @@ _IN_SCOPE_STATES: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 
 def _domain_coverage(probe_names: frozenset[str], caps: dict[str, Any]) -> dict[str, Any]:
-    """
-    Analyse coverage of a probe domain on this machine.
+    """Analyse coverage of a probe domain on this machine.
 
     Returns a dict with:
         status      — "complete" | "partial" | "absent" | "not_applicable"
@@ -149,8 +147,7 @@ def compute_run_context_confidence(
     capabilities: dict[str, Any],
     warnings:     list[str],
 ) -> dict[str, Any]:
-    """
-    Analyse how complete and trustworthy the RunContext observation is.
+    """Analyse how complete and trustworthy the RunContext observation is.
 
     This is a structured judgment — not a pass/fail gate — intended to let
     downstream consumers know how much weight to place on the environment
@@ -221,7 +218,7 @@ def compute_run_context_confidence(
     available_probe_count = len(available_probes)
     total_probe_count     = len(in_scope_probes)
     n_failed              = len(failed_probes)
-    
+
     capability_coverage   = (
         available_probe_count / total_probe_count
         if total_probe_count > 0 else 0.0
@@ -447,8 +444,7 @@ def create_run_context(
     sample_duration_s: float = 5.0,
     sample_interval_s: float = 1.0,
 ) -> dict[str, Any]:
-    """
-    Capture a complete environment snapshot and return it as a run context.
+    """Capture a complete environment snapshot and return it as a run context.
 
     Runs each characterization stage in sequence:
         1. Baseline snapshot     (characterize_environment)
@@ -492,7 +488,7 @@ def create_run_context(
     Never raises. Stage failures are recorded in warnings and the affected
     key is set to an empty dict so callers can always .get() safely.
     """
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
     warnings: list[str] = []
 
     # ------------------------------------------------------------------

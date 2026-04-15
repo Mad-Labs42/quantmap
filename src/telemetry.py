@@ -1,5 +1,4 @@
-"""
-QuantMap — telemetry.py
+"""QuantMap — telemetry.py
 
 Background telemetry collection for all campaign runs. Samples system metrics
 every 2 seconds and records background process activity every 10 seconds.
@@ -39,18 +38,18 @@ import ctypes.wintypes
 import io
 import json
 import logging
-import os
 import sqlite3
 import struct
 import threading
 import time
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
+import warnings
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-import warnings
 
 import psutil
+
 from src.execution_environment import SUPPORT_WSL_DEGRADED, classify_execution_environment
 from src.telemetry_hwinfo import read_hwinfo_shared_memory_bytes
 from src.telemetry_nvml import probe_nvml_provider
@@ -173,8 +172,7 @@ _FILE_MAP_READ = 0x0004
 
 
 def _read_hwinfo_sm_bytes() -> bytes | None:
-    """
-    Open HWiNFO64 shared memory read-only and return a snapshot as bytes.
+    """Open HWiNFO64 shared memory read-only and return a snapshot as bytes.
 
     Uses OpenFileMappingW (open existing) + MapViewOfFile + ctypes.string_at.
     OpenFileMappingW does NOT require elevated privileges or SeCreateGlobalPrivilege
@@ -191,8 +189,7 @@ def _read_hwinfo_sm_bytes() -> bytes | None:
 
 
 def _read_hwinfo_readings(sm: io.BytesIO) -> list[dict[str, Any]]:
-    """
-    Parse HWiNFO shared memory and return all reading elements as a list of dicts.
+    """Parse HWiNFO shared memory and return all reading elements as a list of dicts.
 
     Each dict has keys:
         sensor_name: str    (name of the sensor group, e.g. "CPU [#0]: Intel Core i9-12900K")
@@ -276,8 +273,7 @@ def _find_reading(
     rtype: int | None = None,
     sensor_substr: str | None = None,
 ) -> float | None:
-    """
-    Search readings for the first entry matching label_substr (case-insensitive).
+    """Search readings for the first entry matching label_substr (case-insensitive).
     Optionally filter by rtype and/or sensor_substr.
     Returns the current value, or None if not found.
     """
@@ -373,8 +369,7 @@ def _nvml_pstate_str(handle: Any) -> str | None:
 
 @dataclass
 class TelemetrySample:
-    """
-    One telemetry snapshot (sampled every 2 seconds).
+    """One telemetry snapshot (sampled every 2 seconds).
     All fields map to telemetry.jsonl columns (MDD §10.3 + extended metrics).
     None = metric was unavailable for this sample.
     """
@@ -478,8 +473,7 @@ class TelemetryStartupError(RuntimeError):
 
 
 def startup_check() -> dict[str, Any]:
-    """
-    Probe all telemetry sources and enforce ABORT/WARN/SILENT tiers.
+    """Probe all telemetry sources and enforce ABORT/WARN/SILENT tiers.
 
     Raises TelemetryStartupError if any ABORT-tier metric is unavailable.
     Logs warnings for WARN-tier gaps. SILENT-tier availability recorded silently.
@@ -719,8 +713,7 @@ def _get_server_process(pid: int | None) -> psutil.Process | None:
 # ---------------------------------------------------------------------------
 
 def _get_server_private_bytes(mem: Any) -> float | None:
-    """
-    Return the server process's private committed memory in MB.
+    """Return the server process's private committed memory in MB.
 
     This function is the single point of change for cross-platform support.
     All platform-specific branching for this metric lives here.
@@ -761,8 +754,7 @@ def _get_server_private_bytes(mem: Any) -> float | None:
 
 
 def _get_system_commit_charge() -> float | None:
-    """
-    Return system-wide virtual memory commit charge in GB.
+    """Return system-wide virtual memory commit charge in GB.
 
     Commit charge is the total virtual memory the OS has promised to back
     (with either RAM or page file) across all processes — not what is
@@ -829,15 +821,14 @@ def collect_sample(
     server_pid: int | None = None,
     cycle_id: int | None = None,
 ) -> TelemetrySample:
-    """
-    Collect one telemetry sample. Safe to call from background thread.
+    """Collect one telemetry sample. Safe to call from background thread.
     Never raises — all failures produce None for that metric.
     """
     global _prev_disk_counters, _prev_net_counters, _prev_sample_time
     global _prev_cpu_stats, _server_process
 
     now = time.monotonic()
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
     elapsed = (now - _prev_sample_time) if _prev_sample_time > 0 else None
 
     # ---- HWiNFO readings (one SM read for all hardware metrics) -------------
@@ -1160,11 +1151,10 @@ def collect_background_snapshot(
     config_id: str,
     cycle_id: int | None = None,
 ) -> BackgroundSnapshot:
-    """
-    Collect a background activity snapshot. Records what other processes
+    """Collect a background activity snapshot. Records what other processes
     are doing on the machine during inference — essential for interference audit.
     """
-    ts = datetime.now(timezone.utc).isoformat()
+    ts = datetime.now(UTC).isoformat()
 
     defender_process_running = False
     windows_update_active = False
@@ -1311,8 +1301,7 @@ def collect_background_snapshot(
 # ---------------------------------------------------------------------------
 
 class TelemetryCollector:
-    """
-    Background thread collecting telemetry every 2 seconds and process
+    """Background thread collecting telemetry every 2 seconds and process
     snapshots every 10 seconds. Writes to telemetry.jsonl and lab.sqlite.
 
     Usage:
@@ -1392,7 +1381,7 @@ class TelemetryCollector:
                     "TelemetryCollector: thread still alive after 15s | "
                     "likely blocked on DB/IO | refusing to start a second collector"
                 )
-        
+
         # Phase 2: Close scoped connection safely
         if self._conn:
             try:
@@ -1494,8 +1483,7 @@ class TelemetryCollector:
             self._handle_severity_b(f"[INSTRUMENTATION_FAILURE] snapshot_sqlite_write_error: {exc}")
 
     def _handle_severity_b(self, reason: str) -> None:
-        """
-        Escalate a non-fatal but truth-invalidating failure (Severity B) to the DB.
+        """Escalate a non-fatal but truth-invalidating failure (Severity B) to the DB.
         Marks the configuration as 'degraded' with a structured reason. (Phase 2)
         """
         if not self._conn or not self._config_id:
@@ -1504,7 +1492,7 @@ class TelemetryCollector:
         # Structured cause: [CONFIG] [CATEGORY] [REASON]
         # (Distinction: config-level instrumentation or contract failure)
         full_reason = f"[CONFIG] {reason}"
-        
+
         try:
             self._conn.execute(
                 "UPDATE configs SET status='degraded', elimination_reason=? WHERE id=?",
@@ -1540,12 +1528,11 @@ def collect_campaign_start_snapshot(
     """Collect a complete system fingerprint at campaign start (MDD §10.5)."""
     import hashlib
     import platform
-    import subprocess
     import sys
 
     snap: dict[str, Any] = {
         "campaign_id": campaign_id,
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": datetime.now(UTC).isoformat(),
     }
 
     try:
@@ -1563,10 +1550,10 @@ def collect_campaign_start_snapshot(
         stat = model_path.stat()
         snap["model_file_size_bytes"] = stat.st_size
         snap["model_mtime_utc"] = datetime.fromtimestamp(
-            stat.st_mtime, tz=timezone.utc
+            stat.st_mtime, tz=UTC
         ).isoformat()
         snap["model_path"] = str(model_path)
-    except Exception as exc:
+    except Exception:
         snap["model_file_size_bytes"] = None
         snap["model_mtime_utc"] = None
 
@@ -1710,8 +1697,7 @@ def collect_campaign_start_snapshot(
 # ---------------------------------------------------------------------------
 
 def check_thermal_event(sample: TelemetrySample, cpu_throttle_temp: float = 100.0) -> bool:
-    """
-    Return True if this sample represents a thermal disqualification event.
+    """Return True if this sample represents a thermal disqualification event.
     CPU >= 100°C or GPU SW power cap throttling active.
     """
     if sample.cpu_temp_c is not None and sample.cpu_temp_c >= cpu_throttle_temp:
