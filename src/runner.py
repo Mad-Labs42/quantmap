@@ -71,6 +71,7 @@ from src import doctor
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
 from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
+from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
 
 # Rich components
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
@@ -1352,6 +1353,7 @@ def _run_config(
     state_dir: Path | None = None,
     state_file: Path | None = None,
     logs_dir: Path | None = None,
+    environment_dir: Path | None = None,
 ) -> bool | str:
     """
     Run all cycles for one config. Returns True if config completed without
@@ -1369,6 +1371,7 @@ def _run_config(
     _eff_state_dir  = state_dir  if state_dir  is not None else STATE_DIR
     _eff_state_file = state_file if state_file is not None else STATE_FILE
     _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
+    _eff_environment_dir = environment_dir if environment_dir is not None else raw_jsonl_path.parent
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
     
@@ -1488,10 +1491,7 @@ def _run_config(
 
             # Capture run context before cycle execution begins (one per cycle).
             # Failure is non-fatal: log it and let the cycle proceed.
-            _ctx_path = (
-                raw_jsonl_path.parent
-                / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
-            )
+            _ctx_path = _eff_environment_dir / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
             try:
                 from src.run_context import create_run_context  # noqa: PLC0415
                 from src.server import MODEL_PATH as _ctx_model_path  # noqa: PLC0415
@@ -1976,11 +1976,28 @@ def run_campaign(
     for d in [_eff_results_dir, _eff_logs_dir, _eff_db_dir, _eff_state_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    campaign_results_dir = _eff_results_dir / effective_campaign_id
-    campaign_results_dir.mkdir(parents=True, exist_ok=True)
+    model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    model_identity = infer_model_identity(
+        model_name=model_cfg.get("name"),
+        model_path=model_cfg.get("path"),
+    )
+    campaign_measurements_dir = artifact_dir(
+        _effective_lab_root,
+        "measurements",
+        model_identity,
+        effective_campaign_id,
+        create=True,
+    )
+    campaign_environment_dir = artifact_dir(
+        _effective_lab_root,
+        "environment",
+        model_identity,
+        effective_campaign_id,
+        create=True,
+    )
 
-    raw_jsonl_path = campaign_results_dir / "raw.jsonl"
-    telemetry_jsonl_path = campaign_results_dir / "telemetry.jsonl"
+    raw_jsonl_path = campaign_measurements_dir / "raw.jsonl"
+    telemetry_jsonl_path = campaign_measurements_dir / "telemetry.jsonl"
 
     # Write a run-separator sentinel as the first JSONL record of this invocation.
     # raw.jsonl is append-only (immutable per MDD §9.2).  If the same campaign is
@@ -2130,7 +2147,7 @@ def run_campaign(
             if _existing_snap is not None and _existing_snap["campaign_yaml_content"] is not None
             else snap.get("campaign_yaml_content") or ""
         )
-        yaml_snapshot_path = _eff_results_dir / effective_campaign_id / "campaign_yaml_snapshot.yaml"
+        yaml_snapshot_path = campaign_environment_dir / "campaign_yaml_snapshot.yaml"
         try:
             yaml_snapshot_path.parent.mkdir(parents=True, exist_ok=True)
             yaml_snapshot_path.write_text(
@@ -2323,6 +2340,7 @@ def run_campaign(
                     state_dir=_eff_state_dir,
                     state_file=_eff_state_file,
                     logs_dir=_eff_logs_dir,
+                    environment_dir=campaign_environment_dir,
                 )
 
                 if oom_boundary_sweep:
@@ -2640,12 +2658,24 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
     This makes validate calls distinguishable from real runs by filename
     pattern alone without deleting or collapsing any log files.
     """
-    # Allow callers to supply an effective logs_dir derived from the active
-    # lab root; fall back to the module-level default for default-baseline runs.
-    effective_logs_dir = logs_dir if logs_dir is not None else LOGS_DIR
-    log_dir = effective_logs_dir / campaign_id
-    log_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Compatibility: existing callers pass <lab_root>/logs. Derive lab_root from
+    # that shape and route to canonical artifacts/logs/... structure.
+    if logs_dir is None:
+        effective_lab_root = LAB_ROOT
+    elif logs_dir.name.lower() == "logs":
+        effective_lab_root = logs_dir.parent
+    else:
+        effective_lab_root = logs_dir
+
+    model_identity = infer_model_identity()
+    log_dir = artifact_dir(
+        effective_lab_root,
+        "logs",
+        model_identity,
+        campaign_id,
+        create=True,
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     log_file = log_dir / f"{log_prefix}_{ts}.log"
 
     fmt = "%(asctime)s %(levelname)-8s %(name)s %(message)s"

@@ -434,9 +434,15 @@ def cmd_compare(args):
     # 4. Render and Save Persistent Report
     output_path = args.output
     if not output_path:
-        # Default: results/comparisons/C01_vs_C02.md
+        # Default: artifacts/reports/comparisons/<pair>/compare.md
         try:
-            output_path = _default_results_path("comparisons", f"{args.campaign1}_vs_{args.campaign2}.md")
+            from src.artifact_paths import compare_default_report_path  # noqa: PLC0415
+
+            output_path = compare_default_report_path(
+                _load_lab_root(),
+                args.campaign1,
+                args.campaign2,
+            )
         except Exception as exc:
             _print_path_resolution_error("could not resolve comparison output path", exc)
             sys.exit(1)

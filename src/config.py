@@ -43,7 +43,7 @@ LAB_ROOT: Path = require_env_path(
     purpose="QuantMap lab root",
     recommendation=(
         "Copy .env.example to .env and set QUANTMAP_LAB_ROOT to your lab "
-        "directory (e.g. D:/Workspaces/QuantMap)."
+        "directory (e.g. D:/Workspaces/QuantMap_agent)."
     ),
 )
 

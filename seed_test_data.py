@@ -2,8 +2,13 @@ import sqlite3
 import json
 import uuid
 import datetime
+import os
+from pathlib import Path
 
-db_path = r"d:\Workspaces\QuantMap\db\lab.sqlite"
+_DEFAULT_LAB_ROOT = Path(__file__).resolve().parent
+lab_root = Path(os.getenv("QUANTMAP_LAB_ROOT", str(_DEFAULT_LAB_ROOT))).resolve()
+db_path = lab_root / "db" / "lab.sqlite"
+db_path.parent.mkdir(parents=True, exist_ok=True)
 
 def add_campaign_data(conn, campaign_id, configs_data):
     """
@@ -47,7 +52,7 @@ def add_campaign_data(conn, campaign_id, configs_data):
                     (cycle_id, campaign_id, config_id, 1, r_idx+1, req_type, int(is_cold), payload["outcome"], ttft, 10.0)
                 )
 
-with sqlite3.connect(db_path) as conn:
+with sqlite3.connect(str(db_path)) as conn:
     # SCENARIO A: Fatal Startup
     # Config 1: 5 valid warm requests (passing)
     # Config 2: 0 requests, status='oom', failure_detail='OOM during KV allocation'

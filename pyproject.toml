@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "Josh", email = "josh@example.com"}
+    {name = "Josh", email = "deepthought8342@gmail.com"}
 ]
 keywords = ["llm", "quantization", "benchmarking", "governance"]
 dependencies = [

@@ -35,10 +35,11 @@ from typing import Any
 
 from src.db import get_connection
 from src.settings_env import optional_env_path
+from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 
 logger = logging.getLogger(__name__)
 
-LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap")
+LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -2121,8 +2122,8 @@ def _section_background_interference(
         f"{campaign_id}'` for all snapshot rows with per-snapshot process lists.\n"
     )
     lines.append(
-        "> **Raw hardware trace:** `results/{campaign_id}/telemetry.jsonl` "
-        "(2-second hardware samples throughout the campaign).\n"
+        "> **Raw hardware trace:** see the **Supporting Evidence** artifact index for "
+        "the canonical `telemetry.jsonl` path (2-second hardware samples throughout the campaign).\n"
     )
 
     return lines
@@ -2134,7 +2135,9 @@ def _section_background_interference(
 
 def _section_supporting_artifacts(
     campaign_id: str,
-    results_dir: Path,
+    reports_dir: Path,
+    measurements_dir: Path,
+    environment_dir: Path,
     db_path: Path,
     run_contexts: list[dict[str, Any]],
 ) -> list[str]:
@@ -2181,19 +2184,29 @@ def _section_supporting_artifacts(
             parts.append(f"error={str(error)[:80]}")
         return "; ".join(parts)
 
-    telemetry_jsonl = results_dir / "telemetry.jsonl"
-    raw_jsonl       = results_dir / "raw.jsonl"
-    report_md       = results_dir / "report.md"
-    report_v2_md    = results_dir / "report_v2.md"
-    scores_csv      = results_dir / "scores.csv"
+    telemetry_jsonl = measurements_dir / "telemetry.jsonl"
+    raw_jsonl       = measurements_dir / "raw.jsonl"
+    report_md       = reports_dir / "report.md"
+    report_v2_md    = reports_dir / "report_v2.md"
+    scores_csv      = reports_dir / "scores.csv"
 
     # Count run context files
-    rc_files = sorted(results_dir.glob("*_run_context.json"))
+    rc_files = sorted(environment_dir.glob("*_run_context.json"))
     rc_status = f"✓ {len(rc_files)} file(s)" if rc_files else "✗ 0 files found"
 
-    # Find most recent log
-    log_dir = db_path.parent.parent / "logs" / campaign_id
-    log_files = sorted(log_dir.glob("runner_*.log")) if log_dir.exists() else []
+    # Find most recent log. Prefer canonical artifacts/logs/... path and retain
+    # legacy logs/<campaign> fallback for pre-migration runs.
+    lab_root = db_path.parent.parent
+    canonical_logs_root = lab_root / "artifacts" / "logs"
+    canonical_log_dirs = sorted(canonical_logs_root.glob(f"*/{campaign_id}")) if canonical_logs_root.exists() else []
+    canonical_log_files: list[Path] = []
+    for d in canonical_log_dirs:
+        canonical_log_files.extend(sorted(d.glob("runner_*.log")))
+    legacy_log_dir = lab_root / "logs" / campaign_id
+    legacy_log_files = sorted(legacy_log_dir.glob("runner_*.log")) if legacy_log_dir.exists() else []
+
+    log_files = canonical_log_files if canonical_log_files else legacy_log_files
+    log_dir = canonical_log_dirs[-1] if canonical_log_files and canonical_log_dirs else legacy_log_dir
     log_status = f"✓ {len(log_files)} file(s)" if log_files else "✗ Not found"
     log_latest = f"`{log_files[-1].name}`" if log_files else "—"
 
@@ -2225,7 +2238,7 @@ def _section_supporting_artifacts(
         "Per-config statistics and rankings |"
     )
     lines.append(
-        f"| Per-cycle environment | `{results_dir}/*_run_context.json` | {rc_status} | "
+        f"| Per-cycle environment | `{environment_dir}/*_run_context.json` | {rc_status} | "
         "Pre-cycle environment characterization per cycle |"
     )
     lines.append(
@@ -2345,8 +2358,8 @@ def generate_campaign_report(
     Generate the QuantMap campaign report (evidence-first philosophy).
 
     If scores_result and stats are not provided, they are computed from
-    the database. The report is written to:
-        {lab_root}/results/{campaign_id}/report_v2.md
+    the database. The report is written to the canonical reports family:
+        artifacts/reports/<model_slug>/<campaign_slug>/report_v2.md
 
     Args:
         campaign_id:   Effective campaign ID (may be mode-scoped, e.g.
@@ -2379,9 +2392,30 @@ def generate_campaign_report(
         allow_current_input=False,
     )
     trust_identity = load_run_identity(campaign_id, db_path)
-    results_dir = effective_lab_root / "results" / campaign_id
-    results_dir.mkdir(parents=True, exist_ok=True)
-    report_path = results_dir / "report_v2.md"
+    legacy_results_dir = effective_lab_root / "results" / campaign_id
+    model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    model_identity = infer_model_identity(
+        model_name=model_cfg.get("name"),
+        model_path=model_cfg.get("path"),
+    )
+    report_artifacts = report_paths(
+        effective_lab_root,
+        model_identity,
+        campaign_id,
+        create=True,
+    )
+    reports_dir = report_artifacts["dir"]
+    measurements_dir = find_artifact_dir(
+        effective_lab_root,
+        "measurements",
+        campaign_id,
+    ) or legacy_results_dir
+    environment_dir = find_artifact_dir(
+        effective_lab_root,
+        "environment",
+        campaign_id,
+    ) or legacy_results_dir
+    report_path = report_artifacts["report_v2_md"]
 
     # Compute analysis if not provided
     if scores_result is None:
@@ -2423,7 +2457,7 @@ def generate_campaign_report(
     # fewer configs, stale run_context JSON files from removed configs remain on
     # disk.  Including them would inflate the cycle count and skew environment
     # quality percentages, producing a misleading Environment section.
-    run_contexts = _load_run_contexts(results_dir)
+    run_contexts = _load_run_contexts(environment_dir)
     _active_config_ids = set(config_variable_map.keys())
     run_contexts = [
         ctx for ctx in run_contexts
@@ -2503,7 +2537,7 @@ def generate_campaign_report(
     # Computed here (not cached) so the report always reflects the current DB state.
     try:
         bg_data = _compute_background_interference(campaign_id, db_path)
-        sections.extend(_section_background_interference(bg_data, results_dir, campaign_id))
+        sections.extend(_section_background_interference(bg_data, reports_dir, campaign_id))
     except Exception as exc:
         logger.warning("report: background interference section failed: %s", exc)
         sections.extend(_section_failure_stub("## Background Process Activity", exc))
@@ -2562,7 +2596,14 @@ def generate_campaign_report(
     # readers can follow artifact links even when other sections have failures.
     try:
         sections.extend(
-            _section_supporting_artifacts(campaign_id, results_dir, db_path, run_contexts)
+            _section_supporting_artifacts(
+                campaign_id,
+                reports_dir,
+                measurements_dir,
+                environment_dir,
+                db_path,
+                run_contexts,
+            )
         )
     except Exception as exc:
         logger.warning("report: supporting artifacts section failed: %s", exc)

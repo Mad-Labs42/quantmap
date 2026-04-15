@@ -37,6 +37,7 @@ from src.db import get_connection
 from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
+from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -128,8 +129,9 @@ logger = logging.getLogger(__name__)
 
 # LAB_ROOT is kept here as a module-level fallback so that tools calling
 # generate_report() without a lab_root kwarg (e.g. rescore.py) continue to
-# work unchanged. The canonical path is injected by runner.py via lab_root=.
-LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", r"D:/Workspaces/QuantMap")
+# work unchanged. Fallback defaults to this repository root to avoid
+# cross-workspace writes when QUANTMAP_LAB_ROOT is unset.
+LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
 
 
 # ---------------------------------------------------------------------------
@@ -465,11 +467,20 @@ def generate_report(
     if stats is None:
         stats = scores_result["stats"]
 
-    report_dir = effective_lab_root / "results" / campaign_id
-    report_dir.mkdir(parents=True, exist_ok=True)
+    model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    model_identity = infer_model_identity(
+        model_name=model_cfg.get("name"),
+        model_path=model_cfg.get("path"),
+    )
+    report_artifacts = report_paths(
+        effective_lab_root,
+        model_identity,
+        campaign_id,
+        create=True,
+    )
 
-    md_path = report_dir / "report.md"
-    csv_path = report_dir / "scores.csv"
+    md_path = report_artifacts["report_md"]
+    csv_path = report_artifacts["scores_csv"]
 
     # Write scores CSV
     scores_df = scores_result.get("scores_df")
@@ -874,7 +885,7 @@ def _build_markdown(
             sections.append(f"*Same as {_best_label}.*")
         else:
             if is_unrank:
-                 sections.append(
+                sections.append(
                     "_This configuration is the absolute performance leader for throughput, "
                     "but is excluded from the primary ranking because one or more secondary "
                     "metrics (e.g. latency or efficiency) could not be recorded._"
@@ -1589,9 +1600,18 @@ def _build_markdown(
     # Compact artifact index — full version in report_v2.md.
     # Every report must link to its evidence.  Missing artifacts are stated
     # explicitly; they are never silently omitted.
-    report_dir = effective_lab_root / "results" / campaign_id
-    _tel_jsonl = report_dir / "telemetry.jsonl"
-    _raw_jsonl  = report_dir / "raw.jsonl"
+    report_dir = find_artifact_dir(
+        effective_lab_root,
+        "reports",
+        campaign_id,
+    ) or (effective_lab_root / "results" / campaign_id)
+    measurements_dir = find_artifact_dir(
+        effective_lab_root,
+        "measurements",
+        campaign_id,
+    ) or report_dir
+    _tel_jsonl = measurements_dir / "telemetry.jsonl"
+    _raw_jsonl  = measurements_dir / "raw.jsonl"
 
     from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
     _artifact_rows = {

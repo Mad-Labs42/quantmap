@@ -1,10 +1,12 @@
 # Lab runtime outputs — NEVER commit
+artifacts/
 results/
 logs/
 *.log
 db/
 state/
 *.qmap
+lab.sqlite
 
 # Derived files
 *.csv
@@ -14,11 +16,6 @@ state/
 *.sqlite-shm
 trace.txt
 traceback.txt
-
-# Reports (machine-specific paths — gitignored except README)
-*.md
-!README.md
-!docs/**/*.md
 
 # Python
 __pycache__/
@@ -35,6 +32,7 @@ build/
 
 # Environment / secrets
 .env
+.env.backup*
 !.env.example
 
 # Windows
@@ -57,6 +55,35 @@ phase2_prep_snapshots/
 
 # Local docs / notes not meant for repo
 *.docx
+docs/CHECKPOINTS!/
 
 # Local environment manager config
 mise.toml
+.aider*
+
+# Local-only tooling / model placeholders
+qwen
+tools/
+
+# Local sandbox outputs
+test_lab_consistency/
+
+# No node workflow in this repository
+package-lock.json
+
+# Local-only operator/working materials
+.agents/
+
+# Docs policy: only keep public docs/playbooks and docs/system
+docs/*
+!docs/playbooks/
+!docs/playbooks/**
+!docs/system/
+!docs/system/**
+
+# Internal-only docs
+docs/AUDITS/
+docs/decisions/
+docs/CHECKPOINTS!/
+docs/Design Memo's/
+

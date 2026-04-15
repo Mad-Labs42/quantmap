@@ -1,0 +1,63 @@
+language: "en-US"
+
+reviews:
+  profile: "assertive"
+  request_changes_workflow: true
+  high_level_summary: true
+  changed_files_summary: true
+  collapse_walkthrough: false
+  review_status: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+  path_filters:
+    - "src/**"
+    - "quantmap.py"
+    - "rescore.py"
+    - "seed_test_data.py"
+    - "pyproject.toml"
+    - "requirements.txt"
+    - ".github/**"
+    - "docs/**"
+    - "!artifacts/**"
+    - "!results/**"
+    - "!logs/**"
+    - "!db/**"
+    - "!state/**"
+    - "!build/**"
+    - "!quantmap.egg-info/**"
+    - "!test_lab_consistency/**"
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+
+path_instructions:
+  - path: "src/**"
+    instructions: |
+      Prioritize correctness, determinism, and benchmark integrity.
+      Flag behavior changes that affect scoring, governance, reporting, telemetry,
+      methodology snapshots, or trust semantics.
+
+  - path: "docs/**"
+    instructions: |
+      Check for contradictions with source behavior and stale operational guidance.
+      Prefer factual consistency over style suggestions.
+
+  - path: ".github/**"
+    instructions: |
+      Verify workflow triggers, permissions minimization, and CI reproducibility.
+      Flag placeholders or broken automation paths.
+
+  - path: "artifacts/**"
+    instructions: |
+      Generated runtime outputs. Do not request style or content changes here.
+
+  - path: "results/**"
+    instructions: |
+      Generated benchmarking output. Treat as non-source unless explicitly requested.

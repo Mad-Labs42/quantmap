@@ -51,6 +51,7 @@ load_dotenv()
 from src.config import DEFAULT_HOST, LAB_ROOT, PRODUCTION_PORT  # noqa: E402
 from src.settings_env import require_env_path  # noqa: E402
 from src.backend_execution_policy import assert_backend_execution_allowed  # noqa: E402
+from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -406,10 +407,24 @@ def _log_path(
 
     Creates parent directories if they do not exist.
     """
-    effective_logs_dir = logs_dir if logs_dir is not None else LOGS_DIR
-    log_dir = effective_logs_dir / campaign_id
-    log_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    # Compatibility: existing callers pass <lab_root>/logs. We derive lab_root
+    # from that shape and route to canonical artifacts/logs/... structure.
+    if logs_dir is None:
+        effective_lab_root = LAB_ROOT
+    elif logs_dir.name.lower() == "logs":
+        effective_lab_root = logs_dir.parent
+    else:
+        effective_lab_root = logs_dir
+
+    model_identity = infer_model_identity(model_path=MODEL_PATH)
+    log_dir = artifact_dir(
+        effective_lab_root,
+        "logs",
+        model_identity,
+        campaign_id,
+        create=True,
+    )
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
     return log_dir / f"server_{config_id}_cycle{cycle:02d}_attempt{attempt}_{ts}.log"
 
 
