@@ -25,21 +25,22 @@ Public API:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-import os
-import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 from src.db import get_connection
 from src.settings_env import optional_env_path
-from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
 
 logger = logging.getLogger(__name__)
 
-LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
+LAB_ROOT = optional_env_path(
+    "QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent
+)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -59,15 +60,16 @@ def _file_sha256(path: Path) -> str | None:
 _L_CONT = "CONTEXT"
 _L_METH = "METHODOLOGY"
 _L_DATA = "DATA"
-_L_INT  = "INTERPRETATION"
-_L_IMP  = "IMPLICATIONS"
-_L_LIM  = "LIMITATIONS"
+_L_INT = "INTERPRETATION"
+_L_IMP = "IMPLICATIONS"
+_L_LIM = "LIMITATIONS"
 _L_WARN = "WARNINGS"
 
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
 
 def _fmt(val: float | int | None, spec: str, missing: str = "—") -> str:
     """Format a numeric value; return `missing` when value is None."""
@@ -99,10 +101,10 @@ def _na(val: Any, missing: str = "N/A") -> str:
 
 def _quality_label(quality: str | None) -> str:
     return {
-        "clean":        "clean",
+        "clean": "clean",
         "mostly_clean": "mostly clean",
-        "noisy":        "noisy",
-        "distorted":    "distorted",
+        "noisy": "noisy",
+        "distorted": "distorted",
     }.get(quality or "", quality or "unknown")
 
 
@@ -114,9 +116,9 @@ def _confidence_qualifier(assessment_confidence: str | None) -> str:
     Low → explicit uncertainty ("tentative", "limited data indicates").
     """
     return {
-        "high":   "in this sweep",
+        "high": "in this sweep",
         "medium": "under observed conditions",
-        "low":    "tentatively (limited observation)",
+        "low": "tentatively (limited observation)",
     }.get(assessment_confidence or "", "under observed conditions")
 
 
@@ -124,12 +126,13 @@ def _confidence_qualifier(assessment_confidence: str | None) -> str:
 # Section-end summary block
 # ---------------------------------------------------------------------------
 
+
 def _section_end_block(scope_prefix: str, items: dict[str, list[str]]) -> list[str]:
     """
     Build a section-end summary block containing labeled sub-sections.
 
     Args:
-        scope_prefix: The semantic scope to identify these interpretations 
+        scope_prefix: The semantic scope to identify these interpretations
                       (e.g., "METHODOLOGY", "ENVIRONMENT", "PRIMARY_RESULTS").
         items: Ordered dict of label → bullet-point strings.
                e.g. {"INTERPRETATION": [...], "LIMITATIONS": [...]}
@@ -170,6 +173,7 @@ def _section_failure_stub(heading: str, exc: Exception) -> list[str]:
 # Run-context JSON loading
 # ---------------------------------------------------------------------------
 
+
 def _load_run_contexts(results_dir: Path) -> list[dict[str, Any]]:
     """
     Load all per-cycle run_context JSON files from the campaign results directory.
@@ -189,17 +193,17 @@ def _load_run_contexts(results_dir: Path) -> list[dict[str, Any]]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             data["_filename"] = path.name
-            stem = path.stem   # e.g. "NGL_sweep__30_cycle02_run_context"
+            stem = path.stem  # e.g. "NGL_sweep__30_cycle02_run_context"
             stem = stem.removesuffix("_run_context")
             split_at = stem.rfind("_cycle")
             if split_at != -1:
-                data["_config_id"]    = stem[:split_at]
+                data["_config_id"] = stem[:split_at]
                 try:
-                    data["_cycle_number"] = int(stem[split_at + 6:])
+                    data["_cycle_number"] = int(stem[split_at + 6 :])
                 except ValueError:
                     data["_cycle_number"] = None
             else:
-                data["_config_id"]    = stem
+                data["_config_id"] = stem
                 data["_cycle_number"] = None
             contexts.append(data)
         except Exception as exc:
@@ -231,7 +235,7 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     for ctx in contexts:
         cid = ctx.get("_config_id")
         assess = ctx.get("assessment") or {}
-        conf   = ctx.get("confidence") or {}
+        conf = ctx.get("confidence") or {}
 
         q = assess.get("environment_quality") or "unknown"
         quality_counts[q] = quality_counts.get(q, 0) + 1
@@ -245,7 +249,9 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
         if cid is not None:
             if cid not in config_confidence_counts:
                 config_confidence_counts[cid] = {}
-            config_confidence_counts[cid][ac] = config_confidence_counts[cid].get(ac, 0) + 1
+            config_confidence_counts[cid][ac] = (
+                config_confidence_counts[cid].get(ac, 0) + 1
+            )
 
         for cand in assess.get("interference_candidates") or []:
             name = cand.get("name") or cand.get("category")
@@ -302,30 +308,32 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     avg_coverage = sum(coverage_vals) / len(coverage_vals) if coverage_vals else None
 
     return {
-        "available":               True,
-        "total_cycles":            total,
-        "quality_counts":          quality_counts,
-        "n_clean":                 n_clean,
-        "n_noisy":                 n_noisy,
-        "n_distorted":             n_distorted,
-        "clean_pct":               n_clean / total * 100 if total else 0,
-        "top_interferers":         top_interferers[:5],
-        "top_reasons":             top_reasons[:8],
-        "completeness_counts":     completeness_counts,
-        "confidence_counts":       confidence_counts,
-        "config_confidences":      config_confidences,
-        "overall_confidence":      overall_confidence,
+        "available": True,
+        "total_cycles": total,
+        "quality_counts": quality_counts,
+        "n_clean": n_clean,
+        "n_noisy": n_noisy,
+        "n_distorted": n_distorted,
+        "clean_pct": n_clean / total * 100 if total else 0,
+        "top_interferers": top_interferers[:5],
+        "top_reasons": top_reasons[:8],
+        "completeness_counts": completeness_counts,
+        "confidence_counts": confidence_counts,
+        "config_confidences": config_confidences,
+        "overall_confidence": overall_confidence,
         "avg_capability_coverage": avg_coverage,
-        "failed_probe_names":      sorted(failed_probe_names),
+        "failed_probe_names": sorted(failed_probe_names),
         "missing_capability_names": sorted(missing_cap_names),
         "inapplicable_capability_names": sorted(inapplicable_cap_names),
-        "top_interferers":         top_interferers[:5],
-        "top_reasons":             top_reasons[:8],
+        "top_interferers": top_interferers[:5],
+        "top_reasons": top_reasons[:8],
     }
+
 
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
+
 
 def _section_header(
     campaign_id: str,
@@ -344,13 +352,13 @@ def _section_header(
 
     if run_plan is not None:
         mode_label = getattr(run_plan, "mode_label", run_plan.run_mode.title())
-        mode_desc  = getattr(run_plan, "mode_description", "")
+        mode_desc = getattr(run_plan, "mode_description", "")
         lines.append(f"> **Mode:** {mode_label} — {mode_desc}\n")
 
     lines.append("## Campaign Identity\n> Type: Context\n")
 
-    machine  = baseline.get("machine", {})
-    model_bl = baseline.get("model",   {})
+    machine = baseline.get("machine", {})
+    model_bl = baseline.get("model", {})
 
     lines.append("| Field | Value |")
     lines.append("|-------|-------|")
@@ -375,12 +383,17 @@ def _section_header(
     lines.append(f"| OS | {snap.get('os_version', machine.get('os', '—'))} |")
     lines.append(f"| NVIDIA Driver | {snap.get('nvidia_driver', '—')} |")
     try:
-        from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
+        from src.execution_environment import (
+            execution_environment_summary_lines,  # noqa: PLC0415
+        )
+
         lines.extend(execution_environment_summary_lines(snap))
     except Exception:
         lines.append("| Execution support tier | `unknown` |")
     try:
-        from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
+        from src.telemetry_provider import (
+            provider_evidence_summary_lines,  # noqa: PLC0415
+        )
 
         lines.extend(provider_evidence_summary_lines(snap))
     except Exception:
@@ -392,7 +405,9 @@ def _section_header(
         lines.append(f"| Baseline identity source | `{baseline_source}` |")
     if trust_identity is not None:
         qid = getattr(trust_identity, "quantmap", {}) or {}
-        qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
+        qver = qid.get("quantmap_version") or trust_identity.sources.get(
+            "quantmap", "legacy_unrecorded"
+        )
         qcommit = qid.get("git_commit") or "unknown"
         lines.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     lines.append(f"| Power plan | {snap.get('power_plan', '—')} |")
@@ -400,7 +415,7 @@ def _section_header(
     if len(build_commit) > 16:
         build_commit = f"`{build_commit[:16]}...`"
     lines.append(f"| Build commit | {build_commit} |")
-    campaign_sha = (camp.get('campaign_sha256') or '—')
+    campaign_sha = camp.get("campaign_sha256") or "—"
     lines.append(f"| Campaign SHA256 | `{campaign_sha[:16]}...` |")
     lines.append("")
 
@@ -420,27 +435,26 @@ def _section_methodology(
 ) -> list[str]:
     lines: list[str] = []
     from src.trust_identity import methodology_source_label  # noqa: PLC0415
+
     methodology = methodology or {}
     methodology_label = methodology_source_label(methodology)
-    
+
     lines.append("> [!NOTE]")
     lines.append("> **QuantMap Governance Methodology v1.0 (Stable)**")
     lines.append("> Methodology: v1.0 (Winsorized Means + LCB + Absolute Anchors)")
     lines.append("")
-    
+
     lines.append(f"## Test Protocol\n> Type: {_L_METH}\n")
 
     lab_cfg = baseline.get("lab", {})
-    cycles  = (
-        getattr(run_plan, "cycles_per_config", None)
-        or lab_cfg.get("cycles_per_config", 5)
+    cycles = getattr(run_plan, "cycles_per_config", None) or lab_cfg.get(
+        "cycles_per_config", 5
     )
-    reqs = (
-        getattr(run_plan, "requests_per_cycle", None)
-        or lab_cfg.get("requests_per_cycle", 6)
+    reqs = getattr(run_plan, "requests_per_cycle", None) or lab_cfg.get(
+        "requests_per_cycle", 6
     )
     warm_per_cycle = reqs - 1
-    total_warm     = cycles * warm_per_cycle
+    total_warm = cycles * warm_per_cycle
 
     lines.append("### Protocol Parameters\n")
     lines.append("| Parameter | Value |")
@@ -450,13 +464,15 @@ def _section_methodology(
     lines.append(f"| Requests per cycle | {reqs} (1 cold + {warm_per_cycle} warm) |")
     lines.append(f"| Warm samples per config | {total_warm} |")
     if run_plan is not None:
-        all_vals  = getattr(run_plan, "all_campaign_values", [])
-        sel_vals  = getattr(run_plan, "selected_values",     [])
-        untested  = getattr(run_plan, "untested_values",     [])
-        coverage  = getattr(run_plan, "coverage_fraction",   1.0)
+        all_vals = getattr(run_plan, "all_campaign_values", [])
+        sel_vals = getattr(run_plan, "selected_values", [])
+        untested = getattr(run_plan, "untested_values", [])
+        coverage = getattr(run_plan, "coverage_fraction", 1.0)
         tested_str = ", ".join(str(v) for v in sel_vals)
         lines.append(f"| Tested values | {tested_str} |")
-        lines.append(f"| Coverage | {len(sel_vals)} of {len(all_vals)} values ({coverage:.0%}) |")
+        lines.append(
+            f"| Coverage | {len(sel_vals)} of {len(all_vals)} values ({coverage:.0%}) |"
+        )
         if untested:
             lines.append(f"| Untested values | {', '.join(str(v) for v in untested)} |")
     lines.append("")
@@ -467,21 +483,31 @@ def _section_methodology(
         "_All thresholds below were fixed prior to data collection based on the Experiment Profile. "
         "Configs failing any filter are excluded from ranking entirely._\n"
     )
-    ef = (
-        scores_result.get("effective_filters")
-        or methodology.get("gates")
-        or {}
-    )
+    ef = scores_result.get("effective_filters") or methodology.get("gates") or {}
 
     lines.append("| Filter | Threshold | Rationale |")
     lines.append("|--------|-----------|-----------|")
-    lines.append(f"| Max coefficient of variation | ≤ {ef.get('max_cv', 0.05):.0%} | Inconsistent results are not rankable |")
-    lines.append(f"| Max thermal throttle events | ≤ {ef.get('max_thermal_events', 0)} | Throttled configs are not at their rated performance |")
-    lines.append(f"| Max statistical outliers (symmetric) | ≤ {ef.get('max_outliers', 3)} | Excessive outliers indicate instability |")
-    lines.append(f"| Max warm TTFT P90 | ≤ {ef.get('max_warm_ttft_p90_ms', 500):.0f} ms | Hard latency ceiling for interactive use |")
-    lines.append(f"| Min success rate | ≥ {ef.get('min_success_rate', 0.90):.0%} | Unreliable server responses invalidate results |")
-    lines.append(f"| Min warm TG P10 | ≥ {ef.get('min_warm_tg_p10', 7.0):.1f} t/s | Floor below which throughput is unusable |")
-    lines.append(f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 10)} | Minimum for statistical validity |")
+    lines.append(
+        f"| Max coefficient of variation | ≤ {ef.get('max_cv', 0.05):.0%} | Inconsistent results are not rankable |"
+    )
+    lines.append(
+        f"| Max thermal throttle events | ≤ {ef.get('max_thermal_events', 0)} | Throttled configs are not at their rated performance |"
+    )
+    lines.append(
+        f"| Max statistical outliers (symmetric) | ≤ {ef.get('max_outliers', 3)} | Excessive outliers indicate instability |"
+    )
+    lines.append(
+        f"| Max warm TTFT P90 | ≤ {ef.get('max_warm_ttft_p90_ms', 500):.0f} ms | Hard latency ceiling for interactive use |"
+    )
+    lines.append(
+        f"| Min success rate | ≥ {ef.get('min_success_rate', 0.90):.0%} | Unreliable server responses invalidate results |"
+    )
+    lines.append(
+        f"| Min warm TG P10 | ≥ {ef.get('min_warm_tg_p10', 7.0):.1f} t/s | Floor below which throughput is unusable |"
+    )
+    lines.append(
+        f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 10)} | Minimum for statistical validity |"
+    )
     lines.append("")
     # Scoring Profile
     profile_obj = scores_result.get("scoring_profile")
@@ -495,7 +521,9 @@ def _section_methodology(
         or getattr(profile_obj, "version", None)
         or "unknown"
     )
-    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "unknown")
+    profile_family = getattr(
+        getattr(profile_obj, "experiment_family", None), "value", "unknown"
+    )
     lines.append(
         f"**Experiment Profile:** `{profile_name}` v{profile_version} "
         f"({profile_family})  \n"
@@ -509,29 +537,37 @@ def _section_methodology(
         "The composite score represents the **Lower Confidence Bound (LCB)**, penalizing configs "
         "with high performance variance across cycles. Higher LCB = more stable performance._\n"
     )
-    
+
     # LCB Method Disclosure
     lcb_method = "unknown"
     scores_df = scores_result.get("scores_df")
     if scores_df is not None and not scores_df.empty:
         lcb_method = scores_df["lcb_method"].iloc[0]
-    
+
     lines.append(f"> **LCB Computation Method:** {lcb_method}\n")
-    
-    sw = (
-        methodology.get("weights")
-        or getattr(profile_obj, "weights", {})
-        or {}
-    )
+
+    sw = methodology.get("weights") or getattr(profile_obj, "weights", {}) or {}
 
     lines.append("| Metric | Weight | Direction |")
     lines.append("|--------|-------:|-----------|")
-    lines.append(f"| Throughput median (TG) | {sw.get('warm_tg_median', 0.35):.0%} | higher is better |")
-    lines.append(f"| Throughput P10 (consistency floor) | {sw.get('warm_tg_p10', 0.20):.0%} | higher is better |")
-    lines.append(f"| Warm TTFT median | {sw.get('warm_ttft_median_ms', 0.20):.0%} | lower is better |")
-    lines.append(f"| Warm TTFT P90 (worst-case latency) | {sw.get('warm_ttft_p90_ms', 0.10):.0%} | lower is better |")
-    lines.append(f"| Cold TTFT (server startup latency) | {sw.get('cold_ttft_median_ms', 0.10):.0%} | lower is better |")
-    lines.append(f"| Prompt processing (PP) | {sw.get('pp_median', 0.05):.0%} | higher is better |")
+    lines.append(
+        f"| Throughput median (TG) | {sw.get('warm_tg_median', 0.35):.0%} | higher is better |"
+    )
+    lines.append(
+        f"| Throughput P10 (consistency floor) | {sw.get('warm_tg_p10', 0.20):.0%} | higher is better |"
+    )
+    lines.append(
+        f"| Warm TTFT median | {sw.get('warm_ttft_median_ms', 0.20):.0%} | lower is better |"
+    )
+    lines.append(
+        f"| Warm TTFT P90 (worst-case latency) | {sw.get('warm_ttft_p90_ms', 0.10):.0%} | lower is better |"
+    )
+    lines.append(
+        f"| Cold TTFT (server startup latency) | {sw.get('cold_ttft_median_ms', 0.10):.0%} | lower is better |"
+    )
+    lines.append(
+        f"| Prompt processing (PP) | {sw.get('pp_median', 0.05):.0%} | higher is better |"
+    )
     lines.append("")
 
     # Phase 4: Normalization Methodology (Anchor Governance)
@@ -540,8 +576,10 @@ def _section_methodology(
         "_QuantMap Governance Methodology v1.0 follows absolute fixed-reference normalization to ensure cross-campaign "
         "comparability. Scores are measured against governed hardware or baseline anchors._\n"
     )
-    
-    governance_snapshot = methodology.get("anchors") or scores_result.get("governance_methodology")
+
+    governance_snapshot = methodology.get("anchors") or scores_result.get(
+        "governance_methodology"
+    )
     if governance_snapshot:
         lines.append("| Metric | Anchor Value | Source | Provenance/Version |")
         lines.append("|--------|-------------:|:-------|:-------------------|")
@@ -551,28 +589,32 @@ def _section_methodology(
             val = ref.get("value")
             source = ref.get("source", "unknown")
             provenance = ref.get("provenance", "N/A")
-            
+
             val_str = f"{val:.1f}" if val is not None else "BATCH-BEST"
-            
+
             # Format source labels for clarity
             source_label = source
             if source == "baseline_yaml":
                 source_label = "**BASELINE OVERRIDE**"
             elif source == "best-in-batch":
                 source_label = "FALLBACK (Cohort-Relative) [!CAUTION]"
-            
-            lines.append(f"| {m_name.replace('_', ' ').title()} | {val_str} | {source_label} | {provenance} |")
+
+            lines.append(
+                f"| {m_name.replace('_', ' ').title()} | {val_str} | {source_label} | {provenance} |"
+            )
         lines.append("")
     else:
         lines.append("> [!WARNING]")
-        lines.append("> **Legacy Metadata:** No governance methodology snapshot found. Scores may be cohort-relative.\n")
+        lines.append(
+            "> **Legacy Metadata:** No governance methodology snapshot found. Scores may be cohort-relative.\n"
+        )
 
     # Mode limitations
     limitations: list[str] = []
     if run_plan is not None:
-        is_quick    = getattr(run_plan, "is_quick",    False)
+        is_quick = getattr(run_plan, "is_quick", False)
         is_standard = getattr(run_plan, "is_standard", False)
-        is_custom   = getattr(run_plan, "is_custom",   False)
+        is_custom = getattr(run_plan, "is_custom", False)
 
         if is_quick:
             limitations.append(
@@ -588,10 +630,10 @@ def _section_methodology(
                 "the highest-confidence ranking."
             )
         elif is_custom:
-            sel_n   = len(getattr(run_plan, "selected_values", []))
+            sel_n = len(getattr(run_plan, "selected_values", []))
             total_n = len(getattr(run_plan, "all_campaign_values", []))
             limitations.append(
-                f"Custom run: {sel_n} of {total_n} campaign values tested ({sel_n/total_n:.0%} coverage). "
+                f"Custom run: {sel_n} of {total_n} campaign values tested ({sel_n / total_n:.0%} coverage). "
                 "Rankings reflect only the tested subset. "
                 "Untested values may produce different performance profiles."
             )
@@ -602,32 +644,36 @@ def _section_methodology(
         "The scoring formula above is the sole basis for composite ranking. "
         "(Basis: filter table and scoring weight table above)"
     ]
-    lines.extend(_section_end_block("METHODOLOGY", {"IMPLICATIONS": implications, "LIMITATIONS": limitations}))
+    lines.extend(
+        _section_end_block(
+            "METHODOLOGY", {"IMPLICATIONS": implications, "LIMITATIONS": limitations}
+        )
+    )
 
     return lines
 
 
 def _section_primary_results(
-    scores_result:      dict[str, Any],
-    stats:              dict[str, dict[str, Any]],
+    scores_result: dict[str, Any],
+    stats: dict[str, dict[str, Any]],
     config_variable_map: dict[str, Any],
-    variable_name:      str,
-    run_plan:           Any,
-    env_agg:            dict[str, Any],
+    variable_name: str,
+    run_plan: Any,
+    env_agg: dict[str, Any],
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Primary Results\n> Type: Data + Interpretation\n")
 
-    winner          = scores_result.get("winner")
-    highest_tg      = scores_result.get("highest_tg")
+    winner = scores_result.get("winner")
+    highest_tg = scores_result.get("highest_tg")
     pareto_frontier = scores_result.get("pareto_frontier", [])
-    passing         = scores_result.get("passing",         {})
-    eliminated      = scores_result.get("eliminated",      {})
-    unrankable      = scores_result.get("unrankable",      {})
-    scores_df       = scores_result.get("scores_df")
+    passing = scores_result.get("passing", {})
+    eliminated = scores_result.get("eliminated", {})
+    unrankable = scores_result.get("unrankable", {})
+    scores_df = scores_result.get("scores_df")
 
     n_passing = len(passing)
-    n_total   = len(stats)
+    n_total = len(stats)
 
     def cfg_s(cid: str) -> dict[str, Any]:
         return stats.get(cid, {})
@@ -646,15 +692,19 @@ def _section_primary_results(
         "differences exceed the observed run-to-run variability.\n"
     )
 
-    lines.append("| View | Config | TG Median (t/s) | TTFT Median (ms) | Composite Score | Basis |")
-    lines.append("|------|--------|----------------:|-----------------:|----------------:|-------|")
+    lines.append(
+        "| View | Config | TG Median (t/s) | TTFT Median (ms) | Composite Score | Basis |"
+    )
+    lines.append(
+        "|------|--------|----------------:|-----------------:|----------------:|-------|"
+    )
 
     # Score winner row
     if winner:
         var_val = config_variable_map.get(winner, winner)
-        tg   = cfg_s(winner).get("warm_tg_median")
+        tg = cfg_s(winner).get("warm_tg_median")
         ttft = cfg_s(winner).get("warm_ttft_median_ms")
-        sc   = score_field(winner, "composite_score")
+        sc = score_field(winner, "composite_score")
         lines.append(
             f"| Score winner | `{winner}` ({variable_name}={var_val}) "
             f"| {_fmt(tg, '.2f')} | {_fmt(ttft, '.0f')} | {_fmt(sc, '.3f')} "
@@ -670,19 +720,19 @@ def _section_primary_results(
 
     # Highest TG row
     if highest_tg:
-        is_unrank = (highest_tg in unrankable)
+        is_unrank = highest_tg in unrankable
         unrank_note = " ⚠ **Unrankable (Evidence Only)**" if is_unrank else ""
-        
+
         var_val = config_variable_map.get(highest_tg, highest_tg)
-        tg   = cfg_s(highest_tg).get("warm_tg_median")
+        tg = cfg_s(highest_tg).get("warm_tg_median")
         ttft = cfg_s(highest_tg).get("warm_ttft_median_ms")
-        sc   = score_field(highest_tg, "composite_score")
-        
+        sc = score_field(highest_tg, "composite_score")
+
         if highest_tg == winner:
             lines.append(
-                f"| Highest raw TG | _(same as score winner)_ | — | — | — "
-                f"| TG leader and score leader are the same config "
-                f"(based on TG Median and Composite Score columns) |"
+                "| Highest raw TG | _(same as score winner)_ | — | — | — "
+                "| TG leader and score leader are the same config "
+                "(based on TG Median and Composite Score columns) |"
             )
         else:
             lines.append(
@@ -696,22 +746,25 @@ def _section_primary_results(
 
     # Pareto row
     if pareto_frontier:
+
         def _brand(cid: str) -> str:
             if cid in unrankable:
                 return f"`{cid}` (⚠)"
             return f"`{cid}`"
-            
+
         frontier_display = ", ".join(_brand(c) for c in pareto_frontier[:4])
         if len(pareto_frontier) > 4:
             frontier_display += f" +{len(pareto_frontier) - 4} more"
-        
+
         lines.append(
             f"| Pareto frontier | {frontier_display} | — | — | — "
             "| Not dominated on both TG median and TTFT median simultaneously "
             "(based on TG Median and TTFT Median columns). (⚠) = Unrankable evidence |"
         )
     else:
-        lines.append("| Pareto frontier | — | — | — | — | No non-dominated configs identified |")
+        lines.append(
+            "| Pareto frontier | — | — | — | — | No non-dominated configs identified |"
+        )
 
     lines.append("")
 
@@ -723,9 +776,9 @@ def _section_primary_results(
     )
 
     # Sort: passing by rank, then eliminated
-    passing_rows:  list[tuple[int,   str]] = []
+    passing_rows: list[tuple[int, str]] = []
     unrankable_rows: list[tuple[str, str]] = []
-    elim_rows:     list[tuple[str,   str]] = []
+    elim_rows: list[tuple[str, str]] = []
 
     unrankable = scores_result.get("unrankable", {})
 
@@ -751,19 +804,19 @@ def _section_primary_results(
     )
 
     def _row(cid: str, status_str: str) -> str:
-        var_val  = config_variable_map.get(cid, "—")
-        s        = cfg_s(cid)
-        tg       = s.get("warm_tg_median")
-        ttft     = s.get("warm_ttft_median_ms")
-        cv_frac  = s.get("warm_tg_cv")
-        n_warm   = s.get("valid_warm_request_count", 0)
+        var_val = config_variable_map.get(cid, "—")
+        s = cfg_s(cid)
+        tg = s.get("warm_tg_median")
+        ttft = s.get("warm_ttft_median_ms")
+        cv_frac = s.get("warm_tg_cv")
+        n_warm = s.get("valid_warm_request_count", 0)
         if n_warm < 3 or cv_frac is None:
             cv_str = "N/A (N<3)"
         else:
             cv_str = f"{cv_frac * 100:.1f}%"
-        thermal  = s.get("thermal_events")
+        thermal = s.get("thermal_events")
         thermal_disp = str(thermal) if thermal is not None else "—"
-        rank     = score_field(cid, "rank_overall")
+        rank = score_field(cid, "rank_overall")
 
         rank_str = _fmt(rank, "d") if rank is not None else "—"
         badge = ""
@@ -788,16 +841,12 @@ def _section_primary_results(
         lines.append(_row(cid, "✓ passing"))
 
     if unrankable_rows:
-        lines.append(
-            "| — | — | — | — | — | — | — | _unrankable configs below_ |"
-        )
+        lines.append("| — | — | — | — | — | — | — | _unrankable configs below_ |")
         for missing, cid in unrankable_rows:
             lines.append(_row(cid, f"⚠ unrankable: missing {missing}"))
 
     if elim_rows:
-        lines.append(
-            "| — | — | — | — | — | — | — | _eliminated configs below_ |"
-        )
+        lines.append("| — | — | — | — | — | — | — | _eliminated configs below_ |")
         for reason, cid in elim_rows:
             short_reason = reason[:45] + "..." if len(reason) > 45 else reason
             lines.append(_row(cid, f"eliminated: {short_reason}"))
@@ -810,33 +859,37 @@ def _section_primary_results(
 
     # ── Section-end block ────────────────────────────────────────────────────
     interp: list[str] = []
-    lims:   list[str] = []
+    lims: list[str] = []
 
     mode_degrade = False
     if run_plan is not None and getattr(run_plan, "is_quick", False):
         mode_degrade = True
 
     if winner:
-        var_val  = config_variable_map.get(winner, winner)
-        tg_w     = cfg_s(winner).get("warm_tg_median")
-        cv_w     = cfg_s(winner).get("warm_tg_cv")
-        n_w      = cfg_s(winner).get("valid_warm_request_count", 0)
-        ttft_w   = cfg_s(winner).get("warm_ttft_median_ms")
-        sc_w     = score_field(winner, "composite_score")
-        cv_str   = f"{cv_w*100:.1f}%" if (cv_w is not None and n_w >= 3) else "N/A (sparse data)"
+        var_val = config_variable_map.get(winner, winner)
+        tg_w = cfg_s(winner).get("warm_tg_median")
+        cv_w = cfg_s(winner).get("warm_tg_cv")
+        n_w = cfg_s(winner).get("valid_warm_request_count", 0)
+        ttft_w = cfg_s(winner).get("warm_ttft_median_ms")
+        sc_w = score_field(winner, "composite_score")
+        cv_str = (
+            f"{cv_w * 100:.1f}%"
+            if (cv_w is not None and n_w >= 3)
+            else "N/A (sparse data)"
+        )
 
         # Confidence qualifier depends on mode AND config-specific environment
         winner_env_conf = "medium"
         if env_agg.get("available"):
             config_confidences = env_agg.get("config_confidences", {})
             winner_env_conf = config_confidences.get(winner, "medium")
-            
+
         if run_plan is not None:
             if getattr(run_plan, "is_quick", False):
                 winner_env_conf = "low"
             elif getattr(run_plan, "is_standard", False) and winner_env_conf == "high":
                 winner_env_conf = "medium"
-                
+
         qualifier = _confidence_qualifier(winner_env_conf)
 
         interp.append(
@@ -849,11 +902,15 @@ def _section_primary_results(
 
     if highest_tg and highest_tg != winner:
         var_val_h = config_variable_map.get(highest_tg, highest_tg)
-        tg_h      = cfg_s(highest_tg).get("warm_tg_median")
-        tg_w      = cfg_s(winner).get("warm_tg_median") if winner else None
-        cv_h      = cfg_s(highest_tg).get("warm_tg_cv")
-        n_h       = cfg_s(highest_tg).get("valid_warm_request_count", 0)
-        cv_str    = f"{cv_h*100:.1f}%" if (cv_h is not None and n_h >= 3) else "N/A (sparse data)"
+        tg_h = cfg_s(highest_tg).get("warm_tg_median")
+        tg_w = cfg_s(winner).get("warm_tg_median") if winner else None
+        cv_h = cfg_s(highest_tg).get("warm_tg_cv")
+        n_h = cfg_s(highest_tg).get("valid_warm_request_count", 0)
+        cv_str = (
+            f"{cv_h * 100:.1f}%"
+            if (cv_h is not None and n_h >= 3)
+            else "N/A (sparse data)"
+        )
         diff_note = ""
         if tg_w is not None and tg_h is not None:
             diff_pct = abs(tg_h - tg_w) / tg_w * 100 if tg_w else 0
@@ -861,11 +918,15 @@ def _section_primary_results(
                 diff_note = f" ({diff_pct:.1f}% higher raw TG than score winner)"
             else:
                 diff_note = f" ({diff_pct:.1f}% lower raw TG than score winner)"
-        
+
         tradeoff_text = (
-            f"If this throughput difference exceeds the observed run-to-run variability (CV), "
-            f"it may represent a throughput/score tradeoff."
-        ) if n_h >= 3 else "CV is mathematically unreliable at this sample size, preventing strict stability comparisons."
+            (
+                "If this throughput difference exceeds the observed run-to-run variability (CV), "
+                "it may represent a throughput/score tradeoff."
+            )
+            if n_h >= 3
+            else "CV is mathematically unreliable at this sample size, preventing strict stability comparisons."
+        )
 
         interp.append(
             f"`{highest_tg}` ({variable_name}={var_val_h}) showed the highest raw throughput "
@@ -902,25 +963,32 @@ def _section_primary_results(
             "development-grade result. Running Full mode (5 cycles per config) would provide "
             "the highest-confidence ranking."
         )
-    if env_agg.get("available") and env_agg.get("n_noisy", 0) + env_agg.get("n_distorted", 0) > 0:
+    if (
+        env_agg.get("available")
+        and env_agg.get("n_noisy", 0) + env_agg.get("n_distorted", 0) > 0
+    ):
         n_affected = env_agg["n_noisy"] + env_agg["n_distorted"]
-        total_cyc  = env_agg["total_cycles"]
+        total_cyc = env_agg["total_cycles"]
         lims.append(
             f"{n_affected} of {total_cyc} cycles ran in noisy or distorted environment conditions. "
             "Performance measurements from those cycles may reflect some background interference. "
             "See the Environment Quality section for detail."
         )
 
-    lines.extend(_section_end_block("PRIMARY_RESULTS_SUMMARY", {"INTERPRETATION": interp, "LIMITATIONS": lims}))
+    lines.extend(
+        _section_end_block(
+            "PRIMARY_RESULTS_SUMMARY", {"INTERPRETATION": interp, "LIMITATIONS": lims}
+        )
+    )
 
     return lines
 
 
 def _section_variability(
-    scores_result:       dict[str, Any],
-    stats:               dict[str, dict[str, Any]],
+    scores_result: dict[str, Any],
+    stats: dict[str, dict[str, Any]],
     config_variable_map: dict[str, Any],
-    variable_name:       str,
+    variable_name: str,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Variability & Reliability\n")
@@ -930,7 +998,7 @@ def _section_variability(
     )
 
     eliminated = scores_result.get("eliminated", {})
-    scores_df  = scores_result.get("scores_df")
+    scores_df = scores_result.get("scores_df")
 
     def score_field(cid: str, field: str) -> Any:
         if scores_df is None or cid not in scores_df.index:
@@ -956,18 +1024,20 @@ def _section_variability(
     for _, cid in rows:
         s = stats.get(cid, {})
         var_val = config_variable_map.get(cid, "—")
-        tg      = s.get("warm_tg_median")
-        p10     = s.get("warm_tg_p10")
-        p90     = s.get("warm_tg_p90")
-        cv      = s.get("warm_tg_cv")
+        tg = s.get("warm_tg_median")
+        p10 = s.get("warm_tg_p10")
+        p90 = s.get("warm_tg_p90")
+        cv = s.get("warm_tg_cv")
         outliers = s.get("outlier_count")
-        thermal  = s.get("thermal_events")
+        thermal = s.get("thermal_events")
         outliers_disp = str(outliers) if outliers is not None else "—"
-        thermal_disp  = str(thermal)  if thermal  is not None else "—"
-        sr       = s.get("success_rate")
+        thermal_disp = str(thermal) if thermal is not None else "—"
+        sr = s.get("success_rate")
         elim_marker = " ✗" if cid in eliminated else ""
-        n_warm  = s.get("valid_warm_request_count", 0)
-        cv_disp = f"{cv * 100:.1f}%" if (cv is not None and n_warm >= 3) else "N/A (N<3)"
+        n_warm = s.get("valid_warm_request_count", 0)
+        cv_disp = (
+            f"{cv * 100:.1f}%" if (cv is not None and n_warm >= 3) else "N/A (N<3)"
+        )
 
         lines.append(
             f"| `{cid}`{elim_marker} | {var_val} "
@@ -990,7 +1060,7 @@ def _section_variability(
     passing_cv = [
         (cid, stats[cid]["warm_tg_cv"])
         for cid in stats
-        if cid not in eliminated 
+        if cid not in eliminated
         and stats[cid].get("warm_tg_cv") is not None
         and stats[cid].get("valid_warm_request_count", 0) >= 3
     ]
@@ -1003,9 +1073,9 @@ def _section_variability(
         if most_stable[0] != least_stable[0]:
             interp.append(
                 f"Among passing configs, `{most_stable[0]}` ({variable_name}={ms_val}) showed the "
-                f"lowest run-to-run variability (CV {most_stable[1]*100:.1f}%) and "
+                f"lowest run-to-run variability (CV {most_stable[1] * 100:.1f}%) and "
                 f"`{least_stable[0]}` ({variable_name}={ls_val}) the highest "
-                f"(CV {least_stable[1]*100:.1f}%). "
+                f"(CV {least_stable[1] * 100:.1f}%). "
                 f"(Basis: CV column, valid warm speed_short requests)"
             )
 
@@ -1021,15 +1091,17 @@ def _section_variability(
             "(Basis: thermal_events column)"
         )
 
-    lines.extend(_section_end_block("PRIMARY_RESULTS_VARIABILITY", {"INTERPRETATION": interp}))
+    lines.extend(
+        _section_end_block("PRIMARY_RESULTS_VARIABILITY", {"INTERPRETATION": interp})
+    )
 
     return lines
 
 
 def _section_environment(
-    contexts:   list[dict[str, Any]],
-    env_agg:    dict[str, Any],
-    stats:      dict[str, dict[str, Any]],
+    contexts: list[dict[str, Any]],
+    env_agg: dict[str, Any],
+    stats: dict[str, dict[str, Any]],
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Environment Quality\n> Type: Data + Interpretation\n")
@@ -1042,14 +1114,14 @@ def _section_environment(
         )
         return lines
 
-    total_cyc      = env_agg["total_cycles"]
-    n_clean        = env_agg["n_clean"]
-    n_noisy        = env_agg["n_noisy"]
-    n_distorted    = env_agg["n_distorted"]
-    clean_pct      = env_agg["clean_pct"]
-    avg_cov        = env_agg.get("avg_capability_coverage")
-    failed_names   = env_agg.get("failed_probe_names", [])
-    missing_names  = env_agg.get("missing_capability_names", [])
+    total_cyc = env_agg["total_cycles"]
+    n_clean = env_agg["n_clean"]
+    n_noisy = env_agg["n_noisy"]
+    n_distorted = env_agg["n_distorted"]
+    clean_pct = env_agg["clean_pct"]
+    avg_cov = env_agg.get("avg_capability_coverage")
+    failed_names = env_agg.get("failed_probe_names", [])
+    missing_names = env_agg.get("missing_capability_names", [])
     env_conf_overall = env_agg.get("overall_confidence", "medium")
 
     # Trust guidance scales with confidence and failure presence
@@ -1091,15 +1163,19 @@ def _section_environment(
     lines.append("|--------|-------|")
     lines.append(f"| Cycles with run_context data | {total_cyc} |")
     lines.append(f"| Clean / mostly clean cycles | {n_clean} ({clean_pct:.0f}%) |")
-    lines.append(f"| Noisy cycles | {n_noisy} ({n_noisy/total_cyc*100:.0f}%) |")
-    lines.append(f"| Distorted cycles | {n_distorted} ({n_distorted/total_cyc*100:.0f}%) |")
+    lines.append(f"| Noisy cycles | {n_noisy} ({n_noisy / total_cyc * 100:.0f}%) |")
+    lines.append(
+        f"| Distorted cycles | {n_distorted} ({n_distorted / total_cyc * 100:.0f}%) |"
+    )
     lines.append(f"| Overall assessment confidence | {env_conf_overall.upper()} |")
     if avg_cov is not None:
         lines.append(f"| Average capability coverage | {avg_cov:.0%} |")
     lines.append("")
 
     if env_agg.get("top_interferers"):
-        lines.append("**Recurring background interference (by frequency across cycles):**\n")
+        lines.append(
+            "**Recurring background interference (by frequency across cycles):**\n"
+        )
         lines.append("| Process / Source | Cycles Appeared |")
         lines.append("|------------------|----------------:|")
         for name, count in env_agg["top_interferers"]:
@@ -1115,28 +1191,36 @@ def _section_environment(
         "|--------|------:|---------|:-----------------:|:----------:|---------:|---------:|---------|"
     )
 
-    for ctx in sorted(contexts, key=lambda c: (c.get("_config_id", ""), c.get("_cycle_number", 0) or 0)):
-        cid    = ctx.get("_config_id", "—")
-        cycle  = ctx.get("_cycle_number")
+    for ctx in sorted(
+        contexts,
+        key=lambda c: (c.get("_config_id", ""), c.get("_cycle_number", 0) or 0),
+    ):
+        cid = ctx.get("_config_id", "—")
+        cycle = ctx.get("_cycle_number")
         assess = ctx.get("assessment") or {}
-        conf   = ctx.get("confidence") or {}
-        summ   = ctx.get("summary")    or {}
-        st     = summ.get("stats")     or {}
+        conf = ctx.get("confidence") or {}
+        summ = ctx.get("summary") or {}
+        st = summ.get("stats") or {}
 
-        quality      = _quality_label(assess.get("environment_quality"))
+        quality = _quality_label(assess.get("environment_quality"))
         completeness = (conf.get("observation_completeness") or "—").upper()
-        confidence   = (conf.get("assessment_confidence")    or "—").upper()
-        avg_cpu      = st.get("avg_cpu_percent")
-        max_cpu      = st.get("max_cpu_percent")
+        confidence = (conf.get("assessment_confidence") or "—").upper()
+        avg_cpu = st.get("avg_cpu_percent")
+        max_cpu = st.get("max_cpu_percent")
 
         # Top reasons (2 most distinctive, skip process_data_present/minimal_warnings)
         _skip_reasons = {
-            "process_data_present", "minimal_warnings", "cpu_metrics_complete",
-            "memory_metrics_complete", "disk_metrics_available", "sampling_window_populated",
+            "process_data_present",
+            "minimal_warnings",
+            "cpu_metrics_complete",
+            "memory_metrics_complete",
+            "disk_metrics_available",
+            "sampling_window_populated",
         }
         reasons = [r for r in (assess.get("reasons") or []) if r not in _skip_reasons]
         conf_reasons = [
-            r for r in (conf.get("confidence_reasons") or [])
+            r
+            for r in (conf.get("confidence_reasons") or [])
             if r not in _skip_reasons
             and not r.startswith("cpu_metrics_complete")
             and not r.startswith("memory_metrics_complete")
@@ -1228,21 +1312,26 @@ def _section_environment(
             "The quality assessment above may have missed signals that could affect the result tier."
         )
 
-    lines.extend(_section_end_block("ENVIRONMENT", {
-        "WARNINGS":     warnings,
-        "IMPLICATIONS": implications,
-        "LIMITATIONS":  limits,
-    }))
+    lines.extend(
+        _section_end_block(
+            "ENVIRONMENT",
+            {
+                "WARNINGS": warnings,
+                "IMPLICATIONS": implications,
+                "LIMITATIONS": limits,
+            },
+        )
+    )
 
     return lines
 
 
 def _section_concerns_and_warnings(
-    env_agg:          dict[str, Any],
-    scores_result:    dict[str, Any] | None,
+    env_agg: dict[str, Any],
+    scores_result: dict[str, Any] | None,
     section_failures: list[tuple[str, str]],
-    contexts:         list[dict[str, Any]],
-    run_plan:         Any,
+    contexts: list[dict[str, Any]],
+    run_plan: Any,
 ) -> list[str]:
     """
     Aggregate all concerns into a single section at the end of the report.
@@ -1251,26 +1340,28 @@ def _section_concerns_and_warnings(
     can triage quickly. Every item cites the source data that triggered it.
     """
     lines: list[str] = []
-    lines.append("## Aggregated Concerns & Warnings\n> Type: Diagnostics + Limitations\n")
+    lines.append(
+        "## Aggregated Concerns & Warnings\n> Type: Diagnostics + Limitations\n"
+    )
     lines.append(
         "_All quality concerns identified during this campaign are consolidated here. "
         "Items are grouped by estimated impact on result reliability. "
         "If no items appear under a severity level, none were identified for this campaign._\n"
     )
 
-    high:     list[str] = []
+    high: list[str] = []
     moderate: list[str] = []
-    low:      list[str] = []
+    low: list[str] = []
 
     # ── Section rendering failures (High — report completeness is compromised) ─
     _label_map = {
-        "methodology":     "[METHODOLOGY] Test Protocol",
+        "methodology": "[METHODOLOGY] Test Protocol",
         "primary_results": "[DATA] Primary Results",
-        "variability":     "[DATA] Variability & Reliability",
-        "environment":     "[DATA] Environment Quality",
-        "appendix_a":      "Appendix A (Full Config Statistics)",
-        "appendix_b":      "Appendix B (Elimination Details)",
-        "appendix_c":      "Appendix C (Production Commands)",
+        "variability": "[DATA] Variability & Reliability",
+        "environment": "[DATA] Environment Quality",
+        "appendix_a": "Appendix A (Full Config Statistics)",
+        "appendix_b": "Appendix B (Elimination Details)",
+        "appendix_c": "Appendix C (Production Commands)",
     }
     for name, err in section_failures:
         label = _label_map.get(name, name)
@@ -1280,7 +1371,9 @@ def _section_concerns_and_warnings(
         )
 
     # ── Probe failures (High — probes expected to work did not) ────────────────
-    failed_names = env_agg.get("failed_probe_names", []) if env_agg.get("available") else []
+    failed_names = (
+        env_agg.get("failed_probe_names", []) if env_agg.get("available") else []
+    )
     if failed_names:
         high.append(
             f"**Probe failures detected:** {', '.join(failed_names)}. "
@@ -1290,8 +1383,8 @@ def _section_concerns_and_warnings(
         )
 
     # ── Distorted environment cycles (High) ────────────────────────────────────
-    n_distorted  = env_agg.get("n_distorted",   0) if env_agg.get("available") else 0
-    total_cyc    = env_agg.get("total_cycles",  1) if env_agg.get("available") else 1
+    n_distorted = env_agg.get("n_distorted", 0) if env_agg.get("available") else 0
+    total_cyc = env_agg.get("total_cycles", 1) if env_agg.get("available") else 1
     if n_distorted > 0:
         high.append(
             f"**Distorted environment: {n_distorted} of {total_cyc} cycle(s).** "
@@ -1327,7 +1420,9 @@ def _section_concerns_and_warnings(
         )
 
     # ── Low capability coverage (Moderate) ────────────────────────────────────
-    avg_cov = env_agg.get("avg_capability_coverage") if env_agg.get("available") else None
+    avg_cov = (
+        env_agg.get("avg_capability_coverage") if env_agg.get("available") else None
+    )
     if avg_cov is not None and avg_cov < 0.70:
         moderate.append(
             f"**Capability coverage below threshold: {avg_cov:.0%} average.** "
@@ -1429,10 +1524,10 @@ def _section_concerns_and_warnings(
 
 
 def _appendix_full_stats(
-    stats:               dict[str, dict[str, Any]],
-    scores_result:       dict[str, Any],
+    stats: dict[str, dict[str, Any]],
+    scores_result: dict[str, Any],
     config_variable_map: dict[str, Any],
-    variable_name:       str,
+    variable_name: str,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Appendix A: Full Configuration Statistics\n")
@@ -1443,7 +1538,7 @@ def _appendix_full_stats(
 
     eliminated = scores_result.get("eliminated", {})
     unrankable = scores_result.get("unrankable", {})
-    scores_df  = scores_result.get("scores_df")
+    scores_df = scores_result.get("scores_df")
 
     def score_field(cid: str, field: str) -> Any:
         if scores_df is None or cid not in scores_df.index:
@@ -1466,11 +1561,11 @@ def _appendix_full_stats(
     )
 
     for _, cid in rows:
-        s       = stats.get(cid, {})
+        s = stats.get(cid, {})
         var_val = config_variable_map.get(cid, "—")
-        sc      = score_field(cid, "composite_score")
-        rank    = score_field(cid, "rank_overall")
-        n_warm  = s.get("valid_warm_request_count", 0)
+        sc = score_field(cid, "composite_score")
+        rank = score_field(cid, "rank_overall")
+        n_warm = s.get("valid_warm_request_count", 0)
 
         elim = ""
         if cid in eliminated:
@@ -1478,22 +1573,24 @@ def _appendix_full_stats(
         elif cid in unrankable:
             elim = "⚠ "
         cv_frac = s.get("warm_tg_cv")
-        cv_disp = f"{cv_frac * 100:.1f}%" if (cv_frac is not None and n_warm >= 3) else "N/A"
-        
+        cv_disp = (
+            f"{cv_frac * 100:.1f}%" if (cv_frac is not None and n_warm >= 3) else "N/A"
+        )
+
         lines.append(
             f"| {elim}`{cid}` | {var_val} "
             f"| {_fmt(s.get('warm_tg_median'), '.2f')} "
-            f"| {_fmt(s.get('warm_tg_p10'),    '.2f')} "
-            f"| {_fmt(s.get('warm_tg_p90'),    '.2f')} "
+            f"| {_fmt(s.get('warm_tg_p10'), '.2f')} "
+            f"| {_fmt(s.get('warm_tg_p90'), '.2f')} "
             f"| {cv_disp} "
-            f"| {_fmt(s.get('warm_ttft_median_ms'),  '.0f')} "
-            f"| {_fmt(s.get('warm_ttft_p90_ms'),     '.0f')} "
-            f"| {_fmt(s.get('cold_ttft_median_ms'),  '.0f')} "
-            f"| {_fmt(s.get('pp_median'),             '.1f')} "
+            f"| {_fmt(s.get('warm_ttft_median_ms'), '.0f')} "
+            f"| {_fmt(s.get('warm_ttft_p90_ms'), '.0f')} "
+            f"| {_fmt(s.get('cold_ttft_median_ms'), '.0f')} "
+            f"| {_fmt(s.get('pp_median'), '.1f')} "
             f"| {str(s.get('outlier_count')) if s.get('outlier_count') is not None else '—'} "
             f"| {str(s.get('thermal_events')) if s.get('thermal_events') is not None else '—'} "
             f"| {str(s.get('valid_warm_request_count')) if s.get('valid_warm_request_count') is not None else '—'} "
-            f"| {_fmt(sc,   '.3f')} "
+            f"| {_fmt(sc, '.3f')} "
             f"| {_fmt(rank, 'd')} |"
         )
 
@@ -1506,9 +1603,9 @@ def _appendix_full_stats(
 
 
 def _appendix_eliminations(
-    scores_result:       dict[str, Any],
+    scores_result: dict[str, Any],
     config_variable_map: dict[str, Any],
-    variable_name:       str,
+    variable_name: str,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Appendix B: Elimination & Forensic Exclusions\n")
@@ -1517,7 +1614,9 @@ def _appendix_eliminations(
     unrankable = scores_result.get("unrankable", {})
 
     if not eliminated and not unrankable:
-        lines.append("_No configs were eliminated or unrankable — all passed the pre-committed filters._\n")
+        lines.append(
+            "_No configs were eliminated or unrankable — all passed the pre-committed filters._\n"
+        )
         return lines
 
     if eliminated:
@@ -1537,8 +1636,12 @@ def _appendix_eliminations(
     # These were previously hidden or mixed with filters.
     collapsed = scores_result.get("collapsed_dimensions", [])
     nan_invalid = scores_result.get("nan_invalid_ids", [])
-    
-    degraded = {cid: s.get("elimination_reason") for cid, s in scores_result.get("stats", {}).items() if s.get("config_status") == "degraded"}
+
+    degraded = {
+        cid: s.get("elimination_reason")
+        for cid, s in scores_result.get("stats", {}).items()
+        if s.get("config_status") == "degraded"
+    }
     high_nan_warns = scores_result.get("high_nan_warnings", [])
 
     if collapsed or high_nan_warns or nan_invalid or degraded:
@@ -1548,7 +1651,7 @@ def _appendix_eliminations(
             "rather than policy filters. These exclusions indicate that the underlying measurements were either "
             "physically impossible to collect (OOM/Degraded) or mathematically invalid for comparison (NaNs).\n"
         )
-        
+
         if collapsed:
             lines.append("#### [WARNING] Sensor Collapse Detected\n")
             lines.append(
@@ -1585,15 +1688,23 @@ def _appendix_eliminations(
             )
             lines.append(f"| Config | {variable_name} | Exclusion Reason | Basis |")
             lines.append("|--------|----------|------------------|-------|")
-            
+
             # Combine for sorting
             all_exclusions: list[tuple[str, str, str]] = []
             for cid in nan_invalid:
-                all_exclusions.append((cid, "composite_nan_exclusion", "Hard NaN Guard (incomplete metric set)"))
+                all_exclusions.append(
+                    (
+                        cid,
+                        "composite_nan_exclusion",
+                        "Hard NaN Guard (incomplete metric set)",
+                    )
+                )
             for cid, reason in degraded.items():
                 # Use the structured reason from the DB
-                all_exclusions.append((cid, "instrumentation_degraded", reason or "degraded"))
-                
+                all_exclusions.append(
+                    (cid, "instrumentation_degraded", reason or "degraded")
+                )
+
             for cid, category, reason in sorted(all_exclusions):
                 var_val = config_variable_map.get(cid, "—")
                 lines.append(f"| `{cid}` | {var_val} | {category} | {reason} |")
@@ -1603,9 +1714,9 @@ def _appendix_eliminations(
 
 
 def _appendix_historical_configs(
-    scores_result:       dict[str, Any],
+    scores_result: dict[str, Any],
     config_variable_map: dict[str, Any],
-    variable_name:       str,
+    variable_name: str,
 ) -> list[str]:
     """
     Render Appendix D for configurations found in the DB but missing from the current YAML.
@@ -1637,7 +1748,6 @@ def _appendix_historical_configs(
     return lines
 
 
-
 # ---------------------------------------------------------------------------
 # Background Process Activity — computation layer
 # ---------------------------------------------------------------------------
@@ -1646,16 +1756,16 @@ def _appendix_historical_configs(
 # Checked case-insensitively against process names in all_notable_procs_json.
 # Extend this list to add new categories — do NOT use heuristics, only explicit names.
 _KNOWN_INTERFERERS: list[tuple[str, list[str]]] = [
-    ("Windows Defender",     ["msmpeng", "mpcmdrun", "mpdefendsandbox"]),
-    ("Windows Update",       ["tiworker", "wuauclt", "wudfhost", "usoclient"]),
-    ("Search Indexer",       ["searchindexer", "searchhost", "searchprotocolhost"]),
-    ("Browser (Chrome)",     ["chrome"]),
-    ("Browser (Edge)",       ["msedge"]),
-    ("Browser (Firefox)",    ["firefox"]),
-    ("Steam / Game Client",  ["steam", "epicgameslauncher", "gameoverlayui"]),
-    ("Discord / Chat",       ["discord", "slack", "teams"]),
-    ("OneDrive / Cloud",     ["onedrive", "googledrivefs", "dropbox"]),
-    ("NVIDIA Container",     ["nvcontainer", "nvspcaps", "nvidia web helper"]),
+    ("Windows Defender", ["msmpeng", "mpcmdrun", "mpdefendsandbox"]),
+    ("Windows Update", ["tiworker", "wuauclt", "wudfhost", "usoclient"]),
+    ("Search Indexer", ["searchindexer", "searchhost", "searchprotocolhost"]),
+    ("Browser (Chrome)", ["chrome"]),
+    ("Browser (Edge)", ["msedge"]),
+    ("Browser (Firefox)", ["firefox"]),
+    ("Steam / Game Client", ["steam", "epicgameslauncher", "gameoverlayui"]),
+    ("Discord / Chat", ["discord", "slack", "teams"]),
+    ("OneDrive / Cloud", ["onedrive", "googledrivefs", "dropbox"]),
+    ("NVIDIA Container", ["nvcontainer", "nvspcaps", "nvidia web helper"]),
 ]
 
 # SUMMARY SIGNIFICANCE RULES — explicit, deterministic, v1
@@ -1675,9 +1785,9 @@ _KNOWN_INTERFERERS: list[tuple[str, list[str]]] = [
 #   Processes with cpu_pct <= 0.5% AND rss_mb <= 50 MB are NOT captured.
 #   This is a collection-time boundary documented in telemetry.py.
 
-_CPU_SPIKE_THRESHOLD_PCT: float = 5.0   # R3
-_HW_CPU_TEMP_SPIKE_C: float = 90.0      # R5
-_HW_GPU_TEMP_SPIKE_C: float = 80.0      # R5
+_CPU_SPIKE_THRESHOLD_PCT: float = 5.0  # R3
+_HW_CPU_TEMP_SPIKE_C: float = 90.0  # R5
+_HW_GPU_TEMP_SPIKE_C: float = 80.0  # R5
 
 
 def _compute_background_interference(
@@ -1737,7 +1847,10 @@ def _compute_background_interference(
         return {"available": False, "reason": f"DB query failed: {exc}"}
 
     if not rows:
-        return {"available": False, "reason": "No background_snapshots records found for this campaign."}
+        return {
+            "available": False,
+            "reason": "No background_snapshots records found for this campaign.",
+        }
 
     total_snapshots = len(rows)
 
@@ -1745,17 +1858,17 @@ def _compute_background_interference(
     # peak_cpu[name] = max cpu_pct seen in any snapshot
     # peak_rss[name] = max rss_mb seen in any snapshot
     # presence[name] = count of snapshots where process appeared
-    peak_cpu:  dict[str, float] = {}
-    peak_rss:  dict[str, float] = {}
-    presence:  dict[str, int]   = {}
+    peak_cpu: dict[str, float] = {}
+    peak_rss: dict[str, float] = {}
+    presence: dict[str, int] = {}
     # Spike events: list of {timestamp, name, cpu_pct} for R3
     spike_events: list[dict[str, Any]] = []
 
     # Named flag counts (for R4 supplement)
     defender_snapshots = 0
-    update_snapshots   = 0
-    indexer_snapshots  = 0
-    avscan_snapshots   = 0
+    update_snapshots = 0
+    indexer_snapshots = 0
+    avscan_snapshots = 0
     total_high_cpu_proc_count = 0
     total_tracked_rss_mb = 0.0
     total_tracked_cpu_pct = 0.0
@@ -1787,11 +1900,11 @@ def _compute_background_interference(
 
         for p in procs:
             name = p.get("name") or "unknown"
-            
+
             # Exclude server from all background logic
             if any(sub in name.lower() for sub in _SERVER_NAME_SUBSTRINGS):
                 continue
-                
+
             cpu = p.get("cpu_pct") or 0.0
             rss = p.get("rss_mb") or 0.0
 
@@ -1804,15 +1917,17 @@ def _compute_background_interference(
         for name, cpu in snapshot_by_name_cpu.items():
             if cpu > peak_cpu.get(name, 0.0):
                 peak_cpu[name] = cpu
-            
+
             presence[name] = presence.get(name, 0) + 1
-            
+
             if cpu >= _CPU_SPIKE_THRESHOLD_PCT:
-                spike_events.append({
-                    "timestamp": row["timestamp"],
-                    "name":      name,
-                    "cpu_pct":   cpu,
-                })
+                spike_events.append(
+                    {
+                        "timestamp": row["timestamp"],
+                        "name": name,
+                        "cpu_pct": cpu,
+                    }
+                )
 
         for name, rss in snapshot_by_name_rss.items():
             if rss > peak_rss.get(name, 0.0):
@@ -1825,16 +1940,20 @@ def _compute_background_interference(
 
     # R1: Top 5 CPU consumers by peak (all processes)
     top_cpu = sorted(
-        [{"name": n, "peak_cpu_pct": v, "snapshots": presence.get(n, 0)}
-         for n, v in peak_cpu.items()],
+        [
+            {"name": n, "peak_cpu_pct": v, "snapshots": presence.get(n, 0)}
+            for n, v in peak_cpu.items()
+        ],
         key=lambda x: -x["peak_cpu_pct"],
     )[:5]
 
     # R2: Top 5 RAM consumers by peak
     # (llama-server already excluded in collection loop)
     top_ram = sorted(
-        [{"name": n, "peak_rss_mb": v, "snapshots": presence.get(n, 0)}
-         for n, v in peak_rss.items()],
+        [
+            {"name": n, "peak_rss_mb": v, "snapshots": presence.get(n, 0)}
+            for n, v in peak_rss.items()
+        ],
         key=lambda x: -x["peak_rss_mb"],
     )[:5]
 
@@ -1854,14 +1973,11 @@ def _compute_background_interference(
     # R4: Known interferers — check each category against peak_cpu / presence
     known_interferer_results: list[dict[str, Any]] = []
     for category, substrings in _KNOWN_INTERFERERS:
-        matched_names = [
-            n for n in peak_cpu
-            if any(s in n.lower() for s in substrings)
-        ]
+        matched_names = [n for n in peak_cpu if any(s in n.lower() for s in substrings)]
         detected = len(matched_names) > 0
         entry: dict[str, Any] = {
-            "category":      category,
-            "detected":      detected,
+            "category": category,
+            "detected": detected,
             "process_names": matched_names,
         }
         if detected:
@@ -1897,37 +2013,38 @@ def _compute_background_interference(
             hw_throttle_events += 1
 
     # VRAM data availability flag
-    vram_available = any(
-        row["gpu_proc_vram_json"] is not None for row in rows
-    )
+    vram_available = any(row["gpu_proc_vram_json"] is not None for row in rows)
 
     return {
-        "available":             True,
-        "total_snapshots":       total_snapshots,
-        "top_cpu":               top_cpu,
-        "top_ram":               top_ram,
-        "total_tracked_rss_mb":  round(total_tracked_rss_mb, 1),
+        "available": True,
+        "total_snapshots": total_snapshots,
+        "top_cpu": top_cpu,
+        "top_ram": top_ram,
+        "total_tracked_rss_mb": round(total_tracked_rss_mb, 1),
         "total_tracked_cpu_pct": round(total_tracked_cpu_pct, 1),
-        "notable_spikes":        notable_spikes,
-        "known_interferers":     known_interferer_results,
-        "defender_snapshots":    defender_snapshots,
-        "update_snapshots":      update_snapshots,
-        "indexer_snapshots":     indexer_snapshots,
-        "avscan_snapshots":      avscan_snapshots,
-        "hw_max_cpu_temp":       hw_max_cpu_temp,
-        "hw_max_gpu_temp":       hw_max_gpu_temp,
-        "hw_cpu_spike_samples":  hw_cpu_spikes,
-        "hw_gpu_spike_samples":  hw_gpu_spikes,
-        "hw_throttle_events":    hw_throttle_events,
+        "notable_spikes": notable_spikes,
+        "known_interferers": known_interferer_results,
+        "defender_snapshots": defender_snapshots,
+        "update_snapshots": update_snapshots,
+        "indexer_snapshots": indexer_snapshots,
+        "avscan_snapshots": avscan_snapshots,
+        "hw_max_cpu_temp": hw_max_cpu_temp,
+        "hw_max_gpu_temp": hw_max_gpu_temp,
+        "hw_cpu_spike_samples": hw_cpu_spikes,
+        "hw_gpu_spike_samples": hw_gpu_spikes,
+        "hw_throttle_events": hw_throttle_events,
         "vram_tracking_available": vram_available,
         # Aggregate interference level (LOW / MODERATE / HIGH) for quick triage.
         # Rules: HIGH if any spike >= CPU_SPIKE_THRESHOLD; MODERATE if any known
         # interferer detected; LOW if neither; NONE if no processes flagged.
         "aggregate_level": (
-            "HIGH"     if notable_spikes else
-            "MODERATE" if any(r["detected"] for r in known_interferer_results) else
-            "LOW"      if any(v > 0 for v in peak_cpu.values()) else
-            "NONE"
+            "HIGH"
+            if notable_spikes
+            else "MODERATE"
+            if any(r["detected"] for r in known_interferer_results)
+            else "LOW"
+            if any(v > 0 for v in peak_cpu.values())
+            else "NONE"
         ),
     }
 
@@ -1959,9 +2076,11 @@ def _section_background_interference(
         )
         return lines
 
-    total_snap  = bg["total_snapshots"]
-    agg_level   = bg["aggregate_level"]
-    agg_emoji   = {"HIGH": "🔴", "MODERATE": "🟡", "LOW": "🟢", "NONE": "✅"}.get(agg_level, "")
+    total_snap = bg["total_snapshots"]
+    agg_level = bg["aggregate_level"]
+    agg_emoji = {"HIGH": "🔴", "MODERATE": "🟡", "LOW": "🟢", "NONE": "✅"}.get(
+        agg_level, ""
+    )
 
     lines.append(
         f"> **Observed interference level:** {agg_emoji} **{agg_level}** "
@@ -2001,7 +2120,9 @@ def _section_background_interference(
             )
         lines.append("")
     else:
-        lines.append("_No processes exceeded the CPU capture threshold during this campaign._\n")
+        lines.append(
+            "_No processes exceeded the CPU capture threshold during this campaign._\n"
+        )
 
     # ── B. Top RAM Consumers (R2) (llama-server excluded) ───────────────────
     lines.append("### B. Top RAM Consumers\n")
@@ -2056,9 +2177,7 @@ def _section_background_interference(
         lines.append("|---------|----------:|-------------------|")
         for ev in bg["notable_spikes"]:
             lines.append(
-                f"| `{ev['name']}` "
-                f"| {ev['cpu_pct']:.1f}% "
-                f"| {ev['timestamp']} |"
+                f"| `{ev['name']}` | {ev['cpu_pct']:.1f}% | {ev['timestamp']} |"
             )
         lines.append("")
     else:
@@ -2085,21 +2204,27 @@ def _section_background_interference(
                 f"| {entry['presence_pct']}% |"
             )
         else:
-            lines.append(
-                f"| {entry['category']} | {detected_str} | — | 0% |"
-            )
+            lines.append(f"| {entry['category']} | {detected_str} | — | 0% |")
     lines.append("")
 
     # ── F. Hardware Spikes (R5) ──────────────────────────────────────────────
     lines.append("### F. Hardware Conditions\n")
     lines.append("| Metric | Value |")
     lines.append("|--------|-------|")
-    cpu_temp_disp = f"{bg['hw_max_cpu_temp']:.1f}°C" if bg["hw_max_cpu_temp"] is not None else "N/A"
-    gpu_temp_disp = f"{bg['hw_max_gpu_temp']:.1f}°C" if bg["hw_max_gpu_temp"] is not None else "N/A"
+    cpu_temp_disp = (
+        f"{bg['hw_max_cpu_temp']:.1f}°C" if bg["hw_max_cpu_temp"] is not None else "N/A"
+    )
+    gpu_temp_disp = (
+        f"{bg['hw_max_gpu_temp']:.1f}°C" if bg["hw_max_gpu_temp"] is not None else "N/A"
+    )
     lines.append(f"| Peak CPU temperature | {cpu_temp_disp} |")
     lines.append(f"| Peak GPU temperature | {gpu_temp_disp} |")
-    lines.append(f"| CPU temp ≥ {_HW_CPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_cpu_spike_samples']} |")
-    lines.append(f"| GPU temp ≥ {_HW_GPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_gpu_spike_samples']} |")
+    lines.append(
+        f"| CPU temp ≥ {_HW_CPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_cpu_spike_samples']} |"
+    )
+    lines.append(
+        f"| GPU temp ≥ {_HW_GPU_TEMP_SPIKE_C:.0f}°C samples | {bg['hw_gpu_spike_samples']} |"
+    )
     lines.append(f"| GPU power-limit throttle events | {bg['hw_throttle_events']} |")
     lines.append("")
 
@@ -2133,6 +2258,7 @@ def _section_background_interference(
 # Supporting Evidence / Artifact Linking
 # ---------------------------------------------------------------------------
 
+
 def _section_supporting_artifacts(
     campaign_id: str,
     reports_dir: Path,
@@ -2164,6 +2290,7 @@ def _section_supporting_artifacts(
         return "legacy_file_present" if path.exists() else "missing"
 
     from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+
     artifact_rows = {
         row.get("artifact_type"): row
         for row in load_artifact_summaries(campaign_id, db_path)
@@ -2185,10 +2312,10 @@ def _section_supporting_artifacts(
         return "; ".join(parts)
 
     telemetry_jsonl = measurements_dir / "telemetry.jsonl"
-    raw_jsonl       = measurements_dir / "raw.jsonl"
-    report_md       = reports_dir / "report.md"
-    report_v2_md    = reports_dir / "report_v2.md"
-    scores_csv      = reports_dir / "scores.csv"
+    raw_jsonl = measurements_dir / "raw.jsonl"
+    report_md = reports_dir / "report.md"
+    report_v2_md = reports_dir / "report_v2.md"
+    scores_csv = reports_dir / "scores.csv"
 
     # Count run context files
     rc_files = sorted(environment_dir.glob("*_run_context.json"))
@@ -2198,15 +2325,25 @@ def _section_supporting_artifacts(
     # legacy logs/<campaign> fallback for pre-migration runs.
     lab_root = db_path.parent.parent
     canonical_logs_root = lab_root / "artifacts" / "logs"
-    canonical_log_dirs = sorted(canonical_logs_root.glob(f"*/{campaign_id}")) if canonical_logs_root.exists() else []
+    canonical_log_dirs = (
+        sorted(canonical_logs_root.glob(f"*/{campaign_id}"))
+        if canonical_logs_root.exists()
+        else []
+    )
     canonical_log_files: list[Path] = []
     for d in canonical_log_dirs:
         canonical_log_files.extend(sorted(d.glob("runner_*.log")))
     legacy_log_dir = lab_root / "logs" / campaign_id
-    legacy_log_files = sorted(legacy_log_dir.glob("runner_*.log")) if legacy_log_dir.exists() else []
+    legacy_log_files = (
+        sorted(legacy_log_dir.glob("runner_*.log")) if legacy_log_dir.exists() else []
+    )
 
     log_files = canonical_log_files if canonical_log_files else legacy_log_files
-    log_dir = canonical_log_dirs[-1] if canonical_log_files and canonical_log_dirs else legacy_log_dir
+    log_dir = (
+        canonical_log_dirs[-1]
+        if canonical_log_files and canonical_log_dirs
+        else legacy_log_dir
+    )
     log_status = f"✓ {len(log_files)} file(s)" if log_files else "✗ Not found"
     log_latest = f"`{log_files[-1].name}`" if log_files else "—"
 
@@ -2251,19 +2388,23 @@ def _section_supporting_artifacts(
     lines.append(
         "_Copy and run against `lab.sqlite` (or the DB path above) in any SQLite client._\n"
     )
-    lines.append(f"```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
-    lines.append(f"SELECT * FROM telemetry WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n")
-    lines.append(f"-- Background process snapshots: all notable processes every 10 s")
+    lines.append(
+        "```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics"
+    )
+    lines.append(
+        f"SELECT * FROM telemetry WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n"
+    )
+    lines.append("-- Background process snapshots: all notable processes every 10 s")
     lines.append(
         f"SELECT timestamp, all_notable_procs_json, gpu_proc_vram_json\n"
         f"FROM background_snapshots WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n"
     )
-    lines.append(f"-- Report generation history")
+    lines.append("-- Report generation history")
     lines.append(
         f"SELECT artifact_type, path, status, sha256, verification_source, error_message, created_at FROM artifacts\n"
         f"WHERE campaign_id = '{campaign_id}' ORDER BY created_at DESC;\n"
     )
-    lines.append(f"-- Per-config score detail")
+    lines.append("-- Per-config score detail")
     lines.append(
         f"SELECT config_id, composite_score, rank_overall, is_score_winner,\n"
         f"       passed_filters, elimination_reason\n"
@@ -2288,12 +2429,12 @@ def _section_supporting_artifacts(
 
 
 def _appendix_production_commands(
-    scores_result:       dict[str, Any],
-    stats:               dict[str, dict[str, Any]],
-    db_path:             Path,
-    campaign_id:         str,
+    scores_result: dict[str, Any],
+    stats: dict[str, dict[str, Any]],
+    db_path: Path,
+    campaign_id: str,
     config_variable_map: dict[str, Any],
-    variable_name:       str,
+    variable_name: str,
 ) -> list[str]:
     lines: list[str] = []
     lines.append("## Appendix C: Resolved Production Commands\n")
@@ -2331,7 +2472,7 @@ def _appendix_production_commands(
             ).fetchone()
             if not row:
                 continue
-            cmd     = row["resolved_command"] or "—"
+            cmd = row["resolved_command"] or "—"
             var_val = config_variable_map.get(cid, "—")
             rank_label = f"Rank {rank_pos}" if rank_pos < 999 else "Passing"
             lines.append(f"### {rank_label}: `{cid}` ({variable_name}={var_val})\n")
@@ -2344,15 +2485,16 @@ def _appendix_production_commands(
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def generate_campaign_report(
-    campaign_id:   str,
-    db_path:       Path,
-    baseline:      dict[str, Any],
+    campaign_id: str,
+    db_path: Path,
+    baseline: dict[str, Any],
     scores_result: dict[str, Any] | None = None,
-    stats:         dict[str, dict[str, Any]] | None = None,
-    campaign:      dict[str, Any] | None = None,
-    run_plan:      Any = None,
-    lab_root:      Path | None = None,
+    stats: dict[str, dict[str, Any]] | None = None,
+    campaign: dict[str, Any] | None = None,
+    run_plan: Any = None,
+    lab_root: Path | None = None,
 ) -> Path:
     """
     Generate the QuantMap campaign report (evidence-first philosophy).
@@ -2385,6 +2527,7 @@ def generate_campaign_report(
         load_baseline_for_historical_use,
         load_run_identity,
     )
+
     baseline, baseline_source = load_baseline_for_historical_use(
         campaign_id,
         db_path,
@@ -2393,7 +2536,9 @@ def generate_campaign_report(
     )
     trust_identity = load_run_identity(campaign_id, db_path)
     legacy_results_dir = effective_lab_root / "results" / campaign_id
-    model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    model_cfg = (
+        baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    )
     model_identity = infer_model_identity(
         model_name=model_cfg.get("name"),
         model_path=model_cfg.get("path"),
@@ -2405,22 +2550,28 @@ def generate_campaign_report(
         create=True,
     )
     reports_dir = report_artifacts["dir"]
-    measurements_dir = find_artifact_dir(
-        effective_lab_root,
-        "measurements",
-        campaign_id,
-    ) or legacy_results_dir
-    environment_dir = find_artifact_dir(
-        effective_lab_root,
-        "environment",
-        campaign_id,
-    ) or legacy_results_dir
+    measurements_dir = (
+        find_artifact_dir(
+            effective_lab_root,
+            "measurements",
+            campaign_id,
+        )
+        or legacy_results_dir
+    )
+    environment_dir = (
+        find_artifact_dir(
+            effective_lab_root,
+            "environment",
+            campaign_id,
+        )
+        or legacy_results_dir
+    )
     report_path = report_artifacts["report_v2_md"]
 
     # Compute analysis if not provided
     if scores_result is None:
         from src.score import score_campaign  # noqa: PLC0415
-        from src import governance
+
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
         stats = scores_result["stats"]
@@ -2447,9 +2598,11 @@ def generate_campaign_report(
         except (TypeError, ValueError):
             config_variable_map[r["id"]] = r["variable_value"]
 
-    variable_name = camp.get("variable") or (
-        getattr(run_plan, "variable", None) if run_plan else "value"
-    ) or "value"
+    variable_name = (
+        camp.get("variable")
+        or (getattr(run_plan, "variable", None) if run_plan else "value")
+        or "value"
+    )
 
     # Load per-cycle run-context files, then restrict to configs that are actually
     # present in the current campaign (as recorded in the DB).  If the campaign
@@ -2460,10 +2613,9 @@ def generate_campaign_report(
     run_contexts = _load_run_contexts(environment_dir)
     _active_config_ids = set(config_variable_map.keys())
     run_contexts = [
-        ctx for ctx in run_contexts
-        if ctx.get("_config_id") in _active_config_ids
+        ctx for ctx in run_contexts if ctx.get("_config_id") in _active_config_ids
     ]
-    env_agg      = _aggregate_environment(run_contexts)
+    env_agg = _aggregate_environment(run_contexts)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -2477,7 +2629,12 @@ def generate_campaign_report(
     try:
         sections.extend(
             _section_header(
-                campaign_id, camp, snap, run_plan, baseline, now,
+                campaign_id,
+                camp,
+                snap,
+                run_plan,
+                baseline,
+                now,
                 baseline_source=baseline_source,
                 trust_identity=trust_identity,
             )
@@ -2506,8 +2663,12 @@ def generate_campaign_report(
     try:
         sections.extend(
             _section_primary_results(
-                scores_result, stats, config_variable_map,
-                variable_name, run_plan, env_agg,
+                scores_result,
+                stats,
+                config_variable_map,
+                variable_name,
+                run_plan,
+                env_agg,
             )
         )
     except Exception as exc:
@@ -2518,7 +2679,9 @@ def generate_campaign_report(
     # Variability & Reliability
     try:
         sections.extend(
-            _section_variability(scores_result, stats, config_variable_map, variable_name)
+            _section_variability(
+                scores_result, stats, config_variable_map, variable_name
+            )
         )
     except Exception as exc:
         logger.warning("report: variability section failed: %s", exc)
@@ -2537,7 +2700,9 @@ def generate_campaign_report(
     # Computed here (not cached) so the report always reflects the current DB state.
     try:
         bg_data = _compute_background_interference(campaign_id, db_path)
-        sections.extend(_section_background_interference(bg_data, reports_dir, campaign_id))
+        sections.extend(
+            _section_background_interference(bg_data, reports_dir, campaign_id)
+        )
     except Exception as exc:
         logger.warning("report: background interference section failed: %s", exc)
         sections.extend(_section_failure_stub("## Background Process Activity", exc))
@@ -2555,11 +2720,15 @@ def generate_campaign_report(
 
     try:
         sections.extend(
-            _appendix_full_stats(stats, scores_result, config_variable_map, variable_name)
+            _appendix_full_stats(
+                stats, scores_result, config_variable_map, variable_name
+            )
         )
     except Exception as exc:
         logger.warning("report: appendix A failed: %s", exc)
-        sections.extend(_section_failure_stub("## Appendix A — Full Config Statistics", exc))
+        sections.extend(
+            _section_failure_stub("## Appendix A — Full Config Statistics", exc)
+        )
         section_failures.append(("appendix_a", str(exc)))
 
     try:
@@ -2568,28 +2737,40 @@ def generate_campaign_report(
         )
     except Exception as exc:
         logger.warning("report: appendix B failed: %s", exc)
-        sections.extend(_section_failure_stub("## Appendix B — Elimination Details", exc))
+        sections.extend(
+            _section_failure_stub("## Appendix B — Elimination Details", exc)
+        )
         section_failures.append(("appendix_b", str(exc)))
 
     try:
         sections.extend(
             _appendix_production_commands(
-                scores_result, stats, db_path, campaign_id,
-                config_variable_map, variable_name,
+                scores_result,
+                stats,
+                db_path,
+                campaign_id,
+                config_variable_map,
+                variable_name,
             )
         )
     except Exception as exc:
         logger.warning("report: appendix C failed: %s", exc)
-        sections.extend(_section_failure_stub("## Appendix C — Production Commands", exc))
+        sections.extend(
+            _section_failure_stub("## Appendix C — Production Commands", exc)
+        )
         section_failures.append(("appendix_c", str(exc)))
 
     try:
         sections.extend(
-            _appendix_historical_configs(scores_result, config_variable_map, variable_name)
+            _appendix_historical_configs(
+                scores_result, config_variable_map, variable_name
+            )
         )
     except Exception as exc:
         logger.warning("report: appendix D failed: %s", exc)
-        sections.extend(_section_failure_stub("## Appendix D — Historical & Abandoned Configs", exc))
+        sections.extend(
+            _section_failure_stub("## Appendix D — Historical & Abandoned Configs", exc)
+        )
         section_failures.append(("appendix_d", str(exc)))
 
     # Supporting Evidence — always present; must appear before Concerns so
@@ -2616,7 +2797,11 @@ def generate_campaign_report(
     try:
         sections.extend(
             _section_concerns_and_warnings(
-                env_agg, scores_result, section_failures, run_contexts, run_plan,
+                env_agg,
+                scores_result,
+                section_failures,
+                run_contexts,
+                run_plan,
             )
         )
     except Exception as exc:
@@ -2650,13 +2835,20 @@ def generate_campaign_report(
             # to prevent DB bloat and ensure Single Source of Truth.
             _art_conn.execute(
                 "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, "report_v2_md")
+                (campaign_id, "report_v2_md"),
             )
             _report_sha = _file_sha256(report_path)
-            _report_status = "partial" if section_failures else ("complete" if _report_sha else "failed")
+            _report_status = (
+                "partial"
+                if section_failures
+                else ("complete" if _report_sha else "failed")
+            )
             _report_error = "; ".join(f"{k}: {v}" for k, v in section_failures) or None
             if _report_sha is None:
-                _report_error = _report_error or "artifact file missing or unreadable after report generation"
+                _report_error = (
+                    _report_error
+                    or "artifact file missing or unreadable after report generation"
+                )
             _art_conn.execute(
                 "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2675,6 +2867,8 @@ def generate_campaign_report(
             )
             _art_conn.commit()
     except Exception as _art_exc:
-        logger.warning("Could not record report_v2.md in artifacts table (non-fatal): %s", _art_exc)
+        logger.warning(
+            "Could not record report_v2.md in artifacts table (non-fatal): %s", _art_exc
+        )
 
     return report_path
