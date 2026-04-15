@@ -1,5 +1,4 @@
-"""
-QuantMap — ui.py
+"""QuantMap — ui.py
 
 Central UI management. Handles:
 - Symbol abstraction (UTF-8 vs ASCII fallback)
@@ -11,10 +10,9 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any
 
-from rich.console import Console  # type: ignore[import]
-from rich.theme import Theme  # type: ignore[import]
+from rich.console import Console
+from rich.theme import Theme
 
 # ---------------------------------------------------------------------------
 # Capability Detection Logic
@@ -71,8 +69,7 @@ QUANTMAP_THEME = Theme({
 _GLOBAL_CONSOLE: Console | None = None
 
 def get_console(force_new: bool = False, force_utf8_if_bootstrap: bool = False) -> Console:
-    """
-    Returns a unified, capability-aware rich.Console.
+    """Returns a unified, capability-aware rich.Console.
     
     Arguments:
         force_new: Always create a fresh instance.
@@ -85,15 +82,15 @@ def get_console(force_new: bool = False, force_utf8_if_bootstrap: bool = False) 
     # Capability detection
     # If stdout is not a TTY, rich usually detects this and disables color/emojis.
     # We respect sys.stdout.isatty() but allow overrides.
-    
+
     force_terminal = None
     if PLAIN_MODE:
         # plain mode effectively turns off color and special glyphs
         force_terminal = False
-        
-    # On Windows, if we reconfigured stdout to UTF-8 in bootstrap, 
+
+    # On Windows, if we reconfigured stdout to UTF-8 in bootstrap,
     # sys.stdout.encoding might already be 'utf-8'.
-    
+
     console = Console(
         theme=QUANTMAP_THEME,
         force_terminal=force_terminal,
@@ -102,7 +99,7 @@ def get_console(force_new: bool = False, force_utf8_if_bootstrap: bool = False) 
         # High-rigor: If we're bootstrapping, we might need a specific color system
         color_system="auto" if not PLAIN_MODE else None,
     )
-    
+
     if not force_new:
         _GLOBAL_CONSOLE = console
     return console

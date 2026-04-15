@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import logging
 import shutil
-import sys
 import subprocess
+import sys
 import warnings
 from typing import Any
 
@@ -19,13 +19,16 @@ from src.telemetry_provider import (
 
 logger = logging.getLogger(__name__)
 
+pynvml: Any
+
 try:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
-        import pynvml  # type: ignore[import]
+        import pynvml as _pynvml  # type: ignore[import-untyped]
+    pynvml = _pynvml
     _PYNVML_AVAILABLE = True
 except ImportError:
-    pynvml = None  # type: ignore[assignment]
+    pynvml = None
     _PYNVML_AVAILABLE = False
 
 
@@ -128,7 +131,7 @@ def get_gpu_vram_total_mb(index: int = 0) -> float | None:
         return None
     try:
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        return mem_info.total / (1024 * 1024)
+        return float(mem_info.total) / (1024 * 1024)
     except Exception as exc:
         logger.debug("NVML total VRAM read failed: %s", exc)
         return None
