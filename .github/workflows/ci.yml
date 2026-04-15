@@ -30,7 +30,7 @@ jobs:
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
-      - name: Install package + test deps
+      - name: Install package + dev deps
         shell: pwsh
         run: |
           if (Test-Path "requirements-dev.txt") {
@@ -39,9 +39,16 @@ jobs:
             python -m pip install -e .[dev]
           } elseif (Test-Path "requirements.txt") {
             python -m pip install -r requirements.txt
+            python -m pip install -U pytest ruff mypy
           }
 
-          python -m pip install -U pytest
+      - name: Lint with ruff
+        shell: pwsh
+        run: python -m ruff check src/ quantmap.py rescore.py --output-format=github
+
+      - name: Type check with mypy
+        shell: pwsh
+        run: python -m mypy src/ quantmap.py rescore.py --show-error-codes
 
       - name: Run tests
         shell: pwsh

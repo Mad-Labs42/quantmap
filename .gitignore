@@ -93,3 +93,6 @@ docs/quantmap_mvp_decisions_and_reporting_contract.md
 
 
 AGENTS.md
+
+mypy-report.txt
+ruff-report.txt
