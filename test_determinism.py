@@ -1,5 +1,6 @@
 import sys
 import os
+import pytest
 
 print('Starting deterministic test (waiting for pandas to load...)', flush=True)
 
@@ -12,7 +13,7 @@ except Exception as e:
 
 print('\nImports complete! Testing Tie Breakers for Determinism...', flush=True)
 
-def test_identical(desc, passing_dict):
+def _run_case(desc, passing_dict):
     df = rank_overall(passing_dict)
     print(f'\n--- {desc} ---', flush=True)
     
@@ -26,6 +27,7 @@ def test_identical(desc, passing_dict):
     print(f'Winner         : {winner}', flush=True)
     print(f'Highest TG     : {highest_tg}', flush=True)
     print(f'Ranks          : {ranks}', flush=True)
+    assert not df.empty
 
 # ── Case 1: Identical composite scores, tie broken by config_id ascending ──
 base = {
@@ -47,10 +49,7 @@ base = {
     }
 }
 
-test_identical('Insert Z, then A', base)
-
 reverse_base = {'config_A': base['config_A'], 'config_Z': base['config_Z']}
-test_identical('Insert A, then Z', reverse_base)
 
 # ── Case 2: Identical TG, but different composite scores (A has worse composite score) ──
 # Because they tie on TG, highest_tg should be explicitly broken by config_id ascending, 
@@ -73,7 +72,15 @@ mixed_base = {
         'pp_median': 600.0
     }
 }
-test_identical('Tied TG, B then X', {'config_B': mixed_base['config_B'], 'config_X': mixed_base['config_X']})
-test_identical('Tied TG, X then B', {'config_X': mixed_base['config_X'], 'config_B': mixed_base['config_B']})
 
-print('\nDONE DETERMINISM PROOF', flush=True)
+@pytest.mark.parametrize(
+    "desc, passing_dict",
+    [
+        ('Insert Z, then A', base),
+        ('Insert A, then Z', reverse_base),
+        ('Tied TG, B then X', {'config_B': mixed_base['config_B'], 'config_X': mixed_base['config_X']}),
+        ('Tied TG, X then B', {'config_X': mixed_base['config_X'], 'config_B': mixed_base['config_B']}),
+    ],
+)
+def test_identical(desc, passing_dict):
+    _run_case(desc, passing_dict)
