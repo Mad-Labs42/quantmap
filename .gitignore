@@ -73,6 +73,7 @@ package-lock.json
 
 # Local-only operator/working materials
 .agents/
+AGENTS.md
 
 # Docs policy: only keep public docs/playbooks and docs/system
 docs/*
@@ -84,6 +85,11 @@ docs/*
 # Internal-only docs
 docs/AUDITS/
 docs/decisions/
+docs/superpowers/
 docs/CHECKPOINTS!/
 docs/Design Memo's/
+docs/QuantMap MVP Audit Tracker.md
+docs/quantmap_mvp_decisions_and_reporting_contract.md
 
+
+AGENTS.md
