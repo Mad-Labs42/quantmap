@@ -28,6 +28,7 @@ from __future__ import annotations
 _STR_NOT_SET_IN_BASELINE = "not set in baseline"
 _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
+_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
 
 
 import json
@@ -493,14 +494,14 @@ def _section_methodology(
     profile_name = (
         methodology.get("profile_name")
         or getattr(profile_obj, "name", None)
-        or "not in methodology snapshot"
+        or _STR_NOT_IN_METHODOLOGY
     )
     profile_version = (
         methodology.get("profile_version")
         or getattr(profile_obj, "version", None)
-        or "not in methodology snapshot"
+        or _STR_NOT_IN_METHODOLOGY
     )
-    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "not in methodology snapshot")
+    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", _STR_NOT_IN_METHODOLOGY)
     lines.append(
         f"**Experiment Profile:** `{profile_name}` v{profile_version} "
         f"({profile_family})  \n"
