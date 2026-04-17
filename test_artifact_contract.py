@@ -217,8 +217,6 @@ def test_measurement_paths_canonical_count(tmp_path):
     paths = measurement_paths(tmp_path, "test-model", "C01_test", create=False)
 
     canonical_keys = {"raw_telemetry_jsonl"}
-    deprecated_keys = {"raw_jsonl", "telemetry_jsonl"}
-
     assert canonical_keys <= set(paths.keys()), "raw_telemetry_jsonl must be present."
 
     # Raw.jsonl and telemetry.jsonl retained as aliases for read-compat, but their

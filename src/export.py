@@ -7,6 +7,13 @@ Bundles campaign data, methodology, and telemetry into a single SQLite file.
 
 from __future__ import annotations
 
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_IN_SNAPSHOT = "not in snapshot"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
+_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
+
+
 import sqlite3
 import json
 from datetime import datetime
@@ -286,7 +293,6 @@ def generate_metadata_json(
     scores_result: dict | None = None,
     stats: dict | None = None,
     lab_root: Path | None = None,
-    run_plan: object | None = None,
     section_failures: list[tuple[str, str]] | None = None,
 ) -> Path:
     """Generate metadata.json — the structured provenance and scoring record.
@@ -426,7 +432,7 @@ def generate_metadata_json(
         )
 
     for config_id, reason in eliminated.items():
-        eliminated_configs.append({"config_id": config_id, "reason": reason or "not recorded"})
+        eliminated_configs.append({"config_id": config_id, "reason": reason or _STR_NOT_RECORDED})
 
     winner = next(
         (c["config_id"] for c in ranked_configs if c["is_winner"]),
@@ -441,9 +447,9 @@ def generate_metadata_json(
             "artifact_type": row.get("artifact_type"),
             "role": ARTIFACT_ROLES.get(row.get("artifact_type", ""), "not classified"),
             "path": row.get("path"),
-            "status": row.get("status") or "not recorded",
+            "status": row.get("status") or _STR_NOT_RECORDED,
             "sha256": row.get("sha256"),
-            "verification_source": row.get("verification_source") or "not recorded",
+            "verification_source": row.get("verification_source") or _STR_NOT_RECORDED,
             "created_at": row.get("created_at"),
             "error_message": row.get("error_message"),
         })
@@ -488,21 +494,21 @@ def generate_metadata_json(
     exec_env = trust_identity.execution_environment or {}
     env_summary = {
         # Classification labels (from execution_environment probe)
-        "support_tier":              exec_env.get("support_tier") or "not in snapshot",
-        "measurement_grade":         exec_env.get("measurement_grade") or "not in snapshot",
-        "telemetry_capture_quality": trust_identity.telemetry_provider.get("capture_quality") or "not in snapshot",
+        "support_tier":              exec_env.get("support_tier") or _STR_NOT_IN_SNAPSHOT,
+        "measurement_grade":         exec_env.get("measurement_grade") or _STR_NOT_IN_SNAPSHOT,
+        "telemetry_capture_quality": trust_identity.telemetry_provider.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
         # Machine identity (from baseline.yaml machine block)
-        "machine_name":   machine_bl.get("name") or "not set in baseline",
-        "cpu":            machine_bl.get("cpu") or "not set in baseline",
-        "gpu":            machine_bl.get("gpu") or "not set in baseline",
-        "ram":            machine_bl.get("ram") or "not set in baseline",
+        "machine_name":   machine_bl.get("name") or _STR_NOT_SET_IN_BASELINE,
+        "cpu":            machine_bl.get("cpu") or _STR_NOT_SET_IN_BASELINE,
+        "gpu":            machine_bl.get("gpu") or _STR_NOT_SET_IN_BASELINE,
+        "ram":            machine_bl.get("ram") or _STR_NOT_SET_IN_BASELINE,
         # OS/platform (from campaign_start_snapshot DB columns)
-        "os_version":     snap.get("os_version") or "not in snapshot",
-        "os_platform":    snap.get("os_platform") or "not in snapshot",
-        "python_version": snap.get("python_version") or "not in snapshot",
-        "nvidia_driver":  snap.get("nvidia_driver") or "not in snapshot",
-        "gpu_name":       snap.get("gpu_name") or "not in snapshot",
-        "power_plan":     snap.get("power_plan") or "not in snapshot",
+        "os_version":     snap.get("os_version") or _STR_NOT_IN_SNAPSHOT,
+        "os_platform":    snap.get("os_platform") or _STR_NOT_IN_SNAPSHOT,
+        "python_version": snap.get("python_version") or _STR_NOT_IN_SNAPSHOT,
+        "nvidia_driver":  snap.get("nvidia_driver") or _STR_NOT_IN_SNAPSHOT,
+        "gpu_name":       snap.get("gpu_name") or _STR_NOT_IN_SNAPSHOT,
+        "power_plan":     snap.get("power_plan") or _STR_NOT_IN_SNAPSHOT,
         # Starting conditions at measurement time
         "cpu_temp_at_start_c": snap.get("cpu_temp_at_start_c"),
         "gpu_temp_at_start_c": snap.get("gpu_temp_at_start_c"),
@@ -590,9 +596,9 @@ def generate_metadata_json(
         },
         "config_registry": config_registry,
         "methodology": {
-            "profile_name": trust_identity.methodology.get("profile_name") or "not in methodology snapshot",
-            "profile_version": trust_identity.methodology.get("profile_version") or "not in methodology snapshot",
-            "methodology_version": trust_identity.methodology.get("version") or "not in methodology snapshot",
+            "profile_name": trust_identity.methodology.get("profile_name") or _STR_NOT_IN_METHODOLOGY,
+            "profile_version": trust_identity.methodology.get("profile_version") or _STR_NOT_IN_METHODOLOGY,
+            "methodology_version": trust_identity.methodology.get("version") or _STR_NOT_IN_METHODOLOGY,
             "source": methodology_label,
             "weights": trust_identity.methodology.get("weights"),
             "eligibility_filters": trust_identity.methodology.get("eligibility_filters"),
@@ -608,22 +614,22 @@ def generate_metadata_json(
         "run_context_summary":  run_context_summary,
         "baseline_identity": {
             # What exactly was tested — enough to re-run or cite the campaign
-            "source": trust_identity.sources.get("baseline", "not in snapshot"),
-            "capture_quality": trust_identity.sources.get("capture_quality") or "not in snapshot",
+            "source": trust_identity.sources.get("baseline", _STR_NOT_IN_SNAPSHOT),
+            "capture_quality": trust_identity.sources.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
             # Model identity
-            "model_name":   model_cfg.get("name") or "not set in baseline",
-            "model_path":   snap.get("model_path") or model_cfg.get("path") or "not in snapshot",
+            "model_name":   model_cfg.get("name") or _STR_NOT_SET_IN_BASELINE,
+            "model_path":   snap.get("model_path") or model_cfg.get("path") or _STR_NOT_IN_SNAPSHOT,
             "model_size_bytes": snap.get("model_file_size_bytes"),
-            "quantization": model_cfg.get("quantization") or "not set in baseline",
+            "quantization": model_cfg.get("quantization") or _STR_NOT_SET_IN_BASELINE,
             # Backend/server identity
-            "server_binary_path":   snap.get("server_binary_path") or "not in snapshot",
-            "server_binary_sha256": snap.get("server_binary_sha256") or "not in snapshot",
-            "build_commit":         snap.get("build_commit") or "not captured",
+            "server_binary_path":   snap.get("server_binary_path") or _STR_NOT_IN_SNAPSHOT,
+            "server_binary_sha256": snap.get("server_binary_sha256") or _STR_NOT_IN_SNAPSHOT,
+            "build_commit":         snap.get("build_commit") or _STR_NOT_CAPTURED,
             # Sampling parameters actually used
             "sampling_params": (
                 json.loads(snap["sampling_params_json"])
                 if snap.get("sampling_params_json")
-                else "not in snapshot"
+                else _STR_NOT_IN_SNAPSHOT
             ),
         },
         "provenance_sources": trust_identity.sources,

@@ -25,6 +25,11 @@ Public API:
 
 from __future__ import annotations
 
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
+
+
 import json
 import logging
 import os
@@ -393,7 +398,7 @@ def _section_header(
     if trust_identity is not None:
         qid = getattr(trust_identity, "quantmap", {}) or {}
         qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
-        qcommit = qid.get("git_commit") or "not captured"
+        qcommit = qid.get("git_commit") or _STR_NOT_CAPTURED
         lines.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     lines.append(f"| Power plan | {snap.get('power_plan', '—')} |")
     build_commit = snap.get("build_commit", "—")
@@ -2170,8 +2175,8 @@ def _section_supporting_artifacts(
         row = artifact_rows.get(artifact_type)
         if not row:
             return _check(path)
-        status = row.get("status") or "not recorded"
-        verification = row.get("verification_source") or "not recorded"
+        status = row.get("status") or _STR_NOT_RECORDED
+        verification = row.get("verification_source") or _STR_NOT_RECORDED
         sha = row.get("sha256")
         error = row.get("error_message")
         parts = [status, f"verification={verification}"]

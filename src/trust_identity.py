@@ -374,10 +374,7 @@ def summarize_report_artifact_status(
         # A campaign that was run before the redesign only has old-type rows;
         # we must not report it as "partial" just because new-type rows are missing.
         has_any_new = any(atype in by_type for atype in _NEW_TYPES)
-        if has_any_new:
-            check_types = _NEW_TYPES
-        else:
-            check_types = _LEGACY_TYPES
+        check_types = _NEW_TYPES if has_any_new else _LEGACY_TYPES
         statuses = []
         for atype in check_types:
             row = by_type.get(atype)

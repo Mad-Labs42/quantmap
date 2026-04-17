@@ -2434,10 +2434,9 @@ def run_campaign(
     finally:
         tele.shutdown()
         # Phase 2: Close scoped connection safely
-        try:
+        import contextlib
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
 
         # Phase 6: Write terminal marker, hash the final complete stream, and lock the artifact
         if raw_telemetry_jsonl_path:
@@ -2602,7 +2601,6 @@ def run_campaign(
             v2_path = generate_campaign_report(
                 effective_campaign_id, _eff_db_path, baseline, scores, stats,
                 campaign=campaign,
-                run_plan=run_plan,
                 lab_root=_effective_lab_root,
             )
             console.print(f"[green]Run reports written:[/green] {v2_path}")
@@ -2654,7 +2652,6 @@ def run_campaign(
                 scores_result=scores,
                 stats=stats,
                 lab_root=_effective_lab_root,
-                run_plan=run_plan,
             )
             console.print(f"[green]Metadata written:[/green] {meta_path}")
         except Exception as _meta_exc:

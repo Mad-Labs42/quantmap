@@ -23,6 +23,11 @@ The report is gitignored (*.md rule). It is regenerable from lab.sqlite.
 
 from __future__ import annotations
 
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
+
+
 import json
 import logging
 import os
@@ -612,7 +617,7 @@ def _build_markdown(
     sections.append(f"| Build Commit | `{snap.get('build_commit', runtime.get('build_commit', 'not captured'))}` |")
     qid = trust_identity.quantmap
     qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
-    qcommit = qid.get("git_commit") or "not captured"
+    qcommit = qid.get("git_commit") or _STR_NOT_CAPTURED
     sections.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     if baseline_source:
         sections.append(f"| Baseline identity source | `{baseline_source}` |")
@@ -1152,7 +1157,7 @@ def _build_markdown(
         # rather than silently stamping the wrong build identifier.
         model_cfg = baseline.get("model", {})
         model_label = model_cfg.get("name", "unknown model")
-        build_commit = snap.get("build_commit") or runtime.get("build_commit") or "not captured"
+        build_commit = snap.get("build_commit") or runtime.get("build_commit") or _STR_NOT_CAPTURED
 
         tg_str    = f"{tg:.2f} t/s"   if tg     is not None else "N/A"
         tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
@@ -1168,7 +1173,7 @@ def _build_markdown(
             sections.append(
                 f'> **Custom Run — Scope Notice:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
-                f'({machine.get("cpu", "not set in baseline")} + {machine.get("gpu", "not set in baseline")}, '
+                f'({machine.get("cpu", _STR_NOT_SET_IN_BASELINE)} + {machine.get("gpu", _STR_NOT_SET_IN_BASELINE)}, '
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the best-performing config among the {_tested_n} tested value(s) '
@@ -1194,7 +1199,7 @@ def _build_markdown(
             sections.append(
                 f'> **Quick Run — Broad Coverage Result:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
-                f'({machine.get("cpu", "not set in baseline")} + {machine.get("gpu", "not set in baseline")}, '
+                f'({machine.get("cpu", _STR_NOT_SET_IN_BASELINE)} + {machine.get("gpu", _STR_NOT_SET_IN_BASELINE)}, '
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the top-performing config across all {_total_vals} campaign values '
@@ -1220,7 +1225,7 @@ def _build_markdown(
             sections.append(
                 f'> **Standard Run — Development-Grade Result:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
-                f'({machine.get("cpu", "not set in baseline")} + {machine.get("gpu", "not set in baseline")}, '
+                f'({machine.get("cpu", _STR_NOT_SET_IN_BASELINE)} + {machine.get("gpu", _STR_NOT_SET_IN_BASELINE)}, '
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the top-performing config across all {_total_vals} campaign values '
@@ -1241,7 +1246,7 @@ def _build_markdown(
             sections.append(
                 f'> **Confidence Statement:**\n>\n'
                 f'> "On {machine.get("name","DEEP THOUGHT")} '
-                f'({machine.get("cpu", "not set in baseline")} + {machine.get("gpu", "not set in baseline")}, '
+                f'({machine.get("cpu", _STR_NOT_SET_IN_BASELINE)} + {machine.get("gpu", _STR_NOT_SET_IN_BASELINE)}, '
                 f'{snap_bios}, OS: {machine.get("os","Windows 11 Pro")}) '
                 f'running {model_label} via llama.cpp build {build_commit}, '
                 f'the validated optimal single-user configuration is `{winner}`, '
@@ -1297,7 +1302,7 @@ def _build_markdown(
             if model_path_env.path is not None
             else f"<{model_path_env.message} — copy .env.example to .env>"
         )
-        build_commit = snap.get("build_commit") or runtime.get("build_commit") or "not captured"
+        build_commit = snap.get("build_commit") or runtime.get("build_commit") or _STR_NOT_CAPTURED
 
         if _is_custom:
             _cmd_label = "QuantMap — Custom Run — Best Tested Config"
@@ -1598,9 +1603,9 @@ def _build_markdown(
     def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
         row = _artifact_rows.get(artifact_type)
         if row:
-            status = row.get("status") or "not recorded"
+            status = row.get("status") or _STR_NOT_RECORDED
             sha = row.get("sha256")
-            verification = row.get("verification_source") or "not recorded"
+            verification = row.get("verification_source") or _STR_NOT_RECORDED
             err = row.get("error_message")
             parts = [status, f"verification={verification}"]
             if sha:
