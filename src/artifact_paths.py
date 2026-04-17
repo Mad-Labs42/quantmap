@@ -17,6 +17,47 @@ _SHARD_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
 _NON_SLUG_CHARS_RE = re.compile(r"[^a-z0-9._-]+")
 
 
+# =============================================================================
+# CANONICAL 4-ARTIFACT CONTRACT
+# =============================================================================
+# These are the single authoritative definitions for artifact type strings,
+# filenames, and roles.  All writers, readers, DB registrations, and indexes
+# MUST use these constants — never inline string literals.
+#
+# Artifact type strings (used in the `artifacts` DB table artifact_type column)
+ARTIFACT_CAMPAIGN_SUMMARY = "campaign_summary_md"
+ARTIFACT_RUN_REPORTS      = "run_reports_md"
+ARTIFACT_RAW_TELEMETRY    = "raw_telemetry_jsonl"
+ARTIFACT_METADATA         = "metadata_json"
+
+# Canonical output filenames
+FILENAME_CAMPAIGN_SUMMARY = "campaign-summary.md"
+FILENAME_RUN_REPORTS      = "run-reports.md"
+FILENAME_RAW_TELEMETRY    = "raw-telemetry.jsonl"
+FILENAME_METADATA         = "metadata.json"
+
+# Human-readable roles (for display and index tables)
+ARTIFACT_ROLES: dict[str, str] = {
+    ARTIFACT_CAMPAIGN_SUMMARY: "user-facing summary",
+    ARTIFACT_RUN_REPORTS:      "informational detail report",
+    ARTIFACT_RAW_TELEMETRY:    "raw machine measurement stream",
+    ARTIFACT_METADATA:         "structured provenance and scoring record",
+}
+
+# Deprecated artifact type strings still present in the DB for historical
+# campaigns.  These are NOT written for new campaigns (Phase 6 complete).
+# They are retained in listing/reading code for backwards compatibility with
+# pre-Phase-6 campaigns only.
+ARTIFACT_TYPES_DEPRECATED: frozenset[str] = frozenset({
+    "report_md",
+    "report_v2_md",
+    "scores_csv",
+    "raw_jsonl",
+    "telemetry_jsonl",
+    "config_yaml",
+})
+
+
 def artifact_root(lab_root: Path) -> Path:
     """Return the canonical artifact root for a lab root."""
     return lab_root / "artifacts"
@@ -100,13 +141,64 @@ def report_paths(
     *,
     create: bool = True,
 ) -> dict[str, Path]:
-    """Return canonical report-family paths for one campaign."""
+    """Return canonical report-family paths for one campaign.
+
+    Approved artifact contract (4 formal outputs per campaign):
+        campaign_summary_md  → campaign-summary.md   (primary human-facing summary)
+        run_reports_md       → run-reports.md         (detailed human-readable evidence)
+        metadata_json        → metadata.json          (structured provenance + scores + index)
+
+    Measurements family (in artifacts/measurements/...):
+        raw_telemetry_jsonl  → raw-telemetry.jsonl    (merged request + telemetry stream)
+
+    Deprecated aliases (kept for backwards compatibility during migration):
+        report_md            → alias for campaign_summary_md path
+        report_v2_md         → alias for run_reports_md path
+        scores_csv           → no longer a formal artifact; path retained for migration only
+    """
     reports_dir = artifact_dir(lab_root, "reports", model_identity, campaign_id, create=create)
+    campaign_summary = reports_dir / "campaign-summary.md"
+    run_reports      = reports_dir / "run-reports.md"
+    metadata         = reports_dir / "metadata.json"
     return {
-        "dir": reports_dir,
-        "report_md": reports_dir / "report.md",
-        "report_v2_md": reports_dir / "report_v2.md",
-        "scores_csv": reports_dir / "scores.csv",
+        "dir":                  reports_dir,
+        # ── Approved 4-artifact contract ──────────────────────────────────
+        "campaign_summary_md": campaign_summary,
+        "run_reports_md":      run_reports,
+        "metadata_json":       metadata,
+        # ── Deprecated aliases: read-compat only, not written for new campaigns ─
+        "report_md":           campaign_summary,    # DEPRECATED: alias for campaign_summary_md
+        "report_v2_md":        run_reports,          # DEPRECATED: alias for run_reports_md
+        "scores_csv":          reports_dir / "scores.csv",  # DEPRECATED: folded into metadata.json
+    }
+
+
+def measurement_paths(
+    lab_root: Path,
+    model_identity: str,
+    campaign_id: str,
+    *,
+    create: bool = True,
+) -> dict[str, Path]:
+    """Return canonical measurement-family paths for one campaign.
+
+    Approved artifact contract (measurements sub-family):
+        raw_telemetry_jsonl  → raw-telemetry.jsonl  (merged request + telemetry stream)
+
+    Deprecated (kept during migration):
+        raw_jsonl            → raw.jsonl             (DEPRECATED: use raw_telemetry_jsonl)
+        telemetry_jsonl      → telemetry.jsonl        (DEPRECATED: merged into raw_telemetry_jsonl)
+    """
+    meas_dir = artifact_dir(
+        lab_root, "measurements", model_identity, campaign_id, create=create
+    )
+    return {
+        "dir":                meas_dir,
+        # ── Approved ──────────────────────────────────────────────────────
+        "raw_telemetry_jsonl": meas_dir / "raw-telemetry.jsonl",
+        # ── Deprecated aliases: read-compat only, not written for new campaigns ─
+        "raw_jsonl":          meas_dir / "raw.jsonl",       # DEPRECATED: merged into raw_telemetry_jsonl
+        "telemetry_jsonl":    meas_dir / "telemetry.jsonl", # DEPRECATED: merged into raw_telemetry_jsonl
     }
 
 

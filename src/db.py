@@ -324,7 +324,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     campaign_id   TEXT NOT NULL,
     artifact_type TEXT NOT NULL,
-    -- report_md | scores_csv | raw_jsonl | telemetry_jsonl | config_yaml
+    -- Canonical types (4-artifact contract):
+    --   campaign_summary_md | run_reports_md | raw_telemetry_jsonl | metadata_json
+    -- Legacy types (pre-Phase-6 campaigns, read-compat only, not written for new runs):
+    --   report_md | report_v2_md | scores_csv | raw_jsonl | telemetry_jsonl
     path          TEXT NOT NULL,
     sha256        TEXT,
     created_at    TEXT NOT NULL,
@@ -809,22 +812,60 @@ def write_request(conn: sqlite3.Connection, cycle_id: int, result_dict: dict) ->
     conn.execute(f"INSERT INTO requests ({col_str}) VALUES ({placeholders})", values)
 
 
-def write_raw_jsonl(jsonl_path: Path, record: dict) -> None:
-    """Append a request record to raw.jsonl (immutable, append-only)."""
+def write_raw_jsonl(
+    jsonl_path: Path,
+    record: dict,
+    *,
+    stream: str | None = None,
+    merged_path: Path | None = None,
+) -> None:
+    """Append a record to a JSONL file (immutable, append-only).
+
+    Phase 6 callers should pass the canonical ``raw-telemetry.jsonl`` path as
+    ``jsonl_path`` directly.  The ``merged_path`` argument is retained for any
+    code still adapting to the new contract; it is a no-op when both paths are
+    the same object.
+
+    Args:
+        jsonl_path:   Primary output path (typically raw-telemetry.jsonl).
+                      The record is written here exactly as supplied, with
+                      ``_stream`` injected only when ``stream`` is provided.
+        record:       Dict to serialize as a JSONL line.
+        stream:       If provided, injected as ``_stream`` into the record
+                      before writing.  Approved values: ``"requests"``
+                      (request measurement records), ``"telemetry"`` (hardware
+                      sample records), ``"marker"`` (metadata sentinels), or
+                      ``"separator"`` (run-start boundary records).
+        merged_path:  Deprecated — kept for transition compatibility.
+                      If provided and different from ``jsonl_path``, the record
+                      (annotated with ``_stream``) is ALSO written to this path.
+    """
+    import json as _json
+    primary_record = {**record}
+    if stream is not None and "_stream" not in primary_record:
+        primary_record["_stream"] = stream
     jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    import json
     with open(jsonl_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+        f.write(_json.dumps(primary_record) + "\n")
+
+    # merged_path: kept for transition compatibility only.
+    # Written only when it refers to a different file than jsonl_path.
+    if merged_path is not None and merged_path != jsonl_path:
+        merged_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(merged_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(primary_record) + "\n")
 
 
-def write_jsonl_marker(jsonl_path: Path, marker_type: str, details: dict[str, Any]) -> None:
+def write_jsonl_marker(jsonl_path: Path, marker_type: str, details: dict[str, Any], *, merged_path: Path | None = None) -> None:
     """
     Append a metadata marker to a JSONL file.
     Preserves forensic history by avoiding rewrites while providing clear boundaries.
+    If merged_path is provided, the marker is also written there with ``_stream="marker"``.
     """
     marker = {
         "meta": marker_type,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         **details,
     }
-    write_raw_jsonl(jsonl_path, marker)
+    write_raw_jsonl(jsonl_path, marker, stream="marker", merged_path=merged_path)
+

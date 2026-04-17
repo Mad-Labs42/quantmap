@@ -1313,10 +1313,10 @@ def collect_background_snapshot(
 class TelemetryCollector:
     """
     Background thread collecting telemetry every 2 seconds and process
-    snapshots every 10 seconds. Writes to telemetry.jsonl and lab.sqlite.
+    snapshots every 10 seconds.  Writes to raw-telemetry.jsonl and lab.sqlite.
 
     Usage:
-        collector = TelemetryCollector(db_path, telemetry_jsonl_path)
+        collector = TelemetryCollector(db_path, raw_telemetry_jsonl_path=path)
         collector.start(campaign_id, config_id, server_pid=pid)
         # ... run measurements ...
         samples, snapshots = collector.stop()
@@ -1325,9 +1325,9 @@ class TelemetryCollector:
     SAMPLE_INTERVAL_S: float = 2.0
     SNAPSHOT_INTERVAL_S: float = 10.0
 
-    def __init__(self, db_path: Path, telemetry_jsonl_path: Path) -> None:
+    def __init__(self, db_path: Path, raw_telemetry_jsonl_path: Path | None = None) -> None:
         self._db_path = db_path
-        self._jsonl_path = telemetry_jsonl_path
+        self._merged_jsonl_path = raw_telemetry_jsonl_path  # canonical merged stream
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._samples: list[TelemetrySample] = []
@@ -1457,9 +1457,12 @@ class TelemetryCollector:
     def _write_sample(self, sample: TelemetrySample) -> None:
         row = asdict(sample)
         try:
-            self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._jsonl_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
+            # Write to canonical merged stream with _stream discriminator
+            if self._merged_jsonl_path is not None:
+                merged_row = {**row, "_stream": "telemetry"}
+                self._merged_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._merged_jsonl_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(merged_row) + "\n")
         except Exception as exc:
             logger.warning("Failed to write telemetry JSONL: %s", exc)
 
