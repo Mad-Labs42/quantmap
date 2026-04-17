@@ -16,6 +16,13 @@ from typing import Any
 import yaml
 
 from src.db import get_connection
+from src.artifact_paths import (
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_RUN_REPORTS,
+    ARTIFACT_METADATA,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_TYPES_DEPRECATED,
+)
 
 
 class TrustIdentityError(RuntimeError):
@@ -329,27 +336,61 @@ def load_artifact_summaries(campaign_id: str, db_path: Path) -> list[dict[str, A
 def summarize_report_artifact_status(
     campaign_id: str,
     db_path: Path,
-    expected_types: tuple[str, ...] = ("report_md", "report_v2_md", "scores_csv"),
+    expected_types: tuple[str, ...] | None = None,
 ) -> str:
-    """Return the campaign-level aggregate report status from artifact rows."""
+    """Return the campaign-level aggregate report status from artifact rows.
+
+    Checks for the approved artifact contract types first.  Also accepts old
+    legacy type names so rows written before the redesign migration still count
+    toward completeness rather than being treated as missing.
+
+    expected_types may be overridden by callers during transition; if None the
+    new canonical types are used.
+    """
+    # New canonical types for the 4-artifact contract (imported from artifact_paths).
+    _NEW_TYPES = (
+        ARTIFACT_CAMPAIGN_SUMMARY, 
+        ARTIFACT_RUN_REPORTS, 
+        ARTIFACT_METADATA,
+        ARTIFACT_RAW_TELEMETRY,
+    )
+    # Legacy types written before the rename migration (imported from artifact_paths).
+    _LEGACY_TYPES = tuple(t for t in ("report_md", "report_v2_md", "scores_csv") if t in ARTIFACT_TYPES_DEPRECATED)
+
     artifacts = load_artifact_summaries(campaign_id, db_path)
     by_type = {row.get("artifact_type"): row for row in artifacts}
     if not by_type:
         return "legacy_unknown"
 
-    statuses = []
-    for artifact_type in expected_types:
-        row = by_type.get(artifact_type)
-        if row is None:
-            statuses.append("missing")
+    if expected_types is not None:
+        # Explicit override: use exactly these types.
+        check_types = expected_types
+        statuses = []
+        for atype in check_types:
+            row = by_type.get(atype)
+            statuses.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
+    else:
+        # Auto: check new types; fall back to legacy equivalents if new are absent.
+        # A campaign that was run before the redesign only has old-type rows;
+        # we must not report it as "partial" just because new-type rows are missing.
+        has_any_new = any(atype in by_type for atype in _NEW_TYPES)
+        if has_any_new:
+            check_types = _NEW_TYPES
         else:
-            statuses.append(row.get("status") or "legacy_path_only")
+            check_types = _LEGACY_TYPES
+        statuses = []
+        for atype in check_types:
+            row = by_type.get(atype)
+            statuses.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
 
     if statuses and all(status == "complete" for status in statuses):
         return "complete"
     if any(status == "failed" for status in statuses):
         return "partial"
-    if any(status in {"partial", "missing", "legacy_path_only", "legacy_unverified"} for status in statuses):
+    if any(
+        status in {"partial", "missing", "legacy_path_only", "legacy_unverified"}
+        for status in statuses
+    ):
         return "partial"
     return "partial"
 

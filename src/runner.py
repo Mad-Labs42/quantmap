@@ -2002,7 +2002,8 @@ def run_campaign(
 
     # Phase 6: only the canonical merged stream is written for new campaigns.
     # raw.jsonl and telemetry.jsonl are no longer created.
-    raw_telemetry_jsonl_path = campaign_measurements_dir / "raw-telemetry.jsonl"
+    from src.artifact_paths import FILENAME_RAW_TELEMETRY  # noqa: PLC0415
+    raw_telemetry_jsonl_path = campaign_measurements_dir / FILENAME_RAW_TELEMETRY
 
     # Write a run-separator sentinel as the first JSONL record of this invocation.
     _run_start_iso = datetime.now(timezone.utc).isoformat()
@@ -2296,6 +2297,8 @@ def run_campaign(
             consecutive_ooms = 0
 
         first_config = True
+        campaign_exit_state = "COMPLETED"
+        campaign_exit_detail = "Normal execution complete."
         try:
             for i, config in enumerate(configs):
                 config_id = config["config_id"]
@@ -2408,10 +2411,14 @@ def run_campaign(
                         consecutive_ooms = 0
 
         except KeyboardInterrupt:
+            campaign_exit_state = "INTERRUPTED"
+            campaign_exit_detail = "Interrupted by user"
             logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", effective_campaign_id)
             console.print("\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]")
             return
         except Exception as exc:
+            campaign_exit_state = "FAILED"
+            campaign_exit_detail = str(exc)
             logger.critical("Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True)
             console.print(f"[bold red]Fatal error: {exc}[/bold red]")
             try:
@@ -2431,6 +2438,62 @@ def run_campaign(
             conn.close()
         except Exception:
             pass
+
+        # Phase 6: Write terminal marker, hash the final complete stream, and lock the artifact
+        if raw_telemetry_jsonl_path:
+            try:
+                from src.db import write_jsonl_marker  # noqa: PLC0415
+                write_jsonl_marker(
+                    raw_telemetry_jsonl_path,
+                    f"RUN_{campaign_exit_state}",
+                    {"details": campaign_exit_detail}
+                )
+            except Exception as m_exc:
+                logger.warning("Could not append terminal marker: %s", m_exc)
+
+            try:
+                import hashlib  # noqa: PLC0415
+                raw_tel_sha = None
+                if raw_telemetry_jsonl_path.exists():
+                    h = hashlib.sha256()
+                    with open(raw_telemetry_jsonl_path, "rb") as f:
+                        while chunk := f.read(8192 * 1024):  # 8MB chunks
+                            h.update(chunk)
+                    raw_tel_sha = h.hexdigest()
+                
+                _now_utc = datetime.now(timezone.utc).isoformat()
+                with get_connection(_eff_db_path) as _art_conn:
+                    _art_conn.execute(
+                        "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+                        (effective_campaign_id, "raw_telemetry_jsonl")
+                    )
+                    _art_conn.execute(
+                        """
+                        INSERT INTO artifacts (
+                            campaign_id, artifact_type, path, sha256, created_at, status, 
+                            producer, error_message, updated_at, verification_source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            effective_campaign_id,
+                            "raw_telemetry_jsonl",
+                            str(raw_telemetry_jsonl_path),
+                            raw_tel_sha,
+                            _now_utc,
+                            "complete" if raw_tel_sha else "missing",
+                            "src.runner.run_campaign",
+                            None if raw_tel_sha else "raw-telemetry.jsonl not found after finalize",
+                            _now_utc,
+                            "runner",
+                        )
+                    )
+                    _art_conn.commit()
+                if raw_tel_sha:
+                    logger.info("Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16])
+                else:
+                    logger.error("raw_telemetry_jsonl file completely missing at registration!")
+            except Exception as _art_exc:
+                logger.warning("Could not register raw_telemetry_jsonl artifact: %s", _art_exc)
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)
@@ -2549,10 +2612,10 @@ def run_campaign(
                 "run-reports.md generation failed (non-fatal): %s", _v2_exc
             )
             try:
-                from src.artifact_paths import report_paths as _rp  # noqa: PLC0415
+                from src.artifact_paths import report_paths as _rp, FILENAME_RUN_REPORTS  # noqa: PLC0415
                 _v2_path = _rp(
                     _effective_lab_root, model_identity, effective_campaign_id, create=False
-                ).get("run_reports_md", _effective_lab_root / "results" / effective_campaign_id / "run-reports.md")
+                ).get("run_reports_md", _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS)
                 with get_connection(_eff_db_path) as _art_conn:
                     _now_utc = datetime.now(timezone.utc).isoformat()
                     _art_conn.execute(

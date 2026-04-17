@@ -103,7 +103,7 @@ def _quality_label(quality: str | None) -> str:
         "mostly_clean": "mostly clean",
         "noisy":        "noisy",
         "distorted":    "distorted",
-    }.get(quality or "", quality or "unknown")
+    }.get(quality or "", quality or "not characterized")
 
 
 def _confidence_qualifier(assessment_confidence: str | None) -> str:
@@ -233,13 +233,13 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
         assess = ctx.get("assessment") or {}
         conf   = ctx.get("confidence") or {}
 
-        q = assess.get("environment_quality") or "unknown"
+        q = assess.get("environment_quality") or "not assessed"
         quality_counts[q] = quality_counts.get(q, 0) + 1
 
-        oc = conf.get("observation_completeness") or "unknown"
+        oc = conf.get("observation_completeness") or "not populated"
         completeness_counts[oc] = completeness_counts.get(oc, 0) + 1
 
-        ac = conf.get("assessment_confidence") or "unknown"
+        ac = conf.get("assessment_confidence") or "not populated"
         confidence_counts[ac] = confidence_counts.get(ac, 0) + 1
 
         if cid is not None:
@@ -378,13 +378,13 @@ def _section_header(
         from src.execution_environment import execution_environment_summary_lines  # noqa: PLC0415
         lines.extend(execution_environment_summary_lines(snap))
     except Exception:
-        lines.append("| Execution support tier | `unknown` |")
+        lines.append("| Execution support tier | `not assessed` |")
     try:
         from src.telemetry_provider import provider_evidence_summary_lines  # noqa: PLC0415
 
         lines.extend(provider_evidence_summary_lines(snap))
     except Exception:
-        lines.append("| Telemetry provider evidence | `unknown` |")
+        lines.append("| Telemetry provider evidence | `unverifiable` |")
     lines.append(f"| Model | {model_bl.get('name', '—')} |")
     lines.append(f"| Model size | {_na(model_bl.get('size_gb'))} GB |")
     lines.append(f"| Quantization | {model_bl.get('quantization', '—')} |")
@@ -393,7 +393,7 @@ def _section_header(
     if trust_identity is not None:
         qid = getattr(trust_identity, "quantmap", {}) or {}
         qver = qid.get("quantmap_version") or trust_identity.sources.get("quantmap", "legacy_unrecorded")
-        qcommit = qid.get("git_commit") or "unknown"
+        qcommit = qid.get("git_commit") or "not captured"
         lines.append(f"| QuantMap identity | {qver} / `{str(qcommit)[:16]}` |")
     lines.append(f"| Power plan | {snap.get('power_plan', '—')} |")
     build_commit = snap.get("build_commit", "—")
@@ -488,14 +488,14 @@ def _section_methodology(
     profile_name = (
         methodology.get("profile_name")
         or getattr(profile_obj, "name", None)
-        or "unknown"
+        or "not in methodology snapshot"
     )
     profile_version = (
         methodology.get("profile_version")
         or getattr(profile_obj, "version", None)
-        or "unknown"
+        or "not in methodology snapshot"
     )
-    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "unknown")
+    profile_family = getattr(getattr(profile_obj, "experiment_family", None), "value", "not in methodology snapshot")
     lines.append(
         f"**Experiment Profile:** `{profile_name}` v{profile_version} "
         f"({profile_family})  \n"
@@ -511,11 +511,13 @@ def _section_methodology(
     )
     
     # LCB Method Disclosure
-    lcb_method = "unknown"
+    lcb_method: str
     scores_df = scores_result.get("scores_df")
-    if scores_df is not None and not scores_df.empty:
-        lcb_method = scores_df["lcb_method"].iloc[0]
-    
+    if scores_df is not None and not scores_df.empty and "lcb_method" in scores_df.columns:
+        lcb_method = str(scores_df["lcb_method"].iloc[0])
+    else:
+        lcb_method = "not computed — minimum warm-sample threshold not met or no ranked configs"
+
     lines.append(f"> **LCB Computation Method:** {lcb_method}\n")
     
     sw = (
@@ -549,7 +551,7 @@ def _section_methodology(
         for m_name in sorted(governance_snapshot.keys()):
             ref = governance_snapshot[m_name]
             val = ref.get("value")
-            source = ref.get("source", "unknown")
+            source = ref.get("source", "no provenance label")
             provenance = ref.get("provenance", "N/A")
             
             val_str = f"{val:.1f}" if val is not None else "BATCH-BEST"
@@ -1786,7 +1788,7 @@ def _compute_background_interference(
         _SERVER_NAME_SUBSTRINGS = {"llama-server", "llama_server", "llama.server"}
 
         for p in procs:
-            name = p.get("name") or "unknown"
+            name = p.get("name") or "[unlabeled]"
             
             # Exclude server from all background logic
             if any(sub in name.lower() for sub in _SERVER_NAME_SUBSTRINGS):
@@ -2122,16 +2124,11 @@ def _section_background_interference(
         f"{campaign_id}'` for all snapshot rows with per-snapshot process lists.\n"
     )
     lines.append(
-        "> **Raw hardware trace:** see the **Supporting Evidence** artifact index for "
-        "the canonical `telemetry.jsonl` path (2-second hardware samples throughout the campaign).\n"
+        "> **Raw hardware trace:** see the **Campaign Artifacts** section for "
+        "the canonical `raw-telemetry.jsonl` path (merged 2-second hardware samples and request records).\n"
     )
-
     return lines
 
-
-# ---------------------------------------------------------------------------
-# Supporting Evidence / Artifact Linking
-# ---------------------------------------------------------------------------
 
 def _section_supporting_artifacts(
     campaign_id: str,
@@ -2173,8 +2170,8 @@ def _section_supporting_artifacts(
         row = artifact_rows.get(artifact_type)
         if not row:
             return _check(path)
-        status = row.get("status") or "unknown"
-        verification = row.get("verification_source") or "unknown"
+        status = row.get("status") or "not recorded"
+        verification = row.get("verification_source") or "not recorded"
         sha = row.get("sha256")
         error = row.get("error_message")
         parts = [status, f"verification={verification}"]
@@ -2183,14 +2180,18 @@ def _section_supporting_artifacts(
         if error:
             parts.append(f"error={str(error)[:80]}")
         return "; ".join(parts)
+    from src.artifact_paths import (  # noqa: PLC0415
+        FILENAME_RAW_TELEMETRY,
+        FILENAME_CAMPAIGN_SUMMARY,
+        FILENAME_RUN_REPORTS,
+        FILENAME_METADATA,
+    )
+    raw_telemetry_jsonl = measurements_dir / FILENAME_RAW_TELEMETRY
+    campaign_summary_md = reports_dir / FILENAME_CAMPAIGN_SUMMARY
+    run_reports_md      = reports_dir / FILENAME_RUN_REPORTS
+    metadata_json       = reports_dir / FILENAME_METADATA
 
-    telemetry_jsonl = measurements_dir / "telemetry.jsonl"
-    raw_jsonl       = measurements_dir / "raw.jsonl"
-    report_md       = reports_dir / "report.md"
-    report_v2_md    = reports_dir / "report_v2.md"
-    scores_csv      = reports_dir / "scores.csv"
-
-    # Count run context files
+    # Count run context files (internal delivery mechanism, not formal artifacts)
     rc_files = sorted(environment_dir.glob("*_run_context.json"))
     rc_status = f"✓ {len(rc_files)} file(s)" if rc_files else "✗ 0 files found"
 
@@ -2211,41 +2212,40 @@ def _section_supporting_artifacts(
     log_latest = f"`{log_files[-1].name}`" if log_files else "—"
 
     lines.append("### Artifact Index\n")
+    lines.append("_Formal campaign artifacts (approved 4-artifact contract):_\n")
     lines.append("| Artifact | Path | Status | Contents |")
     lines.append("|----------|------|:------:|----------|")
     lines.append(
-        f"| Hardware trace | `{telemetry_jsonl}` | {_artifact_status('telemetry_jsonl', telemetry_jsonl)} | "
-        "CPU/GPU/RAM/disk/network samples every 2 s |"
+        f"| Campaign Summary | `{campaign_summary_md}` | {_artifact_status('campaign_summary_md', campaign_summary_md)} | "
+        "Compact summary — winner, key results, artifact pointers |"
     )
     lines.append(
-        f"| Request results | `{raw_jsonl}` | {_artifact_status('raw_jsonl', raw_jsonl)} | "
-        "All inference request outcomes (TTFT, TG, outcome, errors) |"
+        f"| Run Reports (this file) | `{run_reports_md}` | {_artifact_status('run_reports_md', run_reports_md)} | "
+        "Full readable evidence, rankings, methodology, environment quality |"
+    )
+    lines.append(
+        f"| Measurement Stream | `{raw_telemetry_jsonl}` | {_artifact_status('raw_telemetry_jsonl', raw_telemetry_jsonl)} | "
+        "Merged request + telemetry records (distinguished by `_stream` field) |"
+    )
+    lines.append(
+        f"| Provenance + Scores | `{metadata_json}` | {_artifact_status('metadata_json', metadata_json)} | "
+        "Campaign YAML, scores, capability inventory, artifact manifest |"
     )
     lines.append(
         f"| Database | `{db_path}` | {_check(db_path)} | "
         "All tables: telemetry, background_snapshots, requests, scores, artifacts |"
     )
-    lines.append(
-        f"| Primary report | `{report_md}` | {_artifact_status('report_md', report_md)} | "
-        "Compact campaign report |"
-    )
-    lines.append(
-        f"| Evidence-first report | `{report_v2_md}` | {_artifact_status('report_v2_md', report_v2_md)} | "
-        "This file |"
-    )
-    lines.append(
-        f"| Scores CSV | `{scores_csv}` | {_artifact_status('scores_csv', scores_csv)} | "
-        "Per-config statistics and rankings |"
-    )
+    lines.append("\n_Supporting files (not formal artifacts):_\n")
     lines.append(
         f"| Per-cycle environment | `{environment_dir}/*_run_context.json` | {rc_status} | "
-        "Pre-cycle environment characterization per cycle |"
+        "Internal delivery mechanism — aggregated into run-reports.md and metadata.json |"
     )
     lines.append(
         f"| Run log(s) | `{log_dir}/runner_*.log` | {log_status} | "
         f"Full execution trace. Latest: {log_latest} |"
     )
     lines.append("")
+
 
     lines.append("### Database Inspection Queries\n")
     lines.append(
@@ -2355,11 +2355,11 @@ def generate_campaign_report(
     lab_root:      Path | None = None,
 ) -> Path:
     """
-    Generate the QuantMap campaign report (evidence-first philosophy).
+    Generate the run-reports.md artifact (detailed human-readable evidence report).
 
     If scores_result and stats are not provided, they are computed from
     the database. The report is written to the canonical reports family:
-        artifacts/reports/<model_slug>/<campaign_slug>/report_v2.md
+        artifacts/reports/<model_slug>/<campaign_slug>/run-reports.md
 
     Args:
         campaign_id:   Effective campaign ID (may be mode-scoped, e.g.
@@ -2375,7 +2375,7 @@ def generate_campaign_report(
         lab_root:      Effective lab root. Defaults to LAB_ROOT env var.
 
     Returns:
-        Path to the generated Markdown report file.
+        Path to the generated run-reports.md file.
 
     Never raises — exceptions are logged and the function returns a path
     even if the file was partially written.
@@ -2415,7 +2415,7 @@ def generate_campaign_report(
         "environment",
         campaign_id,
     ) or legacy_results_dir
-    report_path = report_artifacts["report_v2_md"]
+    report_path = report_artifacts["run_reports_md"]
 
     # Compute analysis if not provided
     if scores_result is None:
@@ -2484,7 +2484,7 @@ def generate_campaign_report(
         )
     except Exception as exc:
         logger.warning("report: header section failed: %s", exc)
-        sections.append(f"# QuantMap Campaign Report — {campaign_id}\n")
+        sections.append(f"# QuantMap Run Reports — {campaign_id}\n")
 
     # Methodology
     try:
@@ -2638,31 +2638,31 @@ def generate_campaign_report(
 
     md = "\n".join(sections)
     report_path.write_text(md, encoding="utf-8")
-    logger.info("Campaign report (v2) written: %s", report_path)
+    logger.info("Run reports written: %s", report_path)
 
-    # Record report_v2.md generation in the artifacts table.
+    # Record run-reports.md generation in the artifacts table.
     # Consistent with generate_report() — any query against artifacts can now
     # show all report files alongside their generation timestamps.
     _now_utc = datetime.now(timezone.utc).isoformat()
     try:
         with get_connection(db_path) as _art_conn:
-            # Canonicalize: Delete previous report_v2_md artifacts for this campaign
+            # Canonicalize: Delete previous run_reports_md artifacts for this campaign
             # to prevent DB bloat and ensure Single Source of Truth.
             _art_conn.execute(
                 "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, "report_v2_md")
+                (campaign_id, "run_reports_md")
             )
             _report_sha = _file_sha256(report_path)
             _report_status = "partial" if section_failures else ("complete" if _report_sha else "failed")
             _report_error = "; ".join(f"{k}: {v}" for k, v in section_failures) or None
             if _report_sha is None:
-                _report_error = _report_error or "artifact file missing or unreadable after report generation"
+                _report_error = _report_error or "run-reports.md missing or unreadable after generation"
             _art_conn.execute(
                 "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
-                    "report_v2_md",
+                    "run_reports_md",
                     str(report_path),
                     _report_sha,
                     _now_utc,
@@ -2675,6 +2675,6 @@ def generate_campaign_report(
             )
             _art_conn.commit()
     except Exception as _art_exc:
-        logger.warning("Could not record report_v2.md in artifacts table (non-fatal): %s", _art_exc)
+        logger.warning("Could not record run-reports.md in artifacts table (non-fatal): %s", _art_exc)
 
     return report_path

@@ -252,5 +252,60 @@ def test_report_paths_canonical_set(tmp_path):
     assert paths["metadata_json"].name == "metadata.json"
 
 
+# =============================================================================
+# Test 6 — Trust Identity artifact completeness requires raw_telemetry_jsonl
+# =============================================================================
+
+def test_trust_identity_artifact_completeness(tmp_path):
+    """summarize_report_artifact_status must require ARTIFACT_RAW_TELEMETRY for completion."""
+    from src.trust_identity import summarize_report_artifact_status
+    from src.db import init_db, get_connection
+    from src.artifact_paths import (
+        ARTIFACT_CAMPAIGN_SUMMARY, 
+        ARTIFACT_RUN_REPORTS, 
+        ARTIFACT_METADATA,
+        ARTIFACT_RAW_TELEMETRY,
+    )
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    campaign_id = "test_C01"
+
+    _now = "2026-04-17T00:00:00Z"
+    
+    # helper to insert artifact
+    def add_art(atype: str, status: str = "complete"):
+        with get_connection(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO artifacts (campaign_id, artifact_type, path, created_at, status) 
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (campaign_id, atype, f"/tmp/{atype}", _now, status)
+            )
+            conn.commit()
+
+    # 1. Empty setup -> missing/partial
+    assert summarize_report_artifact_status(campaign_id, db_path) in ("legacy_unknown", "partial")
+
+    # 2. Add only 3 artifacts (the old broken behavior)
+    add_art(ARTIFACT_CAMPAIGN_SUMMARY)
+    add_art(ARTIFACT_RUN_REPORTS)
+    add_art(ARTIFACT_METADATA)
+
+    # Missing raw_telemetry -> should be partial
+    assert summarize_report_artifact_status(campaign_id, db_path) == "partial", (
+        "Campaign must NOT be complete if raw_telemetry_jsonl is missing."
+    )
+
+    # 3. Add raw telemetry
+    add_art(ARTIFACT_RAW_TELEMETRY)
+
+    # Now we have all 4 canonical artifacts -> complete
+    assert summarize_report_artifact_status(campaign_id, db_path) == "complete", (
+        "Campaign must be 'complete' when all 4 canonical artifacts are registered."
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

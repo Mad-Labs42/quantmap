@@ -157,9 +157,9 @@ def report_paths(
         scores_csv           → no longer a formal artifact; path retained for migration only
     """
     reports_dir = artifact_dir(lab_root, "reports", model_identity, campaign_id, create=create)
-    campaign_summary = reports_dir / "campaign-summary.md"
-    run_reports      = reports_dir / "run-reports.md"
-    metadata         = reports_dir / "metadata.json"
+    campaign_summary = reports_dir / FILENAME_CAMPAIGN_SUMMARY
+    run_reports      = reports_dir / FILENAME_RUN_REPORTS
+    metadata         = reports_dir / FILENAME_METADATA
     return {
         "dir":                  reports_dir,
         # ── Approved 4-artifact contract ──────────────────────────────────
@@ -195,7 +195,7 @@ def measurement_paths(
     return {
         "dir":                meas_dir,
         # ── Approved ──────────────────────────────────────────────────────
-        "raw_telemetry_jsonl": meas_dir / "raw-telemetry.jsonl",
+        "raw_telemetry_jsonl": meas_dir / FILENAME_RAW_TELEMETRY,
         # ── Deprecated aliases: read-compat only, not written for new campaigns ─
         "raw_jsonl":          meas_dir / "raw.jsonl",       # DEPRECATED: merged into raw_telemetry_jsonl
         "telemetry_jsonl":    meas_dir / "telemetry.jsonl", # DEPRECATED: merged into raw_telemetry_jsonl
