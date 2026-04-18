@@ -20,6 +20,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -272,14 +273,15 @@ def test_trust_identity_artifact_completeness(tmp_path):
     _now = "2026-04-17T00:00:00Z"
     
     # helper to insert artifact
-    def add_art(atype: str, status: str = "complete"):
+    def add_art(atype: str, status: str = "complete", campaign: str = campaign_id):
+        artifact_path = tmp_path / "artifacts" / f"{atype}.artifact"
         with get_connection(db_path) as conn:
             conn.execute(
                 """
                 INSERT INTO artifacts (campaign_id, artifact_type, path, created_at, status) 
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (campaign_id, atype, f"/tmp/{atype}", _now, status)
+                (campaign, atype, str(artifact_path), _now, status)
             )
             conn.commit()
 
@@ -303,6 +305,104 @@ def test_trust_identity_artifact_completeness(tmp_path):
     assert summarize_report_artifact_status(campaign_id, db_path) == "complete", (
         "Campaign must be 'complete' when all 4 canonical artifacts are registered."
     )
+
+    legacy_campaign_id = "legacy_C01"
+    for legacy_type in ("report_md", "report_v2_md", "scores_csv"):
+        add_art(legacy_type, campaign=legacy_campaign_id)
+
+    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
+        "Legacy fallback must not be complete when telemetry artifacts are missing."
+    )
+
+    add_art("raw_jsonl", campaign=legacy_campaign_id)
+    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
+        "Legacy fallback must not be complete until both legacy telemetry artifacts exist."
+    )
+
+    add_art("telemetry_jsonl", campaign=legacy_campaign_id)
+    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "complete", (
+        "Legacy fallback may be complete only when report, score, and telemetry artifacts exist."
+    )
+
+
+def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):
+    """Early exits before execution must not append raw-telemetry markers."""
+    from src import runner
+    from src.db import init_db, get_connection
+
+    lab_root = tmp_path / "lab"
+    db_path = lab_root / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True)
+    init_db(db_path)
+
+    campaign_id = "complete_C01"
+    now = "2026-04-17T00:00:00Z"
+    with get_connection(db_path) as conn:
+        conn.execute(
+            "INSERT INTO campaigns (id, name, status, created_at) VALUES (?, ?, 'complete', ?)",
+            (campaign_id, campaign_id, now),
+        )
+        conn.commit()
+
+    class _Console:
+        def print(self, *args, **kwargs):
+            return None
+
+    fake_server = types.ModuleType("src.server")
+    fake_server.SERVER_BIN = tmp_path / "llama-server.exe"
+    fake_server.MODEL_PATH = tmp_path / "model.gguf"
+    fake_policy = types.ModuleType("src.telemetry_policy")
+    fake_policy.enforce_current_run_readiness = lambda: None
+
+    monkeypatch.setitem(sys.modules, "src.server", fake_server)
+    monkeypatch.setitem(sys.modules, "src.telemetry_policy", fake_policy)
+    monkeypatch.setattr(runner, "console", _Console())
+    monkeypatch.setattr(runner, "_derive_lab_root", lambda baseline_path: lab_root)
+    monkeypatch.setattr(runner, "_setup_logging", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "_run_preflight_checks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner.tele, "shutdown", lambda: None)
+    monkeypatch.setattr(
+        runner,
+        "load_baseline",
+        lambda path=runner.BASELINE_YAML: {
+            "model": {"name": "test-model"},
+            "requests": {},
+            "lab": {},
+        },
+    )
+    monkeypatch.setattr(
+        runner,
+        "load_campaign",
+        lambda _campaign_id: {"type": "primary_sweep", "values": [1]},
+    )
+    monkeypatch.setattr(runner, "validate_campaign_purity", lambda baseline, campaign: "threads")
+    monkeypatch.setattr(
+        runner,
+        "build_config_list",
+        lambda baseline, campaign: [
+            {
+                "config_id": "cfg1",
+                "variable_name": "threads",
+                "variable_value": 1,
+                "server_args": [],
+                "full_config": {},
+            }
+        ],
+    )
+
+    runner.run_campaign(
+        campaign_id,
+        resume=False,
+        baseline_path=tmp_path / "baseline.yaml",
+    )
+
+    assert not list((lab_root / "artifacts").rglob("raw-telemetry.jsonl"))
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            (campaign_id, ARTIFACT_RAW_TELEMETRY),
+        ).fetchall()
+    assert rows == []
 
 
 if __name__ == "__main__":

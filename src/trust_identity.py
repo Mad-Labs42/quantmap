@@ -364,7 +364,17 @@ def summarize_report_artifact_status(
         ARTIFACT_RAW_TELEMETRY,
     )
     # Legacy types written before the rename migration (imported from artifact_paths).
-    _LEGACY_TYPES = tuple(t for t in ("report_md", "report_v2_md", "scores_csv") if t in ARTIFACT_TYPES_DEPRECATED)
+    _LEGACY_TYPES = tuple(
+        t
+        for t in (
+            "report_md",
+            "report_v2_md",
+            "scores_csv",
+            "raw_jsonl",
+            "telemetry_jsonl",
+        )
+        if t in ARTIFACT_TYPES_DEPRECATED
+    )
 
     artifacts = load_artifact_summaries(campaign_id, db_path)
     by_type = {row.get("artifact_type"): row for row in artifacts}

@@ -2007,16 +2007,7 @@ def run_campaign(
     # raw.jsonl and telemetry.jsonl are no longer created.
     from src.artifact_paths import FILENAME_RAW_TELEMETRY  # noqa: PLC0415
     raw_telemetry_jsonl_path = campaign_measurements_dir / FILENAME_RAW_TELEMETRY
-
-    # Write a run-separator sentinel as the first JSONL record of this invocation.
-    _run_start_iso = datetime.now(timezone.utc).isoformat()
-    _sentinel = {
-        "_run_separator":  True,
-        "_stream":         "separator",
-        "campaign_id":     effective_campaign_id,
-        "run_started_at":  _run_start_iso,
-    }
-    write_raw_jsonl(raw_telemetry_jsonl_path, _sentinel)
+    telemetry_stream_started = False
 
     init_db(_eff_db_path)
 
@@ -2070,6 +2061,18 @@ def run_campaign(
                 f"be skipped; only configs not yet marked complete will run.[/yellow]"
             )
             return
+
+        # Write the run-separator sentinel only after confirming this invocation
+        # will proceed. Early exits must not mutate the append-only evidence stream.
+        _run_start_iso = datetime.now(timezone.utc).isoformat()
+        _sentinel = {
+            "_run_separator":  True,
+            "_stream":         "separator",
+            "campaign_id":     effective_campaign_id,
+            "run_started_at":  _run_start_iso,
+        }
+        write_raw_jsonl(raw_telemetry_jsonl_path, _sentinel)
+        telemetry_stream_started = True
 
         # Forensics: Mark the start of a resumed run in the logs.
         if resume and existing is not None:
@@ -2442,7 +2445,7 @@ def run_campaign(
             conn.close()
 
         # Phase 6: Write terminal marker, hash the final complete stream, and lock the artifact
-        if raw_telemetry_jsonl_path:
+        if raw_telemetry_jsonl_path and telemetry_stream_started:
             try:
                 from src.db import write_jsonl_marker  # noqa: PLC0415
                 write_jsonl_marker(
