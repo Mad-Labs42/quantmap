@@ -25,6 +25,13 @@ dependencies = [
     "pydantic>=2.0,<3.0"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "types-psutil",
+    "types-PyYAML",
+    "pandas-stubs",
+]
+
 [project.scripts]
 quantmap = "quantmap:main"
 
