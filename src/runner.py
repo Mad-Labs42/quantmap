@@ -71,7 +71,17 @@ from src import doctor
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
 from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
-from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
+from src.artifact_paths import (  # noqa: E402
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_LEGACY_REPORT,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_RUN_REPORTS,
+    FILENAME_RAW_TELEMETRY,
+    FILENAME_RUN_REPORTS,
+    artifact_dir,
+    infer_model_identity,
+    report_paths,
+)
 
 # Rich components
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
@@ -437,10 +447,10 @@ def list_campaigns() -> None:
                 COALESCE(c.completed_at, c.started_at, c.created_at) AS ts,
                 -- Prefer new canonical type; fall back to legacy type for pre-migration campaigns
                 (SELECT a.path FROM artifacts a
-                 WHERE a.campaign_id = c.id AND a.artifact_type = 'campaign_summary_md'
+                 WHERE a.campaign_id = c.id AND a.artifact_type = ?
                  LIMIT 1) AS report_path_new,
                 (SELECT a.path FROM artifacts a
-                 WHERE a.campaign_id = c.id AND a.artifact_type = 'report_md'
+                 WHERE a.campaign_id = c.id AND a.artifact_type = ?
                  LIMIT 1) AS report_path_legacy,
                 (SELECT css.execution_environment_json FROM campaign_start_snapshot css
                  WHERE css.campaign_id = c.id
@@ -448,6 +458,7 @@ def list_campaigns() -> None:
             FROM campaigns c
             ORDER BY ts DESC
             """,
+            (ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_LEGACY_REPORT),
         ).fetchall()
 
     if not rows:
@@ -1232,10 +1243,11 @@ def _run_cycle(
                 result_dict["resolved_cmd_argv"] = srv["resolved_cmd_argv"]
 
                 # Write to raw-telemetry.jsonl (canonical merged stream)
-                write_raw_jsonl(
-                    raw_telemetry_jsonl_path, result_dict,
-                    stream="requests",
-                ) if raw_telemetry_jsonl_path else None
+                if raw_telemetry_jsonl_path:
+                    write_raw_jsonl(
+                        raw_telemetry_jsonl_path, result_dict,
+                        stream="requests",
+                    )
 
                 # Write to SQLite (Phase 2 Scoped)
                 try:
@@ -1469,11 +1481,16 @@ def _run_config(
                     cycle_number, config_id, existing_status,
                 )
                 from src.db import write_jsonl_marker  # noqa: PLC0415
-                write_jsonl_marker(
-                    raw_telemetry_jsonl_path,
-                    "RESTART_CYCLE",
-                    {"config_id": config_id, "cycle_number": cycle_number, "reason": "resume_recovery"},
-                ) if raw_telemetry_jsonl_path else None
+                if raw_telemetry_jsonl_path:
+                    write_jsonl_marker(
+                        raw_telemetry_jsonl_path,
+                        "RESTART_CYCLE",
+                        {
+                            "config_id": config_id,
+                            "cycle_number": cycle_number,
+                            "reason": "resume_recovery",
+                        },
+                    )
 
                 # Rule B: Surgical cleanup using cycle_id only. (Phase 2 Scoped)
                 try:
@@ -2005,9 +2022,10 @@ def run_campaign(
 
     # Phase 6: only the canonical merged stream is written for new campaigns.
     # raw.jsonl and telemetry.jsonl are no longer created.
-    from src.artifact_paths import FILENAME_RAW_TELEMETRY  # noqa: PLC0415
     raw_telemetry_jsonl_path = campaign_measurements_dir / FILENAME_RAW_TELEMETRY
     telemetry_stream_started = False
+    campaign_exit_state = "FAILED"
+    campaign_exit_detail = "Campaign terminated before config execution started."
 
     init_db(_eff_db_path)
 
@@ -2457,7 +2475,6 @@ def run_campaign(
                 logger.warning("Could not append terminal marker: %s", m_exc)
 
             try:
-                import hashlib  # noqa: PLC0415
                 raw_tel_sha = None
                 if raw_telemetry_jsonl_path.exists():
                     h = hashlib.sha256()
@@ -2470,7 +2487,7 @@ def run_campaign(
                 with get_connection(_eff_db_path) as _art_conn:
                     _art_conn.execute(
                         "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                        (effective_campaign_id, "raw_telemetry_jsonl")
+                        (effective_campaign_id, ARTIFACT_RAW_TELEMETRY)
                     )
                     _art_conn.execute(
                         """
@@ -2481,7 +2498,7 @@ def run_campaign(
                         """,
                         (
                             effective_campaign_id,
-                            "raw_telemetry_jsonl",
+                            ARTIFACT_RAW_TELEMETRY,
                             str(raw_telemetry_jsonl_path),
                             raw_tel_sha,
                             _now_utc,
@@ -2616,15 +2633,17 @@ def run_campaign(
                 "run-reports.md generation failed (non-fatal): %s", _v2_exc
             )
             try:
-                from src.artifact_paths import report_paths as _rp, FILENAME_RUN_REPORTS  # noqa: PLC0415
-                _v2_path = _rp(
+                _v2_path = report_paths(
                     _effective_lab_root, model_identity, effective_campaign_id, create=False
-                ).get("run_reports_md", _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS)
+                ).get(
+                    ARTIFACT_RUN_REPORTS,
+                    _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS,
+                )
                 with get_connection(_eff_db_path) as _art_conn:
                     _now_utc = datetime.now(timezone.utc).isoformat()
                     _art_conn.execute(
                         "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                        (effective_campaign_id, "run_reports_md"),
+                        (effective_campaign_id, ARTIFACT_RUN_REPORTS),
                     )
                     _art_conn.execute(
                         """
@@ -2635,7 +2654,7 @@ def run_campaign(
                         """,
                         (
                             effective_campaign_id,
-                            "run_reports_md",
+                            ARTIFACT_RUN_REPORTS,
                             str(_v2_path),
                             _now_utc,
                             "failed",

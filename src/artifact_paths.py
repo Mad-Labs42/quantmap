@@ -29,6 +29,7 @@ ARTIFACT_CAMPAIGN_SUMMARY = "campaign_summary_md"
 ARTIFACT_RUN_REPORTS      = "run_reports_md"
 ARTIFACT_RAW_TELEMETRY    = "raw_telemetry_jsonl"
 ARTIFACT_METADATA         = "metadata_json"
+ARTIFACT_LEGACY_REPORT    = "report_md"
 
 # Canonical output filenames
 FILENAME_CAMPAIGN_SUMMARY = "campaign-summary.md"
@@ -49,7 +50,7 @@ ARTIFACT_ROLES: dict[str, str] = {
 # They are retained in listing/reading code for backwards compatibility with
 # pre-Phase-6 campaigns only.
 ARTIFACT_TYPES_DEPRECATED: frozenset[str] = frozenset({
-    "report_md",
+    ARTIFACT_LEGACY_REPORT,
     "report_v2_md",
     "scores_csv",
     "raw_jsonl",

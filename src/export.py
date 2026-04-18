@@ -334,8 +334,12 @@ def _load_campaign_snapshot(campaign_id: str, db_path: "Path") -> "tuple[dict, d
             snap = dict(snap_row)
             baseline_raw = yaml.safe_load(snap.get("baseline_yaml_content") or "") or {}
             return snap, baseline_raw
-    except Exception:
-        pass
+    except Exception as snap_exc:
+        _logger.debug(
+            "metadata.json: snapshot loading failed (non-fatal): %s",
+            snap_exc,
+            exc_info=True,
+        )
     return {}, {}
 
 
@@ -481,10 +485,10 @@ def _build_artifact_inventory(
     for art_type, filename in canonical_map.items():
         if art_type in registered_types:
             continue
-        candidate = (
-            (meas_dir / filename) if (art_type == ARTIFACT_RAW_TELEMETRY and meas_dir)
-            else (reports_dir / filename)
-        )
+        if art_type == ARTIFACT_RAW_TELEMETRY:
+            candidate = (meas_dir / filename) if meas_dir is not None else None
+        else:
+            candidate = reports_dir / filename
         artifact_inventory.append({
             "artifact_type": art_type,
             "role": ARTIFACT_ROLES.get(art_type, ""),
@@ -521,7 +525,12 @@ def _build_run_context_summary(
                 "SELECT COUNT(*) FROM cycles WHERE campaign_id=? AND status='invalid'",
                 (campaign_id,),
             ).fetchone()[0]
-    except Exception:
+    except Exception as db_exc:
+        logger.debug(
+            "metadata.json: cycle query failed (non-fatal): %s",
+            db_exc,
+            exc_info=True,
+        )
         cycle_rows = []
         total_cycles_db = None
         invalid_count = None
@@ -746,7 +755,7 @@ def generate_metadata_json(
             "methodology_version": trust_identity.methodology.get("version") or _STR_NOT_IN_METHODOLOGY,
             "source":              methodology_label,
             "weights":             trust_identity.methodology.get("weights"),
-            "eligibility_filters": trust_identity.methodology.get("eligibility_filters"),
+            "eligibility_filters": trust_identity.methodology.get("gates"),
             "anchors":             trust_identity.methodology.get("anchors"),
         },
         "ranking": {
@@ -768,7 +777,7 @@ def generate_metadata_json(
         metadata_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
         logger.info("metadata.json written: %s", metadata_path)
     except Exception as write_exc:
-        logger.error("metadata.json write failed: %s", write_exc)
+        logger.exception("metadata.json write failed: %s", write_exc)
 
     # ── Register in DB ─────────────────────────────────────────────────────────
     _register_metadata_artifact(campaign_id, db_path, metadata_path, now_utc, logger)

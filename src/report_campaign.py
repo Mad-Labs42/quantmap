@@ -29,6 +29,7 @@ _STR_NOT_SET_IN_BASELINE = "not set in baseline"
 _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 _STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
+_KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
 
 import json
@@ -41,7 +42,12 @@ from typing import Any
 
 from src.db import get_connection
 from src.settings_env import optional_env_path
-from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
+from src.artifact_paths import (
+    ARTIFACT_RUN_REPORTS,
+    find_artifact_dir,
+    infer_model_identity,
+    report_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -245,7 +251,12 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
         oc = conf.get("observation_completeness") or "not populated"
         completeness_counts[oc] = completeness_counts.get(oc, 0) + 1
 
-        ac = conf.get("assessment_confidence") or "not populated"
+        ac_raw = conf.get("assessment_confidence")
+        ac = (
+            ac_raw
+            if isinstance(ac_raw, str) and ac_raw in _KNOWN_ASSESSMENT_CONFIDENCE
+            else "not populated"
+        )
         confidence_counts[ac] = confidence_counts.get(ac, 0) + 1
 
         if cid is not None:
@@ -287,9 +298,12 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
 
     # Overall assessment confidence: worst-case of individual cycles
     overall_confidence: str
-    if confidence_counts.get("low", 0) > 0:
+    known_conf_total = sum(confidence_counts.get(k, 0) for k in _KNOWN_ASSESSMENT_CONFIDENCE)
+    if known_conf_total == 0:
+        overall_confidence = "not populated"
+    elif confidence_counts.get("low", 0) > 0:
         overall_confidence = "low"
-    elif confidence_counts.get("medium", 0) > total // 2:
+    elif confidence_counts.get("medium", 0) > known_conf_total // 2:
         overall_confidence = "medium"
     else:
         overall_confidence = "high"
@@ -297,10 +311,12 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
     # Per-config assessment confidence: worst-case for that config's cycles
     config_confidences: dict[str, str] = {}
     for cid, counts in config_confidence_counts.items():
-        total_cid = sum(counts.values())
-        if counts.get("low", 0) > 0:
+        known_total_cid = sum(counts.get(k, 0) for k in _KNOWN_ASSESSMENT_CONFIDENCE)
+        if known_total_cid == 0:
+            config_confidences[cid] = "not populated"
+        elif counts.get("low", 0) > 0:
             config_confidences[cid] = "low"
-        elif counts.get("medium", 0) > total_cid // 2:
+        elif counts.get("medium", 0) > known_total_cid // 2:
             config_confidences[cid] = "medium"
         else:
             config_confidences[cid] = "high"
@@ -2421,7 +2437,7 @@ def generate_campaign_report(
         "environment",
         campaign_id,
     ) or legacy_results_dir
-    report_path = report_artifacts["run_reports_md"]
+    report_path = report_artifacts[ARTIFACT_RUN_REPORTS]
 
     # Compute analysis if not provided
     if scores_result is None:
@@ -2656,7 +2672,7 @@ def generate_campaign_report(
             # to prevent DB bloat and ensure Single Source of Truth.
             _art_conn.execute(
                 "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, "run_reports_md")
+                (campaign_id, ARTIFACT_RUN_REPORTS)
             )
             _report_sha = _file_sha256(report_path)
             _report_status = "partial" if section_failures else ("complete" if _report_sha else "failed")
@@ -2668,7 +2684,7 @@ def generate_campaign_report(
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
-                    "run_reports_md",
+                    ARTIFACT_RUN_REPORTS,
                     str(report_path),
                     _report_sha,
                     _now_utc,
