@@ -232,24 +232,36 @@ def rescore(
         report_path = generate_report(campaign_id, DB_PATH, baseline, result, stats)
         logger.info("Report written: %s", report_path)
 
-        # Regenerate the evidence-first report (report_v2.md) so it always
-        # reflects the current DB state.  Without this, report_v2.md retains
-        # conclusions (winner, eliminated, Pareto) from the prior scoring pass
-        # while report.md and the scores table are already updated — the two
-        # files would then contradict each other with no warning.
+        # Regenerate run-reports.md so it always reflects the current DB state.
+        # Without this, run-reports.md retains conclusions (winner, eliminated, Pareto)
+        # from the prior scoring pass while campaign-summary.md and the scores table
+        # are already updated — the two files would then contradict each other.
         v2_ok = True
         try:
             v2_path = generate_campaign_report(
                 campaign_id, DB_PATH, baseline,
                 scores_result=result, stats=stats,
             )
-            logger.info("Evidence-first report (v2) written: %s", v2_path)
+            logger.info("run-reports.md written: %s", v2_path)
         except Exception as _v2_exc:
             v2_ok = False
             logger.warning(
-                "Evidence-first report (report_v2.md) regeneration failed (non-fatal): %s",
+                "run-reports.md regeneration failed (non-fatal): %s",
                 _v2_exc,
             )
+
+        # Generate metadata.json (4th formal artifact).
+        try:
+            from src.export import generate_metadata_json  # noqa: PLC0415
+            meta_path = generate_metadata_json(
+                campaign_id,
+                DB_PATH,
+                scores_result=result,
+                stats=stats,
+            )
+            logger.info("metadata.json written: %s", meta_path)
+        except Exception as _meta_exc:
+            logger.warning("metadata.json generation failed (non-fatal): %s", _meta_exc)
 
         with get_connection(DB_PATH) as conn:
             from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415

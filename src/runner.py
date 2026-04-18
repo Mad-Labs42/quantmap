@@ -71,7 +71,17 @@ from src import doctor
 from src.db import init_db, get_connection, write_request, write_raw_jsonl
 from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
-from src.artifact_paths import artifact_dir, infer_model_identity  # noqa: E402
+from src.artifact_paths import (  # noqa: E402
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_LEGACY_REPORT,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_RUN_REPORTS,
+    FILENAME_RAW_TELEMETRY,
+    FILENAME_RUN_REPORTS,
+    artifact_dir,
+    infer_model_identity,
+    report_paths,
+)
 
 # Rich components
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
@@ -435,15 +445,20 @@ def list_campaigns() -> None:
                  WHERE s.campaign_id = c.id AND s.is_score_winner = 1
                  LIMIT 1) AS winner_tg,
                 COALESCE(c.completed_at, c.started_at, c.created_at) AS ts,
+                -- Prefer new canonical type; fall back to legacy type for pre-migration campaigns
                 (SELECT a.path FROM artifacts a
-                 WHERE a.campaign_id = c.id AND a.artifact_type = 'report_md'
-                 LIMIT 1) AS report_path,
+                 WHERE a.campaign_id = c.id AND a.artifact_type = ?
+                 LIMIT 1) AS report_path_new,
+                (SELECT a.path FROM artifacts a
+                 WHERE a.campaign_id = c.id AND a.artifact_type = ?
+                 LIMIT 1) AS report_path_legacy,
                 (SELECT css.execution_environment_json FROM campaign_start_snapshot css
                  WHERE css.campaign_id = c.id
                  LIMIT 1) AS execution_environment_json
             FROM campaigns c
             ORDER BY ts DESC
             """,
+            (ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_LEGACY_REPORT),
         ).fetchall()
 
     if not rows:
@@ -482,12 +497,15 @@ def list_campaigns() -> None:
         winner,
         winner_tg,
         ts,
-        report_path,
+        report_path_new,
+        report_path_legacy,
         execution_environment_json,
     ) in rows:
         style = status_styles.get(status, "")
         post_status = f"a:{analysis_status or 'legacy'} r:{report_status or 'legacy'}"
         ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
+        # Prefer canonical new type (campaign_summary_md); fall back to legacy (report_md)
+        report_path = report_path_new or report_path_legacy
         report_display = str(report_path) if report_path else "—"
         mode_label = _ML.get(run_mode, run_mode.title()) if run_mode else "—"
         support_tier = "legacy"
@@ -1095,11 +1113,10 @@ def _run_cycle(
     campaign_id: str,
     lab_config: dict[str, Any],
     request_files: dict[str, Path],
-    raw_jsonl_path: Path,
-    telemetry_jsonl_path: Path,
     collector: tele.TelemetryCollector,
     console: Console,
     logs_dir: Path | None = None,
+    raw_telemetry_jsonl_path: Path | None = None,
 ) -> tuple[bool, list[dict]]:
     """
     Run one cycle (server start + N requests).
@@ -1225,8 +1242,12 @@ def _run_cycle(
                 result_dict["resolved_command"] = resolved_cmd
                 result_dict["resolved_cmd_argv"] = srv["resolved_cmd_argv"]
 
-                # Write to raw.jsonl (immutable)
-                write_raw_jsonl(raw_jsonl_path, result_dict)
+                # Write to raw-telemetry.jsonl (canonical merged stream)
+                if raw_telemetry_jsonl_path:
+                    write_raw_jsonl(
+                        raw_telemetry_jsonl_path, result_dict,
+                        stream="requests",
+                    )
 
                 # Write to SQLite (Phase 2 Scoped)
                 try:
@@ -1344,8 +1365,6 @@ def _run_config(
     campaign_id: str,
     lab_config: dict[str, Any],
     request_files: dict[str, Path],
-    raw_jsonl_path: Path,
-    telemetry_jsonl_path: Path,
     collector: tele.TelemetryCollector,
     progress_state: dict[str, Any],
     console: Console,
@@ -1354,6 +1373,7 @@ def _run_config(
     state_file: Path | None = None,
     logs_dir: Path | None = None,
     environment_dir: Path | None = None,
+    raw_telemetry_jsonl_path: Path | None = None,
 ) -> bool | str:
     """
     Run all cycles for one config. Returns True if config completed without
@@ -1371,7 +1391,20 @@ def _run_config(
     _eff_state_dir  = state_dir  if state_dir  is not None else STATE_DIR
     _eff_state_file = state_file if state_file is not None else STATE_FILE
     _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
-    _eff_environment_dir = environment_dir if environment_dir is not None else raw_jsonl_path.parent
+    if environment_dir is not None:
+        _eff_environment_dir = environment_dir
+    elif raw_telemetry_jsonl_path is not None:
+        measurement_campaign_dir = raw_telemetry_jsonl_path.parent
+        model_dir = measurement_campaign_dir.parent
+        artifacts_root_dir = model_dir.parent.parent
+        _eff_environment_dir = (
+            artifacts_root_dir
+            / "environment"
+            / model_dir.name
+            / measurement_campaign_dir.name
+        )
+    else:
+        _eff_environment_dir = STATE_DIR
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
     
@@ -1456,16 +1489,16 @@ def _run_config(
                     cycle_number, config_id, existing_status,
                 )
                 from src.db import write_jsonl_marker  # noqa: PLC0415
-                write_jsonl_marker(
-                    raw_jsonl_path,
-                    "RESTART_CYCLE",
-                    {"config_id": config_id, "cycle_number": cycle_number, "reason": "resume_recovery"}
-                )
-                write_jsonl_marker(
-                    telemetry_jsonl_path,
-                    "RESTART_CYCLE",
-                    {"config_id": config_id, "cycle_number": cycle_number, "reason": "resume_recovery"}
-                )
+                if raw_telemetry_jsonl_path:
+                    write_jsonl_marker(
+                        raw_telemetry_jsonl_path,
+                        "RESTART_CYCLE",
+                        {
+                            "config_id": config_id,
+                            "cycle_number": cycle_number,
+                            "reason": "resume_recovery",
+                        },
+                    )
 
                 # Rule B: Surgical cleanup using cycle_id only. (Phase 2 Scoped)
                 try:
@@ -1516,11 +1549,10 @@ def _run_config(
                 campaign_id=campaign_id,
                 lab_config=lab_config,
                 request_files=request_files,
-                raw_jsonl_path=raw_jsonl_path,
-                telemetry_jsonl_path=telemetry_jsonl_path,
                 collector=collector,
                 console=console,
                 logs_dir=_eff_logs_dir,
+                raw_telemetry_jsonl_path=raw_telemetry_jsonl_path,
             )
 
             if thermal_event:
@@ -1996,21 +2028,12 @@ def run_campaign(
         create=True,
     )
 
-    raw_jsonl_path = campaign_measurements_dir / "raw.jsonl"
-    telemetry_jsonl_path = campaign_measurements_dir / "telemetry.jsonl"
-
-    # Write a run-separator sentinel as the first JSONL record of this invocation.
-    # raw.jsonl is append-only (immutable per MDD §9.2).  If the same campaign is
-    # run more than once (e.g. after wiping the DB, or on a crash-and-rerun without
-    # --resume), records from multiple distinct runs accumulate in the file with no
-    # record-level marker differentiating them.  The sentinel provides a clear
-    # boundary: any downstream reader can split the file on _run_separator=true.
-    _run_start_iso = datetime.now(timezone.utc).isoformat()
-    write_raw_jsonl(raw_jsonl_path, {
-        "_run_separator":  True,
-        "campaign_id":     effective_campaign_id,
-        "run_started_at":  _run_start_iso,
-    })
+    # Phase 6: only the canonical merged stream is written for new campaigns.
+    # raw.jsonl and telemetry.jsonl are no longer created.
+    raw_telemetry_jsonl_path = campaign_measurements_dir / FILENAME_RAW_TELEMETRY
+    telemetry_stream_started = False
+    campaign_exit_state = "FAILED"
+    campaign_exit_detail = "Campaign terminated before config execution started."
 
     init_db(_eff_db_path)
 
@@ -2065,20 +2088,27 @@ def run_campaign(
             )
             return
 
+        # Write the run-separator sentinel only after confirming this invocation
+        # will proceed. Early exits must not mutate the append-only evidence stream.
+        _run_start_iso = datetime.now(timezone.utc).isoformat()
+        _sentinel = {
+            "_run_separator":  True,
+            "_stream":         "separator",
+            "campaign_id":     effective_campaign_id,
+            "run_started_at":  _run_start_iso,
+        }
+        write_raw_jsonl(raw_telemetry_jsonl_path, _sentinel)
+        telemetry_stream_started = True
+
         # Forensics: Mark the start of a resumed run in the logs.
         if resume and existing is not None:
             from src.db import write_jsonl_marker  # noqa: PLC0415
             write_jsonl_marker(
-                raw_jsonl_path,
+                raw_telemetry_jsonl_path,
                 "RESUME_CAMPAIGN",
-                {"campaign_id": effective_campaign_id}
+                {"campaign_id": effective_campaign_id},
             )
-            write_jsonl_marker(
-                telemetry_jsonl_path,
-                "RESUME_CAMPAIGN",
-                {"campaign_id": effective_campaign_id}
-            )
-            logger.info("Resume marker recorded in JSONL logs")
+            logger.info("Resume marker recorded in JSONL log")
 
         # -------------------------------------------------------------------------
         # Campaign start snapshot
@@ -2186,8 +2216,7 @@ def run_campaign(
                 "diagnostic": exc.assessment.diagnostic,
             }
             try:
-                write_raw_jsonl(raw_jsonl_path, {"_backend_execution_policy_block": True, **marker})
-                write_raw_jsonl(telemetry_jsonl_path, {"_backend_execution_policy_block": True, **marker})
+                write_raw_jsonl(raw_telemetry_jsonl_path, {"_backend_execution_policy_block": True, "_stream": "marker", **marker})
             except Exception as marker_exc:
                 logger.warning("Could not write backend execution policy marker: %s", marker_exc)
 
@@ -2282,7 +2311,7 @@ def run_campaign(
         # -------------------------------------------------------------------------
         collector = tele.TelemetryCollector(
             db_path=_eff_db_path,
-            telemetry_jsonl_path=telemetry_jsonl_path,
+            raw_telemetry_jsonl_path=raw_telemetry_jsonl_path,
         )
 
         # -------------------------------------------------------------------------
@@ -2300,6 +2329,8 @@ def run_campaign(
             consecutive_ooms = 0
 
         first_config = True
+        campaign_exit_state = "COMPLETED"
+        campaign_exit_detail = "Normal execution complete."
         try:
             for i, config in enumerate(configs):
                 config_id = config["config_id"]
@@ -2331,8 +2362,7 @@ def run_campaign(
                     campaign_id=effective_campaign_id,
                     lab_config=lab_config,
                     request_files=request_files,
-                    raw_jsonl_path=raw_jsonl_path,
-                    telemetry_jsonl_path=telemetry_jsonl_path,
+                    raw_telemetry_jsonl_path=raw_telemetry_jsonl_path,
                     collector=collector,
                     progress_state=progress_state,
                     console=console,
@@ -2413,10 +2443,14 @@ def run_campaign(
                         consecutive_ooms = 0
 
         except KeyboardInterrupt:
+            campaign_exit_state = "INTERRUPTED"
+            campaign_exit_detail = "Interrupted by user"
             logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", effective_campaign_id)
             console.print("\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]")
             return
         except Exception as exc:
+            campaign_exit_state = "FAILED"
+            campaign_exit_detail = str(exc)
             logger.critical("Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True)
             console.print(f"[bold red]Fatal error: {exc}[/bold red]")
             try:
@@ -2432,10 +2466,64 @@ def run_campaign(
     finally:
         tele.shutdown()
         # Phase 2: Close scoped connection safely
-        try:
+        import contextlib
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:
-            pass
+
+        # Phase 6: Write terminal marker, hash the final complete stream, and lock the artifact
+        if raw_telemetry_jsonl_path and telemetry_stream_started:
+            try:
+                from src.db import write_jsonl_marker  # noqa: PLC0415
+                write_jsonl_marker(
+                    raw_telemetry_jsonl_path,
+                    f"RUN_{campaign_exit_state}",
+                    {"details": campaign_exit_detail}
+                )
+            except Exception as m_exc:
+                logger.warning("Could not append terminal marker: %s", m_exc)
+
+            try:
+                raw_tel_sha = None
+                if raw_telemetry_jsonl_path.exists():
+                    h = hashlib.sha256()
+                    with open(raw_telemetry_jsonl_path, "rb") as f:
+                        while chunk := f.read(8192 * 1024):  # 8MB chunks
+                            h.update(chunk)
+                    raw_tel_sha = h.hexdigest()
+                
+                _now_utc = datetime.now(timezone.utc).isoformat()
+                with get_connection(_eff_db_path) as _art_conn:
+                    _art_conn.execute(
+                        "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+                        (effective_campaign_id, ARTIFACT_RAW_TELEMETRY)
+                    )
+                    _art_conn.execute(
+                        """
+                        INSERT INTO artifacts (
+                            campaign_id, artifact_type, path, sha256, created_at, status, 
+                            producer, error_message, updated_at, verification_source
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            effective_campaign_id,
+                            ARTIFACT_RAW_TELEMETRY,
+                            str(raw_telemetry_jsonl_path),
+                            raw_tel_sha,
+                            _now_utc,
+                            "complete" if raw_tel_sha else "missing",
+                            "src.runner.run_campaign",
+                            None if raw_tel_sha else "raw-telemetry.jsonl not found after finalize",
+                            _now_utc,
+                            "runner",
+                        )
+                    )
+                    _art_conn.commit()
+                if raw_tel_sha:
+                    logger.info("Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16])
+                else:
+                    logger.error("raw_telemetry_jsonl file completely missing at registration!")
+            except Exception as _art_exc:
+                logger.warning("Could not register raw_telemetry_jsonl artifact: %s", _art_exc)
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)
@@ -2544,21 +2632,26 @@ def run_campaign(
             v2_path = generate_campaign_report(
                 effective_campaign_id, _eff_db_path, baseline, scores, stats,
                 campaign=campaign,
-                run_plan=run_plan,
                 lab_root=_effective_lab_root,
             )
-            console.print(f"[green]Evidence report written:[/green] {v2_path}")
+            console.print(f"[green]Run reports written:[/green] {v2_path}")
         except Exception as _v2_exc:
             v2_ok = False
             logger.warning(
-                "Evidence-first report generation failed (non-fatal): %s", _v2_exc
+                "run-reports.md generation failed (non-fatal): %s", _v2_exc
             )
             try:
+                _v2_path = report_paths(
+                    _effective_lab_root, model_identity, effective_campaign_id, create=False
+                ).get(
+                    ARTIFACT_RUN_REPORTS,
+                    _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS,
+                )
                 with get_connection(_eff_db_path) as _art_conn:
                     _now_utc = datetime.now(timezone.utc).isoformat()
                     _art_conn.execute(
                         "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                        (effective_campaign_id, "report_v2_md"),
+                        (effective_campaign_id, ARTIFACT_RUN_REPORTS),
                     )
                     _art_conn.execute(
                         """
@@ -2569,8 +2662,8 @@ def run_campaign(
                         """,
                         (
                             effective_campaign_id,
-                            "report_v2_md",
-                            str(_effective_lab_root / "results" / effective_campaign_id / "report_v2.md"),
+                            ARTIFACT_RUN_REPORTS,
+                            str(_v2_path),
                             _now_utc,
                             "failed",
                             "src.report_campaign.generate_campaign_report",
@@ -2580,7 +2673,22 @@ def run_campaign(
                     )
                     _art_conn.commit()
             except Exception as _art_exc:
-                logger.warning("Could not record report_v2.md failure artifact: %s", _art_exc)
+                logger.warning("Could not record run-reports.md failure artifact: %s", _art_exc)
+
+        # Generate metadata.json (4th formal artifact).
+        # Non-fatal — failures are logged and registered in DB as failed status.
+        try:
+            from src.export import generate_metadata_json  # noqa: PLC0415
+            meta_path = generate_metadata_json(
+                effective_campaign_id,
+                _eff_db_path,
+                scores_result=scores,
+                stats=stats,
+                lab_root=_effective_lab_root,
+            )
+            console.print(f"[green]Metadata written:[/green] {meta_path}")
+        except Exception as _meta_exc:
+            logger.warning("metadata.json generation failed (non-fatal): %s", _meta_exc)
 
         with get_connection(_eff_db_path) as _status_conn:
             from src.trust_identity import summarize_report_artifact_status  # noqa: PLC0415
