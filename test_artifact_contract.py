@@ -327,6 +327,8 @@ def test_trust_identity_artifact_completeness(tmp_path):
 
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):
     """Early exits before execution must not append raw-telemetry markers."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
     from src import runner
     from src.db import init_db, get_connection
 
