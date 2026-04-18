@@ -36,3 +36,12 @@ include-package-data = true
 [tool.setuptools.package-data]
 configs = ["*.yaml", "profiles/*.yaml"]
 requests = ["*.json"]
+
+[tool.mypy]
+exclude = [
+    '(^|[\\/])build([\\/]|$)',
+    '(^|[\\/])dist([\\/]|$)',
+    '(^|[\\/])[^\\/]+\.egg-info([\\/]|$)',
+    '(^|[\\/])tools([\\/]|$)',
+    '(^|[\\/])\.venv([\\/]|$)',
+]
