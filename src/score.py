@@ -48,9 +48,10 @@ import hashlib
 import json
 import logging
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping, cast
 
 import pandas as pd
 import numpy as np
@@ -65,6 +66,8 @@ from src.trust_identity import (
 )
 
 logger = logging.getLogger(__name__)
+
+ScoreComputeResult = tuple[pd.DataFrame, list[str], list[str], list[str]]
 
 # ---------------------------------------------------------------------------
 # Elimination filter thresholds — Governed by the Experiment Profile
@@ -170,8 +173,8 @@ def rank_overall(passing_dict: dict[str, dict[str, Any]]) -> pd.DataFrame:
     """
     scores_df, _, _, _ = compute_scores(
         passing_dict, {}, passing_dict,
-        governance.DEFAULT_PROFILE,
-        governance.BUILTIN_REGISTRY,
+        governance.get_default_profile(),
+        governance.get_builtin_registry(),
         {},
     )
     return scores_df
@@ -183,7 +186,7 @@ def rank_overall(passing_dict: dict[str, dict[str, Any]]) -> pd.DataFrame:
 
 def apply_elimination_filters(
     stats: dict[str, dict[str, Any]],
-    filters: dict[str, float] | None = None,
+    filters: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     """
     Apply elimination filters to config stats.
@@ -226,7 +229,7 @@ def apply_elimination_filters(
     return passing, eliminated
 
 
-def _check_filters(config_id: str, s: dict[str, Any], f: dict[str, float]) -> str | None:
+def _check_filters(config_id: str, s: dict[str, Any], f: Mapping[str, float]) -> str | None:
     """Return elimination reason string, or None if the config passes all filters."""
 
     # Fatal startup errors (OOMs, crashes) or instrumentation degradation (Severity B)
@@ -400,7 +403,11 @@ def _apply_utility_transform(
         # 2. Fall back to best-in-batch (Cohort-Relative)
         anchor = provided_reference
         if anchor is None:
-            all_vals = [s.get(metric_name) for s in rankable_stats.values() if s.get(metric_name) is not None]
+            all_vals = [
+                cast(float, s.get(metric_name))
+                for s in rankable_stats.values()
+                if s.get(metric_name) is not None
+            ]
             if not all_vals:
                 return 0.0
             anchor = max(all_vals) if direction == governance.ObjectiveDirection.maximize else min(all_vals)
@@ -499,7 +506,11 @@ def _compute_config_lcb(
             # Anchor lookup must match point-estimate anchor for internal consistency
             anchor = ref_val
             if anchor is None:
-                all_vals = [st.get(m_name) for st in rankable_stats.values() if st.get(m_name) is not None]
+                all_vals = [
+                    cast(float, st.get(m_name))
+                    for st in rankable_stats.values()
+                    if st.get(m_name) is not None
+                ]
                 anchor = max(all_vals) if mdef.objective_direction == governance.ObjectiveDirection.maximize else min(all_vals)
             
             u_se = se_m / anchor if anchor and anchor > 0 else 0.0
@@ -530,7 +541,7 @@ def compute_scores(
     profile:           governance.ExperimentProfile,
     registry:          governance.MetricRegistry,
     provided_references: dict[str, float],
-) -> pd.DataFrame:
+) -> ScoreComputeResult:
     """
     Compute composite scores for rankable configs and identify performance
     leaders across the full evidence set (rankable + unrankable).
@@ -591,7 +602,7 @@ def compute_scores(
     # Hard NaN Guard: Exclude configs that have NaNs in any SURVIVING dimension.
     # These configs are truth-invalidated for composite comparison.
     is_nan_invalid = df_rankable[surviving_dimensions].isnull().any(axis=1)
-    nan_invalid_ids = df_rankable.index[is_nan_invalid].tolist()
+    nan_invalid_ids = cast(list[str], df_rankable.index[is_nan_invalid].tolist())
     if nan_invalid_ids:
         logger.warning(
             "COMPOSITE EXCLUSION: %d configs excluded from ranking due to NaNs in surviving dimensions: %s",
@@ -759,7 +770,7 @@ def score_campaign(
     db_path: Path,
     baseline: dict[str, Any],
     campaign: dict[str, Any] | None = None,
-    filter_overrides: dict[str, float] | None = None,
+    filter_overrides: Mapping[str, float] | None = None,
     profile_name: str | None = None,
     force_new_anchors: bool = False,
     current_input: bool = False,
@@ -962,8 +973,8 @@ def score_campaign(
             if config_id not in passing:
                 continue
             s = passing[config_id]
-            tg   = s.get("warm_tg_median")      # guaranteed non-None (rankable)
-            ttft = s.get("warm_ttft_median_ms")  # guaranteed non-None (rankable)
+            tg = cast(float, s.get("warm_tg_median"))  # guaranteed non-None (rankable)
+            ttft = cast(float, s.get("warm_ttft_median_ms"))  # guaranteed non-None (rankable)
             tg_pct   = (tg   - ref_warm_tg)   / ref_warm_tg   * 100.0
             ttft_pct = (ref_warm_ttft - ttft)  / ref_warm_ttft * 100.0
             scores_df.at[config_id, "warm_tg_vs_baseline_pct"]   = tg_pct
@@ -1102,6 +1113,8 @@ def _persist_methodology_snapshot(
                     capture_source,
                 ),
             )
+            if cur.lastrowid is None:
+                raise RuntimeError("methodology snapshot insert did not return a row id")
             snapshot_id = int(cur.lastrowid)
             
             # Load existing notes
