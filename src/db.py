@@ -476,7 +476,12 @@ def _backfill_legacy_methodology_snapshots(conn: sqlite3.Connection) -> None:
                 "campaigns.notes_json.governance_methodology",
             ),
         )
-        legacy["methodology_snapshot_id"] = int(cur.lastrowid)
+        snapshot_id = cur.lastrowid
+        if snapshot_id is None:
+            raise SchemaVersionError(
+                "Legacy methodology snapshot backfill inserted no row id."
+            )
+        legacy["methodology_snapshot_id"] = int(snapshot_id)
         legacy["capture_quality"] = "legacy_partial"
         notes["governance_methodology"] = legacy
         conn.execute(
