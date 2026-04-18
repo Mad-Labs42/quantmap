@@ -23,11 +23,13 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+_JSONL_WRITE_LOCK = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # DDL — Table definitions
@@ -844,16 +846,18 @@ def write_raw_jsonl(
     primary_record = {**record}
     if stream is not None and "_stream" not in primary_record:
         primary_record["_stream"] = stream
-    jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(jsonl_path, "a", encoding="utf-8") as f:
-        f.write(_json.dumps(primary_record) + "\n")
+    line = _json.dumps(primary_record) + "\n"
+    with _JSONL_WRITE_LOCK:
+        jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(jsonl_path, "a", encoding="utf-8") as f:
+            f.write(line)
 
-    # merged_path: kept for transition compatibility only.
-    # Written only when it refers to a different file than jsonl_path.
-    if merged_path is not None and merged_path != jsonl_path:
-        merged_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(merged_path, "a", encoding="utf-8") as f:
-            f.write(_json.dumps(primary_record) + "\n")
+        # merged_path: kept for transition compatibility only.
+        # Written only when it refers to a different file than jsonl_path.
+        if merged_path is not None and merged_path != jsonl_path:
+            merged_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(merged_path, "a", encoding="utf-8") as f:
+                f.write(line)
 
 
 def write_jsonl_marker(jsonl_path: Path, marker_type: str, details: dict[str, Any], *, merged_path: Path | None = None) -> None:

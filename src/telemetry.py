@@ -52,6 +52,7 @@ import warnings
 
 import psutil
 from src.execution_environment import SUPPORT_WSL_DEGRADED, classify_execution_environment
+from src.db import write_raw_jsonl
 from src.telemetry_hwinfo import read_hwinfo_shared_memory_bytes
 from src.telemetry_nvml import probe_nvml_provider
 from src.telemetry_provider import build_provider_evidence
@@ -1459,10 +1460,7 @@ class TelemetryCollector:
         try:
             # Write to canonical merged stream with _stream discriminator
             if self._merged_jsonl_path is not None:
-                merged_row = {**row, "_stream": "telemetry"}
-                self._merged_jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._merged_jsonl_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(merged_row) + "\n")
+                write_raw_jsonl(self._merged_jsonl_path, row, stream="telemetry")
         except Exception as exc:
             logger.warning(
                 "Failed to write merged telemetry JSONL to %s: %s",

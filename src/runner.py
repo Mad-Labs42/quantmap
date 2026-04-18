@@ -1394,7 +1394,15 @@ def _run_config(
     if environment_dir is not None:
         _eff_environment_dir = environment_dir
     elif raw_telemetry_jsonl_path is not None:
-        _eff_environment_dir = raw_telemetry_jsonl_path.parent
+        measurement_campaign_dir = raw_telemetry_jsonl_path.parent
+        model_dir = measurement_campaign_dir.parent
+        artifacts_root_dir = model_dir.parent.parent
+        _eff_environment_dir = (
+            artifacts_root_dir
+            / "environment"
+            / model_dir.name
+            / measurement_campaign_dir.name
+        )
     else:
         _eff_environment_dir = STATE_DIR
     config_id = config["config_id"]
