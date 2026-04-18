@@ -50,7 +50,7 @@ import logging
 import hashlib
 import os
 import statistics
-import subprocess
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
@@ -63,12 +63,11 @@ from src import ui
 
 load_dotenv()
 
-# Internal modules
-from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa: E402
-from src.measure import load_request_payload, measure_request_sync, RequestOutcome
-from src import telemetry as tele
-from src import doctor
-from src.db import init_db, get_connection, write_request, write_raw_jsonl
+# Internal modules. src.config reads environment variables at import time.
+from src.config import CONFIGS_DIR, LAB_ROOT  # noqa: E402
+from src.measure import load_request_payload, measure_request_sync, RequestOutcome  # noqa: E402
+from src import telemetry as tele  # noqa: E402
+from src.db import init_db, get_connection, write_request, write_raw_jsonl  # noqa: E402
 from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
 from src.artifact_paths import (  # noqa: E402
@@ -84,8 +83,9 @@ from src.artifact_paths import (  # noqa: E402
 )
 
 # Rich components
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
-from rich.table import Table  # type: ignore[import]
+from rich.console import Console  # type: ignore[import]  # noqa: E402
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]  # noqa: E402
+from rich.table import Table  # type: ignore[import]  # noqa: E402
 
 console = ui.get_console()
 logger = logging.getLogger(__name__)
@@ -1987,7 +1987,7 @@ def run_campaign(
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
         from src.telemetry_policy import enforce_current_run_readiness  # noqa: PLC0415
-        availability = enforce_current_run_readiness()
+        enforce_current_run_readiness()
         console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
         console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
@@ -2393,9 +2393,9 @@ def run_campaign(
                                 config_id, consecutive_ooms,
                             )
                             console.print(
-                                f"\n[bold red]OOM boundary confirmed[/bold red] "
-                                f"(2 consecutive OOM failures). Terminating sweep.\n"
-                                f"All remaining configs will be marked skipped_oom."
+                                "\n[bold red]OOM boundary confirmed[/bold red] "
+                                "(2 consecutive OOM failures). Terminating sweep.\n"
+                                "All remaining configs will be marked skipped_oom."
                             )
                             # Mark all remaining configs skipped_oom in DB + progress
                             # BEFORE break, so crash recovery skips them on resume.
@@ -2550,7 +2550,6 @@ def run_campaign(
     report_ok = False
     analysis_ok = False
     try:
-        from src.analyze import analyze_campaign
         from src.score import score_campaign
         from src.report import generate_report
 
@@ -2819,7 +2818,7 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
 def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False) -> None:
     """Run environment checks and print a compact summary if issues are found."""
     from src import doctor
-    from src.diagnostics import DiagnosticReport, Status
+    from src.diagnostics import Status
 
     results = []
     # 0. Backend execution boundary
