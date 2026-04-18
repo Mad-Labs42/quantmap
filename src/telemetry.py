@@ -1464,7 +1464,11 @@ class TelemetryCollector:
                 with open(self._merged_jsonl_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(merged_row) + "\n")
         except Exception as exc:
-            logger.warning("Failed to write telemetry JSONL: %s", exc)
+            logger.warning(
+                "Failed to write merged telemetry JSONL to %s: %s",
+                self._merged_jsonl_path,
+                exc,
+            )
 
         try:
             if self._conn:

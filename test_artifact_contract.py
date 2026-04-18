@@ -10,8 +10,8 @@ Checks:
   5. measurement_paths / report_paths do not add raw.jsonl or telemetry.jsonl
      to the 'approved' dict subset (backward compat aliases are still there,
      but the canonical set is exactly 1 measurement file).
-  6. No legacy JSONL files (raw.jsonl, telemetry.jsonl) are opened during a
-     simulated _run_cycle call (monkeypatched).
+  6. Trust identity completeness requires the canonical measurement artifact.
+  7. A complete campaign invoked without resume does not mutate telemetry.
 """
 from __future__ import annotations
 

@@ -42,7 +42,19 @@ from src.db import get_connection
 from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
-from src.artifact_paths import find_artifact_dir, infer_model_identity, report_paths
+from src.artifact_paths import (
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_METADATA,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_RUN_REPORTS,
+    FILENAME_CAMPAIGN_SUMMARY,
+    FILENAME_METADATA,
+    FILENAME_RAW_TELEMETRY,
+    FILENAME_RUN_REPORTS,
+    find_artifact_dir,
+    infer_model_identity,
+    report_paths,
+)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -484,7 +496,7 @@ def generate_report(
         create=True,
     )
 
-    md_path = report_artifacts["campaign_summary_md"]
+    md_path = report_artifacts[ARTIFACT_CAMPAIGN_SUMMARY]
 
     # scores.csv is no longer written here — its data is folded into metadata.json.
     # The report_artifacts dict retains the deprecated "scores_csv" key for any
@@ -511,14 +523,14 @@ def generate_report(
             _error = None if _sha else "campaign-summary.md missing or unreadable after write"
             _art_conn.execute(
                 "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, "campaign_summary_md")
+                (campaign_id, ARTIFACT_CAMPAIGN_SUMMARY),
             )
             _art_conn.execute(
                 "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     campaign_id,
-                    "campaign_summary_md",
+                    ARTIFACT_CAMPAIGN_SUMMARY,
                     str(md_path),
                     _sha,
                     _now_utc,
@@ -1589,7 +1601,6 @@ def _build_markdown(
         campaign_id,
     ) or report_dir
 
-    from src.artifact_paths import FILENAME_RAW_TELEMETRY, FILENAME_RUN_REPORTS, FILENAME_METADATA  # noqa: PLC0415
     _raw_telemetry_jsonl = measurements_dir / FILENAME_RAW_TELEMETRY
     _run_reports_md      = report_dir / FILENAME_RUN_REPORTS
     _metadata_json       = report_dir / FILENAME_METADATA
@@ -1624,18 +1635,18 @@ def _build_markdown(
     sections.append("| Artifact | Path | Status |")
     sections.append("|----------|------|:------:|")
     sections.append(
-        f"| Campaign Summary (this file) | `{report_dir / 'campaign-summary.md'}` | "
-        f"{_artifact_status('campaign_summary_md', report_dir / 'campaign-summary.md')} |"
+        f"| Campaign Summary (this file) | `{report_dir / FILENAME_CAMPAIGN_SUMMARY}` | "
+        f"{_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY, report_dir / FILENAME_CAMPAIGN_SUMMARY)} |"
     )
     sections.append(
-        f"| Detailed Report | `{_run_reports_md}` | {_artifact_status('run_reports_md', _run_reports_md)} |"
+        f"| Detailed Report | `{_run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS, _run_reports_md)} |"
     )
     sections.append(
         f"| Measurement Stream | `{_raw_telemetry_jsonl}` | "
-        f"{_artifact_status('raw_telemetry_jsonl', _raw_telemetry_jsonl)} |"
+        f"{_artifact_status(ARTIFACT_RAW_TELEMETRY, _raw_telemetry_jsonl)} |"
     )
     sections.append(
-        f"| Provenance + Scores | `{_metadata_json}` | {_artifact_status('metadata_json', _metadata_json)} |"
+        f"| Provenance + Scores | `{_metadata_json}` | {_artifact_status(ARTIFACT_METADATA, _metadata_json)} |"
     )
     sections.append(
         f"| Full database | `{db_path}` | {'file_present' if db_path.exists() else 'not found'} |"
