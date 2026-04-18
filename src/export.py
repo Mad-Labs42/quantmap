@@ -345,6 +345,54 @@ def _load_campaign_snapshot(campaign_id: str, db_path: "Path") -> "tuple[dict, d
 # ---------------------------------------------------------------------------
 
 
+def _build_env_summary(
+    snap: dict,
+    machine_bl: dict,
+    exec_env: dict,
+    telemetry_provider: dict,
+) -> dict:
+    """Return the environment_summary dict for metadata.json."""
+    return {
+        "support_tier":              exec_env.get("support_tier") or _STR_NOT_IN_SNAPSHOT,
+        "measurement_grade":         exec_env.get("measurement_grade") or _STR_NOT_IN_SNAPSHOT,
+        "telemetry_capture_quality": telemetry_provider.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
+        "machine_name":   machine_bl.get("name") or _STR_NOT_SET_IN_BASELINE,
+        "cpu":            machine_bl.get("cpu") or _STR_NOT_SET_IN_BASELINE,
+        "gpu":            machine_bl.get("gpu") or _STR_NOT_SET_IN_BASELINE,
+        "ram":            machine_bl.get("ram") or _STR_NOT_SET_IN_BASELINE,
+        "os_version":     snap.get("os_version") or _STR_NOT_IN_SNAPSHOT,
+        "os_platform":    snap.get("os_platform") or _STR_NOT_IN_SNAPSHOT,
+        "python_version": snap.get("python_version") or _STR_NOT_IN_SNAPSHOT,
+        "nvidia_driver":  snap.get("nvidia_driver") or _STR_NOT_IN_SNAPSHOT,
+        "gpu_name":       snap.get("gpu_name") or _STR_NOT_IN_SNAPSHOT,
+        "power_plan":     snap.get("power_plan") or _STR_NOT_IN_SNAPSHOT,
+        "cpu_temp_at_start_c": snap.get("cpu_temp_at_start_c"),
+        "gpu_temp_at_start_c": snap.get("gpu_temp_at_start_c"),
+        "model_disk_free_gb":   snap.get("model_disk_free_gb"),
+    }
+
+
+def _build_baseline_identity(
+    snap: dict,
+    model_cfg: dict,
+    sources: dict,
+) -> dict:
+    """Return the baseline_identity dict for metadata.json."""
+    sampling_params_raw = snap.get("sampling_params_json")
+    return {
+        "source":          sources.get("baseline", _STR_NOT_IN_SNAPSHOT),
+        "capture_quality": sources.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
+        "model_name":      model_cfg.get("name") or _STR_NOT_SET_IN_BASELINE,
+        "model_path":      snap.get("model_path") or model_cfg.get("path") or _STR_NOT_IN_SNAPSHOT,
+        "model_size_bytes": snap.get("model_file_size_bytes"),
+        "quantization":    model_cfg.get("quantization") or _STR_NOT_SET_IN_BASELINE,
+        "server_binary_path":   snap.get("server_binary_path") or _STR_NOT_IN_SNAPSHOT,
+        "server_binary_sha256": snap.get("server_binary_sha256") or _STR_NOT_IN_SNAPSHOT,
+        "build_commit":         snap.get("build_commit") or _STR_NOT_CAPTURED,
+        "sampling_params":      json.loads(sampling_params_raw) if sampling_params_raw else _STR_NOT_IN_SNAPSHOT,
+    }
+
+
 def _build_ranking_output(
     scores_result: dict,
     stats: dict,
@@ -669,24 +717,9 @@ def generate_metadata_json(
     # ── Environment summary ────────────────────────────────────────────────────
     machine_bl = baseline_raw.get("machine", {}) if isinstance(baseline_raw.get("machine"), dict) else {}
     exec_env = trust_identity.execution_environment or {}
-    env_summary = {
-        "support_tier":              exec_env.get("support_tier") or _STR_NOT_IN_SNAPSHOT,
-        "measurement_grade":         exec_env.get("measurement_grade") or _STR_NOT_IN_SNAPSHOT,
-        "telemetry_capture_quality": trust_identity.telemetry_provider.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
-        "machine_name":   machine_bl.get("name") or _STR_NOT_SET_IN_BASELINE,
-        "cpu":            machine_bl.get("cpu") or _STR_NOT_SET_IN_BASELINE,
-        "gpu":            machine_bl.get("gpu") or _STR_NOT_SET_IN_BASELINE,
-        "ram":            machine_bl.get("ram") or _STR_NOT_SET_IN_BASELINE,
-        "os_version":     snap.get("os_version") or _STR_NOT_IN_SNAPSHOT,
-        "os_platform":    snap.get("os_platform") or _STR_NOT_IN_SNAPSHOT,
-        "python_version": snap.get("python_version") or _STR_NOT_IN_SNAPSHOT,
-        "nvidia_driver":  snap.get("nvidia_driver") or _STR_NOT_IN_SNAPSHOT,
-        "gpu_name":       snap.get("gpu_name") or _STR_NOT_IN_SNAPSHOT,
-        "power_plan":     snap.get("power_plan") or _STR_NOT_IN_SNAPSHOT,
-        "cpu_temp_at_start_c": snap.get("cpu_temp_at_start_c"),
-        "gpu_temp_at_start_c": snap.get("gpu_temp_at_start_c"),
-        "model_disk_free_gb":   snap.get("model_disk_free_gb"),
-    }
+    env_summary = _build_env_summary(
+        snap, machine_bl, exec_env, trust_identity.telemetry_provider
+    )
 
     # ── Methodology provenance ─────────────────────────────────────────────────
     methodology_label = methodology_source_label(trust_identity.methodology)
@@ -724,22 +757,7 @@ def generate_metadata_json(
         },
         "environment_summary":  env_summary,
         "run_context_summary":  run_context_summary,
-        "baseline_identity": {
-            "source":          trust_identity.sources.get("baseline", _STR_NOT_IN_SNAPSHOT),
-            "capture_quality": trust_identity.sources.get("capture_quality") or _STR_NOT_IN_SNAPSHOT,
-            "model_name":      model_cfg.get("name") or _STR_NOT_SET_IN_BASELINE,
-            "model_path":      snap.get("model_path") or model_cfg.get("path") or _STR_NOT_IN_SNAPSHOT,
-            "model_size_bytes": snap.get("model_file_size_bytes"),
-            "quantization":    model_cfg.get("quantization") or _STR_NOT_SET_IN_BASELINE,
-            "server_binary_path":   snap.get("server_binary_path") or _STR_NOT_IN_SNAPSHOT,
-            "server_binary_sha256": snap.get("server_binary_sha256") or _STR_NOT_IN_SNAPSHOT,
-            "build_commit":         snap.get("build_commit") or _STR_NOT_CAPTURED,
-            "sampling_params": (
-                json.loads(snap["sampling_params_json"])
-                if snap.get("sampling_params_json")
-                else _STR_NOT_IN_SNAPSHOT
-            ),
-        },
+        "baseline_identity": _build_baseline_identity(snap, model_cfg, trust_identity.sources),
         "provenance_sources": trust_identity.sources,
         "artifacts":          artifact_inventory,
         "warnings":           warnings_list,

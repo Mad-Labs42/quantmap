@@ -333,6 +333,15 @@ def load_artifact_summaries(campaign_id: str, db_path: Path) -> list[dict[str, A
     return artifacts
 
 
+def _collect_statuses(check_types: tuple, by_type: dict) -> list:
+    """Return a status string for each artifact type in check_types."""
+    result = []
+    for atype in check_types:
+        row = by_type.get(atype)
+        result.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
+    return result
+
+
 def summarize_report_artifact_status(
     campaign_id: str,
     db_path: Path,
@@ -349,8 +358,8 @@ def summarize_report_artifact_status(
     """
     # New canonical types for the 4-artifact contract (imported from artifact_paths).
     _NEW_TYPES = (
-        ARTIFACT_CAMPAIGN_SUMMARY, 
-        ARTIFACT_RUN_REPORTS, 
+        ARTIFACT_CAMPAIGN_SUMMARY,
+        ARTIFACT_RUN_REPORTS,
         ARTIFACT_METADATA,
         ARTIFACT_RAW_TELEMETRY,
     )
@@ -364,21 +373,14 @@ def summarize_report_artifact_status(
 
     if expected_types is not None:
         # Explicit override: use exactly these types.
-        check_types = expected_types
-        statuses = []
-        for atype in check_types:
-            row = by_type.get(atype)
-            statuses.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
+        statuses = _collect_statuses(expected_types, by_type)
     else:
         # Auto: check new types; fall back to legacy equivalents if new are absent.
         # A campaign that was run before the redesign only has old-type rows;
         # we must not report it as "partial" just because new-type rows are missing.
         has_any_new = any(atype in by_type for atype in _NEW_TYPES)
         check_types = _NEW_TYPES if has_any_new else _LEGACY_TYPES
-        statuses = []
-        for atype in check_types:
-            row = by_type.get(atype)
-            statuses.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
+        statuses = _collect_statuses(check_types, by_type)
 
     if statuses and all(status == "complete" for status in statuses):
         return "complete"

@@ -1379,9 +1379,12 @@ def _run_config(
     _eff_state_dir  = state_dir  if state_dir  is not None else STATE_DIR
     _eff_state_file = state_file if state_file is not None else STATE_FILE
     _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
-    _eff_environment_dir = environment_dir if environment_dir is not None else (
-        raw_telemetry_jsonl_path.parent if raw_telemetry_jsonl_path is not None else STATE_DIR
-    )
+    if environment_dir is not None:
+        _eff_environment_dir = environment_dir
+    elif raw_telemetry_jsonl_path is not None:
+        _eff_environment_dir = raw_telemetry_jsonl_path.parent
+    else:
+        _eff_environment_dir = STATE_DIR
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
     
