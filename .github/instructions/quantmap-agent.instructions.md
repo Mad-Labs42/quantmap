@@ -9,12 +9,15 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 - Do not read K.I.T./TO-DO tracker files unless the user asks to read or update them.
 
 ## First Reads
-1. AGENTS.md
-2. .agent/README.md
-3. If scope is unclear, read .agent/policies/routing.md
-4. Only the single .agent/policies file needed for the task
-5. Treat .agent/instructions/agent_*.md as opt-in references for agent-surface maintenance tasks only
-6. Use .agent/instructions/agent_session_bootstrap.md as an operational checklist when executing changes
+1. README.md
+2. docs/system/architecture.md
+3. docs/system/trust_surface.md
+4. If scope is unclear, read docs/system/contributing.md
+5. If `AGENTS.md` exists in the current branch/worktree, read it.
+6. If `.agent/README.md` exists in the current branch/worktree, read it.
+7. If `.agent/policies/routing.md` exists and scope is unclear, read it.
+8. Only the single .agent/policies file needed for the task.
+9. Treat `.agent/instructions/agent_*.md` as opt-in references for agent-surface maintenance tasks only, when present.
 
 ## Repo Landmarks
 - CLI entry: quantmap.py
@@ -25,6 +28,8 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 - Reports: src/report.py, src/report_campaign.py, src/report_compare.py
 
 ## Preferred Validation
+- Run the dev contract preflight before implementation work: `.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick`.
+- If `.venv` is missing or fails interpreter/anchor checks, recreate it with `& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv` and reinstall with `.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'`.
 - Fast syntax/parse check before broad tests.
 - Run focused tests near changed modules.
 - Treat verification as required before claiming success.
@@ -40,9 +45,9 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 - Treat partial propagation as incomplete work unless explicitly scoped by the user.
 
 ## Preferred Python Commands
-- Lint touched files: `python -m ruff check <paths>`
-- Apply safe lint fixes when needed: `python -m ruff check --fix <paths>`
-- Focused tests: `python -m pytest -q <targeted_tests_or_module>`
+- Lint touched files: `.\.venv\Scripts\python.exe -m ruff check <paths>`
+- Apply safe lint fixes when needed: `.\.venv\Scripts\python.exe -m ruff check --fix <paths>`
+- Focused tests: `.\.venv\Scripts\python.exe -m pytest -q <targeted_tests_or_module>`
 
 ## Tool Use Pattern
 1. Locate owner file first.
@@ -61,7 +66,7 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 - Before proposing a new `.agent/scripts/*.py`, require: concrete problem, immediate value, low blast radius, clear failure mode, and user approval.
 
 ## Terminal Failure Handling (VS Code and Antigravity only)
-- See `.agent/reference/terminal_guardrails.md` for terminal rules, failure protocol, helper script usage, and wrapper guidance.
+- If present, see `.agent/reference/terminal_guardrails.md` for terminal rules, failure protocol, helper script usage, and wrapper guidance.
 
 ## Response Token Policy
 - Keep responses compact and information-dense.

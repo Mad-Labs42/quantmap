@@ -19,6 +19,7 @@ What could this affect?
 
 ## Validation
 
+- [ ] Dev contract verified (`.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick` or CI equivalent)
 - [ ] Tests added or updated
 - [ ] Existing tests passed
 - [ ] Manual validation performed
@@ -28,7 +29,7 @@ What could this affect?
 
 - [ ] Instruction files reviewed if behavior/tooling changed
 - [ ] Workspace settings changes are intentional and minimal
-- [ ] Agent surface audit passed (.agent/scripts/agent_surface_audit.py)
+- [ ] If `.agent/scripts/agent_surface_audit.py` is present in this branch, agent surface audit passed
 
 ## Notes
 

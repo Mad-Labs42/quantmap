@@ -50,14 +50,11 @@ jobs:
 
       - name: Install package + test deps
         shell: pwsh
-        run: |
-          if (Test-Path "pyproject.toml") {
-            python -m pip install -e .[dev]
-          } elseif (Test-Path "requirements.txt") {
-            python -m pip install -r requirements.txt
-          }
+        run: python -m pip install -e .[dev]
 
-          python -m pip install -U pytest pytest-cov
+      - name: Verify dev environment contract
+        shell: pwsh
+        run: python .agent/scripts/helpers/verify_dev_contract.py --full --ci
 
       - name: Ruff check (advisory)
         continue-on-error: true
@@ -160,7 +157,6 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          python -m pip install -U mypy
           python -m mypy . 2>&1 | python .agent/scripts/helpers/mypy_digest.py --json > digest-mypy.json
 
       - name: Upload mypy digest artifact

@@ -14,6 +14,20 @@ The Phase 1 Trust Bundle and Phase 1.1 stabilization pass are stable after real-
 
 The active focus is **Phase 3: Platform Generalization**. Phase 2 Operational Robustness and Phase 2.1 Settings/Environment Bridge are closed after validation. Phase 3 begins with boundary-aware telemetry/provider design, not scattered provider conditionals in existing high-blast-radius modules.
 
+## Developer Setup
+
+Use the repo contract directly from a fresh clone:
+
+```powershell
+& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-user --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'
+.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --full
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+The repo `.venv` must be created from the DevStore-managed Python 3.13 target above. The contract check is the fastest way to confirm that the active interpreter matches the repo's declared dev tooling before you start editing. Local repo-health commands should use `.\.venv\Scripts\python.exe` explicitly; shell activation and VS Code interpreter selection are convenience only. Development scaffolding such as `.agent`, CI checks, and editor defaults must not become QuantMap runtime behavior.
+
 ---
 
 ## 🔬 The QuantMap Philosophy
@@ -89,8 +103,8 @@ If results are surprising or the tool behavior is unexpected, run these five com
 
 ## 📖 Technical Library
 
-- [**Operator Playbooks**](docs/README.md) — How to actually think and operate with this tool.
-- [**Command Reference**](.agent/reference/command_reference.md) — Compact lookup for all flags and mutations.
+- [**Operator Playbooks**](docs/playbooks/README.md) — How to actually think and operate with this tool.
+- [**Quickstart**](docs/playbooks/quickstart.md) — Fast command-oriented onboarding for common workflows.
 - [**Trust Surface**](docs/system/trust_surface.md) — How QuantMap proves its findings.
 - [**System Architecture**](docs/system/architecture.md) — The technical design of the pipeline.
 

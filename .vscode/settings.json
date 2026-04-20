@@ -1,0 +1,53 @@
+{
+  "chat.instructionsFilesLocations": {
+    ".github/instructions": true
+  },
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "python.terminal.activateEnvironment": true,
+  "ruff.nativeServer": "on",
+  "ruff.organizeImports": true,
+  "ruff.fixAll": true,
+  "search.exclude": {
+    "**/.venv": true,
+    "**/.mypy_cache": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/quantmap.egg-info": true,
+    "**/build": true,
+    "**/dist": true,
+    "**/logs": true,
+    "**/results": true,
+    "**/artifacts": true,
+    "**/.agent/artifacts": true,
+    "**/state": true,
+    "docs/system/known_issues_tracker.md": true,
+    "docs/system/TO-DO.md": true,
+    "docs/K.I.T.-&-ToDo/**": true
+  },
+  "files.watcherExclude": {
+    "**/.git/objects/**": true,
+    "**/.venv/**": true,
+    "**/.mypy_cache/**": true,
+    "**/.pytest_cache/**": true,
+    "**/.ruff_cache/**": true,
+    "**/build/**": true,
+    "**/dist/**": true,
+    "**/logs/**": true,
+    "**/results/**": true,
+    "**/artifacts/**": true,
+    "**/.agent/artifacts/**": true,
+    "**/state/**": true
+  },
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll": "explicit",
+      "source.organizeImports": "explicit"
+    }
+  },
+  "sonarlint.connectedMode.project": {
+    "connectionId": "mad-labs42",
+    "projectKey": "Mad-Labs42_quantmap"
+  }
+}
