@@ -806,6 +806,8 @@ def _compute_stats(samples: list[dict[str, Any]]) -> dict[str, Any]:
         if pf_used is not None and pf_total and pf_total > 0:
             pf_pct_vals.append(pf_used / pf_total * 100.0)
 
+    avg_available_ram = _mean(ram_vals)
+
     return {
         "sample_count":         len(samples),
         "avg_cpu_percent":      _mean(cpu_vals),
@@ -813,7 +815,7 @@ def _compute_stats(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "min_cpu_percent":      min(cpu_vals)       if cpu_vals      else None,
         "avg_cpu_freq_mhz":     _mean(freq_vals),
         "min_cpu_freq_mhz":     min(freq_vals)      if freq_vals     else None,
-        "avg_available_ram":    int(round(_mean(ram_vals))) if ram_vals else None,
+        "avg_available_ram":    int(round(avg_available_ram)) if avg_available_ram is not None else None,
         "min_available_ram":    min(ram_vals)       if ram_vals      else None,
         "avg_ram_percent":      _mean(ram_pct_vals),
         "max_ram_percent":      max(ram_pct_vals)   if ram_pct_vals  else None,

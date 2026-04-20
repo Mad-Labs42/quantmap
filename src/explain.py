@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 import json
 import sqlite3
-from enum import Enum, auto
+from enum import Enum
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List
 
 from src.db import get_connection
 from src import ui
@@ -158,13 +158,13 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
     if not winners:
         b = Briefing(
             campaign_id, 
-            f"[bold red]NO VALID WINNER EMERGED[/bold red]", 
+            "[bold red]NO VALID WINNER EMERGED[/bold red]", 
             margin_of_victory="No passing configs found.",
             confidence=Confidence.CAUTION,
             confidence_rationale="Campaign produced zero valid candidates meeting quality gates."
         )
         if eliminated:
-            counts = {}
+            counts: dict[str, int] = {}
             for row in eliminated:
                 bucket = normalize_reason(row["elimination_reason"])
                 counts[bucket] = counts.get(bucket, 0) + 1
@@ -210,15 +210,15 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
 
     # Elimination Post-Mortem
     if eliminated:
-        counts = {}
+        winner_counts: dict[str, int] = {}
         for row in eliminated:
             bucket = normalize_reason(row["elimination_reason"])
-            counts[bucket] = counts.get(bucket, 0) + 1
-        summary_parts = [f"{v}x {k}" for k, v in sorted(counts.items(), key=lambda x: -x[1])]
+            winner_counts[bucket] = winner_counts.get(bucket, 0) + 1
+        summary_parts = [f"{v}x {k}" for k, v in sorted(winner_counts.items(), key=lambda x: -x[1])]
         b.elimination_summary = f"Out of {len(passers) + len(eliminated)} configs, {len(eliminated)} were rejected: {', '.join(summary_parts)}."
         
         # Top Constraint
-        top_bucket = sorted(counts.items(), key=lambda x: -x[1])[0][0]
+        top_bucket = sorted(winner_counts.items(), key=lambda x: -x[1])[0][0]
         b.top_constraint = f"The primary operational constraint was [bold]{top_bucket}[/bold]."
 
     # 4. Watchlist
