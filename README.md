@@ -90,7 +90,7 @@ If results are surprising or the tool behavior is unexpected, run these five com
 ## 📖 Technical Library
 
 - [**Operator Playbooks**](docs/README.md) — How to actually think and operate with this tool.
-- [**Command Reference**](docs/system/command_reference.md) — Compact lookup for all flags and mutations.
+- [**Command Reference**](.agent/reference/command_reference.md) — Compact lookup for all flags and mutations.
 - [**Trust Surface**](docs/system/trust_surface.md) — How QuantMap proves its findings.
 - [**System Architecture**](docs/system/architecture.md) — The technical design of the pipeline.
 

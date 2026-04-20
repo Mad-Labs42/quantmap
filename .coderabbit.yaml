@@ -30,34 +30,33 @@ reviews:
     - "!build/**"
     - "!quantmap.egg-info/**"
     - "!test_lab_consistency/**"
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        Prioritize correctness, determinism, and benchmark integrity.
+        Flag behavior changes that affect scoring, governance, reporting, telemetry,
+        methodology snapshots, or trust semantics.
+
+    - path: "docs/**"
+      instructions: |
+        Check for contradictions with source behavior and stale operational guidance.
+        Prefer factual consistency over style suggestions.
+
+    - path: ".github/**"
+      instructions: |
+        Verify workflow triggers, permissions minimization, and CI reproducibility.
+        Flag placeholders or broken automation paths.
+
+    - path: "artifacts/**"
+      instructions: |
+        Generated runtime outputs. Do not request style or content changes here.
+
+    - path: "results/**"
+      instructions: |
+        Generated benchmarking output. Treat as non-source unless explicitly requested.
 
 chat:
   auto_reply: true
 
 knowledge_base:
   opt_out: false
-
-path_instructions:
-  - path: "src/**"
-    instructions: |
-      Prioritize correctness, determinism, and benchmark integrity.
-      Flag behavior changes that affect scoring, governance, reporting, telemetry,
-      methodology snapshots, or trust semantics.
-
-  - path: "docs/**"
-    instructions: |
-      Check for contradictions with source behavior and stale operational guidance.
-      Prefer factual consistency over style suggestions.
-
-  - path: ".github/**"
-    instructions: |
-      Verify workflow triggers, permissions minimization, and CI reproducibility.
-      Flag placeholders or broken automation paths.
-
-  - path: "artifacts/**"
-    instructions: |
-      Generated runtime outputs. Do not request style or content changes here.
-
-  - path: "results/**"
-    instructions: |
-      Generated benchmarking output. Treat as non-source unless explicitly requested.

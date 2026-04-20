@@ -52,3 +52,6 @@ exclude = [
     '(^|[\\/])tools([\\/]|$)',
     '(^|[\\/])\.venv([\\/]|$)',
 ]
+
+[tool.pytest.ini_options]
+addopts = "--cov=. --cov-report=xml:coverage.xml"
