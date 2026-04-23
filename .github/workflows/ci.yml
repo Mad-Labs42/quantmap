@@ -137,7 +137,7 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          python -m pip install -U pip-audit
+          python -m pip install pip-audit==2.10.0
           pip-audit --format json | python .agent/scripts/helpers/pip_audit_digest.py --json > digest-pip-audit.json
 
       - name: Upload pip-audit digest artifact

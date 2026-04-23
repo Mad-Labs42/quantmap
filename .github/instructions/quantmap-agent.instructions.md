@@ -28,8 +28,8 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 - Reports: src/report.py, src/report_campaign.py, src/report_compare.py
 
 ## Preferred Validation
-- Run the dev contract preflight before implementation work: `.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick`.
-- Do not begin implementation until preflight passes. If `.venv` is missing, locked, or fails interpreter/anchor checks, use the `QuantMap: Repair Dev Venv` task or the repair procedure in `.agent/docs/dev-contract.md`, then rerun preflight.
+- Run the dev contract preflight before implementation work. Activate the venv first (`source .venv/bin/activate` on POSIX, `.\.venv\Scripts\Activate.ps1` on Windows), then run `python .agent/scripts/helpers/verify_dev_contract.py --quick`. Alternatively call the interpreter directly: `./.venv/bin/python .agent/scripts/helpers/verify_dev_contract.py --quick` (POSIX) or `.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick` (Windows).
+- Do not begin implementation until preflight passes. If `.venv` is missing, locked, or fails interpreter/anchor checks, use the `QuantMap: Repair Dev Venv` task (Windows) or re-run `python -m venv .venv && pip install -e .[dev]` (POSIX), then rerun preflight.
 - Fast syntax/parse check before broad tests.
 - Run focused tests near changed modules.
 - Treat verification as required before claiming success.
