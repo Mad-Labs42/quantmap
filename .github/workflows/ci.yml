@@ -69,11 +69,6 @@ jobs:
         shell: pwsh
         run: python -m pytest -q
 
-      - name: Generate coverage.xml (advisory)
-        continue-on-error: true
-        shell: pwsh
-        run: python -m pytest -q --cov=. --cov-report=xml:coverage.xml
-
       - name: Upload coverage artifact
         continue-on-error: true
         uses: actions/upload-artifact@v4

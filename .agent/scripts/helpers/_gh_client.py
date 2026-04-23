@@ -62,7 +62,7 @@ def resolve_github_token() -> str:
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        # gh CLI not installed or timed out — fall through to GitHubAuthError below.
     
     raise GitHubAuthError(
         'No GitHub auth token available. '

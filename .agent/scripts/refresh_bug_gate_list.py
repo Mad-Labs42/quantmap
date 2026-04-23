@@ -12,6 +12,7 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 HELPERS_DIR = Path(__file__).resolve().parent / "helpers"
@@ -80,14 +81,16 @@ def parse_repo_from_remote() -> str:
         raise ValueError("unable to infer repository from remote.origin.url")
 
     # Supports git@github.com:owner/repo.git and https://github.com/owner/repo(.git)
-    cleaned = url.replace(".git", "")
-    if cleaned.startswith("git@github.com:"):
-        tail = cleaned.split("git@github.com:", 1)[1]
-    elif "github.com/" in cleaned:
-        tail = cleaned.split("github.com/", 1)[1]
+    if url.startswith("git@github.com:"):
+        tail = url.split("git@github.com:", 1)[1]
     else:
-        raise ValueError("remote.origin.url is not a GitHub repository URL")
+        parsed = urlparse(url)
+        if parsed.hostname != "github.com":
+            raise ValueError("remote.origin.url is not a GitHub repository URL")
+        tail = parsed.path.lstrip("/")
 
+    if tail.endswith(".git"):
+        tail = tail[:-4]
     if "/" not in tail:
         raise ValueError("unable to parse OWNER/REPO from remote URL")
     owner, repo = tail.split("/", 1)
