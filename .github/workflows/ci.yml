@@ -67,7 +67,7 @@ jobs:
 
       - name: Run tests
         shell: pwsh
-        run: python -m pytest -q
+        run: python -m pytest -q --cov=src --cov-report=xml:coverage.xml
 
       - name: Upload coverage artifact
         continue-on-error: true

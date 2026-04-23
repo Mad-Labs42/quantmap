@@ -9,6 +9,7 @@ Provides:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -51,8 +52,8 @@ def resolve_github_token() -> str:
     if token:
         return token
     
-    # Try gh CLI
-    try:
+    # Try gh CLI; suppress if not installed or times out — GitHubAuthError raised below.
+    with contextlib.suppress(subprocess.TimeoutExpired, FileNotFoundError):
         result = subprocess.run(
             ['gh', 'auth', 'token'],
             capture_output=True,
@@ -61,9 +62,7 @@ def resolve_github_token() -> str:
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        # gh CLI not installed or timed out — fall through to GitHubAuthError below.
-    
+
     raise GitHubAuthError(
         'No GitHub auth token available. '
         'Set GH_TOKEN environment variable or run `gh auth login`.'
