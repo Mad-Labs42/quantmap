@@ -14,6 +14,31 @@ The Phase 1 Trust Bundle and Phase 1.1 stabilization pass are stable after real-
 
 The active focus is **Phase 3: Platform Generalization**. Phase 2 Operational Robustness and Phase 2.1 Settings/Environment Bridge are closed after validation. Phase 3 begins with boundary-aware telemetry/provider design, not scattered provider conditionals in existing high-blast-radius modules.
 
+## Developer Setup
+
+Normal local work assumes the repo `.venv` already exists. On open, VS Code has a repo task named `QuantMap: Dev Contract Preflight` that runs the required startup check:
+
+```powershell
+.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick
+```
+
+If that check passes, keep using `.\.venv\Scripts\python.exe` for repo-health commands. Shell activation and bare `python`/`pip` are not the local contract.
+If the quick check fails because `.venv` is missing or drifted, folder-open preflight performs one self-heal rebuild and reruns the quick check.
+
+First open still requires VS Code workspace trust before any workspace task can run. After trust is granted, checked-in workspace settings allow the preflight task to run automatically on folder open.
+
+For a fresh clone or explicit repair, rebuild the repo `.venv` from the approved DevStore Python target:
+
+```powershell
+& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-user --upgrade pip
+.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'
+.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --full
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+If `.venv` is locked or drifted in VS Code, run the `QuantMap: Repair Dev Venv` task. It stops workspace-scoped Python/Ruff/mypy holders, rebuilds `.venv` from DevStore Python 3.13.13, reinstalls dev dependencies, and reruns the full contract check. Development scaffolding such as `.agent`, CI checks, and editor defaults must not become QuantMap runtime behavior.
+
 ---
 
 ## 🔬 The QuantMap Philosophy
@@ -89,8 +114,8 @@ If results are surprising or the tool behavior is unexpected, run these five com
 
 ## 📖 Technical Library
 
-- [**Operator Playbooks**](docs/README.md) — How to actually think and operate with this tool.
-- [**Command Reference**](docs/system/command_reference.md) — Compact lookup for all flags and mutations.
+- [**Operator Playbooks**](docs/playbooks/README.md) — How to actually think and operate with this tool.
+- [**Quickstart**](docs/playbooks/quickstart.md) — Fast command-oriented onboarding for common workflows.
 - [**Trust Surface**](docs/system/trust_surface.md) — How QuantMap proves its findings.
 - [**System Architecture**](docs/system/architecture.md) — The technical design of the pipeline.
 

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0,<76"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.9.0"
 description = "QuantMap: LLM Quantization & Inference Benchmarking Governance Tool"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = {text = "BSL-1.1"}
 authors = [
     {name = "Josh", email = "deepthought8342@gmail.com"}
 ]
@@ -25,6 +25,17 @@ dependencies = [
     "pydantic>=2.0,<3.0"
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-cov>=6.0.0",
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
+    "types-psutil",
+    "types-PyYAML",
+    "pandas-stubs",
+]
+
 [project.scripts]
 quantmap = "quantmap:main"
 
@@ -36,3 +47,28 @@ include-package-data = true
 [tool.setuptools.package-data]
 configs = ["*.yaml", "profiles/*.yaml"]
 requests = ["*.json"]
+
+[tool.mypy]
+exclude = [
+    '(^|[\\/])build([\\/]|$)',
+    '(^|[\\/])dist([\\/]|$)',
+    '(^|[\\/])[^\\/]+\.egg-info([\\/]|$)',
+    '(^|[\\/])tools([\\/]|$)',
+    '(^|[\\/])\.venv([\\/]|$)',
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov --cov-report=xml:coverage.xml"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    ".venv/*",
+    "build/*",
+    "dist/*",
+    "*.egg-info/*",
+    "tools/*",
+]
+
+[tool.coverage.report]
+skip_empty = true

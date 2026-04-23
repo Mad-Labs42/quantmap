@@ -9,6 +9,23 @@ on:
   pull_request:
 
 jobs:
+  agent-surface:
+    name: Agent Surface Audit
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Run agent surface audit
+        shell: pwsh
+        run: python .agent/scripts/agent_surface_audit.py --strict
+
   test:
     name: Test (${{ matrix.os }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
@@ -26,23 +43,121 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
 
       - name: Upgrade pip
         run: python -m pip install --upgrade pip
 
       - name: Install package + test deps
         shell: pwsh
-        run: |
-          if (Test-Path "requirements-dev.txt") {
-            python -m pip install -r requirements-dev.txt
-          } elseif (Test-Path "pyproject.toml") {
-            python -m pip install -e .[dev]
-          } elseif (Test-Path "requirements.txt") {
-            python -m pip install -r requirements.txt
-          }
+        run: python -m pip install -e .[dev]
 
-          python -m pip install -U pytest
+      - name: Verify dev environment contract
+        shell: pwsh
+        run: python .agent/scripts/helpers/verify_dev_contract.py --full --ci
+
+      - name: Ruff check (advisory)
+        continue-on-error: true
+        run: python -m ruff check .
+
+      - name: Python syntax check (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: python -m compileall -q .
 
       - name: Run tests
         shell: pwsh
-        run: python -m pytest -q
+        run: python -m pytest -q --cov=src --cov-report=xml:coverage.xml
+
+      - name: Upload coverage artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage.xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      - name: Generate review bot digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python .agent/scripts/helpers/review_bot_digest.py --repo ${{ github.repository }} --json > digest-review-bot.json
+
+      - name: Upload review bot digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-review-bot.json
+          path: digest-review-bot.json
+          if-no-files-found: ignore
+
+      - name: Generate CI summary digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python .agent/scripts/helpers/ci_summary_digest.py --repo ${{ github.repository }} --run-id ${{ github.run_id }} --json > digest-ci-summary.json
+
+      - name: Upload CI summary digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-ci-summary.json
+          path: digest-ci-summary.json
+          if-no-files-found: ignore
+
+      - name: Generate Sonar digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python .agent/scripts/helpers/sonar_digest.py --json > digest-sonar.json
+
+      - name: Upload Sonar digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-sonar.json
+          path: digest-sonar.json
+          if-no-files-found: ignore
+
+      - name: Generate CodeQL digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python .agent/scripts/helpers/codeql_digest.py --repo ${{ github.repository }} --json > digest-codeql.json
+
+      - name: Upload CodeQL digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-codeql.json
+          path: digest-codeql.json
+          if-no-files-found: ignore
+
+      - name: Generate pip-audit digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python -m pip install pip-audit==2.10.0
+          pip-audit --format json | python .agent/scripts/helpers/pip_audit_digest.py --json > digest-pip-audit.json
+
+      - name: Upload pip-audit digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-pip-audit.json
+          path: digest-pip-audit.json
+          if-no-files-found: ignore
+
+      - name: Generate mypy digest (advisory)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          python -m mypy . 2>&1 | python .agent/scripts/helpers/mypy_digest.py --json > digest-mypy.json
+
+      - name: Upload mypy digest artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-mypy.json
+          path: digest-mypy.json
+          if-no-files-found: ignore

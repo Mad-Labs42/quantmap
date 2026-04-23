@@ -29,6 +29,10 @@ build/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Environment / secrets
 .env
@@ -42,13 +46,16 @@ desktop.ini
 $RECYCLE.BIN/
 
 # Editor artifacts
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
 .idea/
 *.suo
 *.user
 
 # Local assistant / planning artifacts
 .claude/
+.human/
 .remember/
 scratch/
 phase2_prep_snapshots/
@@ -72,8 +79,7 @@ test_lab_consistency/
 package-lock.json
 
 # Local-only operator/working materials
-.agents/
-AGENTS.md
+Agent.md
 
 # Docs policy: only keep public docs/playbooks and docs/system
 docs/*
@@ -81,6 +87,19 @@ docs/*
 !docs/playbooks/**
 !docs/system/
 !docs/system/**
+!docs/Plans/
+!docs/Plans/**
+
+# Private/generated agent infrastructure and personal tracking
+.agent/artifacts/
+.agent/handoffs/
+.copilot/*
+!.copilot/instructions/
+!.copilot/instructions/quantmap-agent.instructions.md
+docs/K.I.T.-&-ToDo/
+
+# Permanently excluded from version control
+scratch_mock_run.py
 
 # Internal-only docs
 docs/AUDITS/
@@ -92,4 +111,3 @@ docs/QuantMap MVP Audit Tracker.md
 docs/quantmap_mvp_decisions_and_reporting_contract.md
 
 
-AGENTS.md

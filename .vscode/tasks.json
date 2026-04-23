@@ -1,0 +1,47 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "QuantMap: Dev Contract Preflight",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; $workspace = (Resolve-Path '.').Path; $venvPy = Join-Path $workspace '.venv\\Scripts\\python.exe'; $needRepair = $false; if (Test-Path $venvPy) { & $venvPy '.agent\\scripts\\helpers\\verify_dev_contract.py' '--quick'; if ($LASTEXITCODE -eq 0) { exit 0 }; Write-Host 'Quick contract check failed. Running QuantMap: Repair Dev Venv once to self-heal...'; $needRepair = $true } else { Write-Host 'Repo .venv is missing. Running QuantMap: Repair Dev Venv once to self-heal...'; $needRepair = $true }; if (-not $needRepair) { exit 0 }; $holders = Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -and $_.ExecutablePath.StartsWith((Join-Path $workspace '.venv'), [System.StringComparison]::OrdinalIgnoreCase)) -or ($_.Name -match '^(python|pythonw|ruff|mypy|dmypy)\\.exe$' -and $_.CommandLine -and $_.CommandLine.IndexOf((Join-Path $workspace '.venv'), [System.StringComparison]::OrdinalIgnoreCase) -ge 0) }; $holders | ForEach-Object { Write-Host \"Stopping workspace process $($_.ProcessId): $($_.Name)\"; Stop-Process -Id $_.ProcessId -Force }; & 'D:\\.store\\mise\\data\\installs\\python\\3.13.13\\python.exe' -m venv .venv; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe -m pip install --no-user --upgrade pip; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe -m pip install --no-user -e '.[dev]'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe .agent\\scripts\\helpers\\verify_dev_contract.py --quick; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+      ],
+      "group": "test",
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      },
+      "runOptions": {
+        "runOn": "folderOpen"
+      }
+    },
+    {
+      "label": "QuantMap: Repair Dev Venv",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; $workspace = (Resolve-Path '.').Path; $venv = Join-Path $workspace '.venv'; if (-not $venv.StartsWith($workspace, [System.StringComparison]::OrdinalIgnoreCase)) { throw \"Refusing to repair venv outside workspace: $venv\" }; $holders = Get-CimInstance Win32_Process | Where-Object { ($_.ExecutablePath -and $_.ExecutablePath.StartsWith($venv, [System.StringComparison]::OrdinalIgnoreCase)) -or ($_.Name -match '^(python|pythonw|ruff|mypy|dmypy)\\.exe$' -and $_.CommandLine -and $_.CommandLine.IndexOf($venv, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) }; $holders | ForEach-Object { Write-Host \"Stopping workspace process $($_.ProcessId): $($_.Name)\"; Stop-Process -Id $_.ProcessId -Force }; if (Test-Path $venv) { Remove-Item -LiteralPath $venv -Recurse -Force }; & 'D:\\.store\\mise\\data\\installs\\python\\3.13.13\\python.exe' -m venv .venv; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe -m pip install --no-user --upgrade pip; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe -m pip install --no-user -e '.[dev]'; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; .\\.venv\\Scripts\\python.exe .agent\\scripts\\helpers\\verify_dev_contract.py --full; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "clear": true,
+        "panel": "dedicated",
+        "reveal": "always"
+      }
+    }
+  ]
+}

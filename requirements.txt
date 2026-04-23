@@ -1,3 +1,5 @@
+# Runtime dependency snapshot only.
+# For development, use: .\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'
 httpx[http2]>=0.27.0
 pyyaml>=6.0.2
 pandas>=2.2.0

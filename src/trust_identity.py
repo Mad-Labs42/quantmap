@@ -131,6 +131,11 @@ class TrustIdentity:
     telemetry_provider: dict[str, Any]
     execution_environment: dict[str, Any]
     sources: dict[str, str]
+    filter_policy: dict[str, Any] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.filter_policy is None:
+            self.filter_policy = {}
 
     @property
     def has_snapshot_baseline(self) -> bool:
@@ -160,6 +165,26 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
     telemetry_provider = provider_evidence_from_snapshot(snap)
     execution_environment = execution_environment_from_snapshot(snap)
 
+    # ACPM Slice 2: resolve filter_policy from persisted v1 JSON or legacy projection.
+    filter_policy_raw = snap.get("effective_filter_policy_json")
+    if filter_policy_raw:
+        filter_policy = _json_loads(filter_policy_raw, {})
+        filter_policy_source = "snapshot"
+    else:
+        from src.effective_filter_policy import project_legacy_filter_policy  # noqa: PLC0415
+        _campaign_yaml_raw = snap.get("campaign_yaml_content")
+        _campaign_yaml: dict[str, Any] | None = None
+        if _campaign_yaml_raw:
+            try:
+                import yaml as _yaml  # noqa: PLC0415
+                _parsed = _yaml.safe_load(_campaign_yaml_raw)
+                _campaign_yaml = _parsed if isinstance(_parsed, dict) else None
+            except Exception:
+                pass
+        filter_policy = project_legacy_filter_policy(methodology, run_plan, _campaign_yaml)
+        _ts = filter_policy.get("truth_status", "unknown")
+        filter_policy_source = f"legacy_{_ts}"
+
     sources = {
         "campaign": "snapshot" if snap.get("campaign_yaml_content") else "legacy_incomplete",
         "baseline": "snapshot" if snap.get("baseline_yaml_content") else (
@@ -170,6 +195,7 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         "methodology": methodology.get("source", "unknown"),
         "telemetry_provider": telemetry_provider.get("source", "unknown"),
         "execution_environment": execution_environment.get("source", "snapshot"),
+        "filter_policy": filter_policy_source,
     }
 
     return TrustIdentity(
@@ -183,6 +209,7 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         telemetry_provider=telemetry_provider,
         execution_environment=execution_environment,
         sources=sources,
+        filter_policy=filter_policy,
     )
 
 

@@ -10,6 +10,16 @@ Thank you for contributing to QuantMap. This project is a forensic tool, which m
 - **Rule of Parsimony**: Do not add new metrics to the **Metric Registry** unless they pass the "Forensic Value" test. 
 - **Deterministic UX**: All CLI outputs must remain deterministic. Avoid free-form prose.
 
+## Local Development Contract
+
+Before implementation work, use the Developer Setup path in `README.md` and verify the active environment with:
+
+```powershell
+.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick
+```
+
+This is development scaffolding only. Do not make QuantMap runtime behavior depend on `.agent`, `.vscode`, CI, or local helper scripts.
+
 ---
 
 ## 🩺 Support Triage: Under Pressure

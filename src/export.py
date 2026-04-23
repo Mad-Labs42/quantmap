@@ -7,18 +7,13 @@ Bundles campaign data, methodology, and telemetry into a single SQLite file.
 
 from __future__ import annotations
 
-_STR_NOT_SET_IN_BASELINE = "not set in baseline"
-_STR_NOT_IN_SNAPSHOT = "not in snapshot"
-_STR_NOT_RECORDED = "not recorded"
-_STR_NOT_CAPTURED = "not captured"
-_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
-
-
 import logging
 import sqlite3
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+
+from rich.console import Console
 
 from src import ui
 from src.db import get_connection
@@ -34,6 +29,12 @@ from src.trust_identity import (
 )
 
 _logger = logging.getLogger(__name__)
+
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_IN_SNAPSHOT = "not in snapshot"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
+_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
 
 
 def run_export(
@@ -80,7 +81,7 @@ def run_export(
 
 
 def _execute_export_bundle(
-    console: object,
+    console: Console,
     campaign_id: str,
     source_db: Path,
     output_path: Path,
@@ -121,7 +122,7 @@ def _execute_export_bundle(
 
         redaction_status = "not_requested"
         if strip_env:
-            console.print(f"  [dim]Redacting environment metadata...[/dim]")
+            console.print("  [dim]Redacting environment metadata...[/dim]")
             redaction_status = _redact_env(dest_conn, redaction_root)
 
         _write_manifest(
@@ -148,7 +149,7 @@ def _execute_export_bundle(
 
 
 def _print_export_summary(
-    console: object,
+    console: Console,
     output_path: Path,
     lite: bool,
     strip_env: bool,
@@ -506,7 +507,7 @@ def _build_run_context_summary(
     campaign_id: str,
     db_path: Path,
     env_dir: Path | None,
-    logger: object,
+    logger: logging.Logger,
 ) -> dict:
     """Return the run_context_summary dict for metadata.json."""
     from src.db import get_connection  # noqa: PLC0415
@@ -547,7 +548,7 @@ def _build_run_context_summary(
             if run_contexts:
                 env_agg = _aggregate_environment(run_contexts)
         except Exception as _rc_exc:
-            logger.debug("metadata.json: run_context aggregation failed (non-fatal): %s", _rc_exc)  # type: ignore[attr-defined]
+            logger.debug("metadata.json: run_context aggregation failed (non-fatal): %s", _rc_exc)
 
     summary: dict = {
         "total_cycles_in_db":        total_cycles_db,
@@ -580,7 +581,7 @@ def _register_metadata_artifact(
     db_path: Path,
     metadata_path: Path,
     now_utc: str,
-    logger: object,
+    logger: logging.Logger,
 ) -> None:
     """Hash and upsert the metadata.json registration record in the artifacts table."""
     import hashlib  # noqa: PLC0415
@@ -624,7 +625,7 @@ def _register_metadata_artifact(
             )
             _art_conn.commit()
     except Exception as reg_exc:
-        logger.warning("metadata.json: could not register in DB (non-fatal): %s", reg_exc)  # type: ignore[attr-defined]
+        logger.warning("metadata.json: could not register in DB (non-fatal): %s", reg_exc)
 
 
 def generate_metadata_json(
@@ -767,6 +768,27 @@ def generate_metadata_json(
         "environment_summary":  env_summary,
         "run_context_summary":  run_context_summary,
         "baseline_identity": _build_baseline_identity(snap, model_cfg, trust_identity.sources),
+        # ACPM Slice 2: run-effective filter policy projection.
+        # methodology.eligibility_filters remains base methodology gates for compatibility.
+        # filter_policy.effective_filters is the authoritative run-effective threshold set.
+        "filter_policy": {
+            "truth_status": trust_identity.filter_policy.get("truth_status"),
+            "policy_id": trust_identity.filter_policy.get("policy_id"),
+            "policy_modifiers": trust_identity.filter_policy.get("policy_modifiers", []),
+            "final_policy_authority": trust_identity.filter_policy.get("final_policy_authority"),
+            "effective_filters": trust_identity.filter_policy.get("effective_filters"),
+            "changed_filter_keys": trust_identity.filter_policy.get("changed_filter_keys", []),
+            "rankability_affecting_keys": trust_identity.filter_policy.get("rankability_affecting_keys", []),
+            "effective_filters_sha256": trust_identity.filter_policy.get("effective_filters_sha256"),
+            "scoring_confirmation_status": (
+                trust_identity.filter_policy.get("scoring_confirmation", {}).get("status")
+            ),
+            "source": (
+                "campaign_start_snapshot.effective_filter_policy_json"
+                if trust_identity.sources.get("filter_policy") == "snapshot"
+                else trust_identity.sources.get("filter_policy", "unknown")
+            ),
+        },
         "provenance_sources": trust_identity.sources,
         "artifacts":          artifact_inventory,
         "warnings":           warnings_list,

@@ -15,36 +15,42 @@ Historical audits, response memos, and validation memos remain preserved as reco
 ## 🏎️ First 15 Minutes
 
 *Goal: Get setup and build technical confidence.*
-1.  [**Quickstart: Step 1-4**](playbooks/quickstart.md) — Install, Init, Doctor, Self-Test.
-2.  [**Command Reference**](system/command_reference.md) — Glance at the toolset.
-3.  [**Trust Surface**](system/trust_surface.md) — Understand the proof model.
+
+1. [**Quickstart: Step 1-4**](playbooks/quickstart.md) — Install, Init, Doctor, Self-Test.
+2. [**Quickstart: Step 5-8**](playbooks/quickstart.md) — Run, explain, compare, and export.
+3. [**Trust Surface**](system/trust_surface.md) — Understand the proof model.
 
 ---
 
 ## 🎯 Route by Task
 
 ### How do I benchmark safely?
-*   [**Environment Hardening**](playbooks/environment.md) — Eliminate Windows noise.
-*   [**Tuning Guide**](playbooks/tuning.md) — Customizing campaigns and profiles.
-*   [**Quickstart: Step 5-6**](playbooks/quickstart.md) — Dry running and execution.
+
+- [**Environment Hardening**](playbooks/environment.md) — Eliminate Windows noise.
+- [**Tuning Guide**](playbooks/tuning.md) — Customizing campaigns and profiles.
+- [**Quickstart: Step 5-6**](playbooks/quickstart.md) — Dry running and execution.
 
 ### How do I interpret results?
-*   [**Forensics Manual**](playbooks/forensics.md) — Interpreting winners and the "Margin of Victory."
-*   [**Command: explain**](system/command_reference.md#explain) — Generating the technical briefing.
+
+- [**Forensics Manual**](playbooks/forensics.md) — Interpreting winners and the "Margin of Victory."
+- [**Quickstart: Technical Briefing (`explain`)**](playbooks/quickstart.md) — Generating the technical briefing.
 
 ### How do I compare or audit drift?
-*   [**Comparative Analysis**](playbooks/compare.md) — Methodology grades and shared-config deltas.
-*   [**Command: compare**](system/command_reference.md#compare) — Running the forensic audit.
+
+- [**Comparative Analysis**](playbooks/compare.md) — Methodology grades and shared-config deltas.
+- [**Quickstart: Comparative Audit (`compare`)**](playbooks/quickstart.md) — Running the forensic audit.
 
 ### How do I manage / migrate?
-*   [**Rescore & Migration**](playbooks/rescore_and_migration.md) — Preserving history while updating rules.
-*   [**Methodology Lifecycle**](system/methodology_lifecycle.md) — Understanding version shifts.
+
+- [**Rescore & Migration**](playbooks/rescore_and_migration.md) — Preserving history while updating rules.
+- [**Methodology Lifecycle**](system/methodology_lifecycle.md) — Understanding version shifts.
 
 ### I need to audit or extend the tool
-*   [**System Architecture**](system/architecture.md) — Pipeline design.
-*   [**Database Schema**](system/database_schema.md) — Field-level reference.
-*   [**Contributing Guide**](system/contributing.md) — Safety rules and support flow.
-*   [**Decision History**](decisions/README.md) — Historical logic records.
+
+- [**System Architecture**](system/architecture.md) — Pipeline design.
+- [**Database Schema**](system/database_schema.md) — Field-level reference.
+- [**Contributing Guide**](system/contributing.md) — Safety rules and support flow.
+- [**Decision History**](decisions/README.md) — Historical logic records.
 
 ---
 
@@ -53,7 +59,7 @@ Historical audits, response memos, and validation memos remain preserved as reco
 QuantMap uses a unified vocabulary across all documentation and CLI outputs:
 
 | Model | Success State | Warning State | Blocked State |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | **Readiness** | `READY` | `WARNINGS` | `BLOCKED` |
 | **Comparison** | `Compatible` | `Warnings` | `Mismatch` |
 | **Confidence** | `High` | `Moderate` | `Caution` |

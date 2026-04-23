@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS campaign_start_snapshot (
     baseline_identity_json   TEXT,
     quantmap_identity_json   TEXT,
     run_plan_json            TEXT,
+    acpm_planning_metadata_json TEXT,
+    effective_filter_policy_json TEXT,
     snapshot_schema_version  INTEGER,
     snapshot_capture_quality TEXT,
     telemetry_provider_identity_json TEXT,
@@ -369,7 +371,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_campaign_type ON artifacts(campaign_id,
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 12
+SCHEMA_VERSION: int = 14
 
 
 class SchemaVersionError(RuntimeError):
@@ -476,7 +478,12 @@ def _backfill_legacy_methodology_snapshots(conn: sqlite3.Connection) -> None:
                 "campaigns.notes_json.governance_methodology",
             ),
         )
-        legacy["methodology_snapshot_id"] = int(cur.lastrowid)
+        snapshot_id = cur.lastrowid
+        if snapshot_id is None:
+            raise SchemaVersionError(
+                "Legacy methodology snapshot backfill inserted no row id."
+            )
+        legacy["methodology_snapshot_id"] = int(snapshot_id)
         legacy["capture_quality"] = "legacy_partial"
         notes["governance_methodology"] = legacy
         conn.execute(
@@ -639,6 +646,24 @@ _MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
             "ALTER TABLE campaign_start_snapshot ADD COLUMN execution_environment_json TEXT",
         ],
     ),
+    (
+        13,
+        "ACPM Slice 1 structural truth prep: add nullable adjacent planner "
+        "metadata provenance beside run_plan_json.",
+        [
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN acpm_planning_metadata_json TEXT",
+        ],
+    ),
+    (
+        14,
+        "ACPM Slice 2: add effective_filter_policy_json as the sole persisted "
+        "authority for run-effective filter policy. Nullable; new v1+ rows are "
+        "written after score_campaign() returns. Legacy rows remain null and are "
+        "projected by trust_identity without backfill.",
+        [
+            "ALTER TABLE campaign_start_snapshot ADD COLUMN effective_filter_policy_json TEXT",
+        ],
+    ),
 ]
 
 
@@ -654,7 +679,7 @@ def init_db(db_path: Path) -> None:
     Call once at campaign start before any reads or writes.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, factory=ClosingConnection) as conn:
         conn.executescript(_DDL)
         _migrate_schema(conn)
         conn.commit()

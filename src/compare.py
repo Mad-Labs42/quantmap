@@ -12,14 +12,11 @@ Produces a structured CompareResult (JSON-serializable) covering:
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
-from src import ui
 from src import audit_methodology
 from src.db import get_connection
 
@@ -241,7 +238,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     meth = grade_methodology(id_a, id_b, db_path)
     
     # 2. Environment Deltas
-    env_deltas = []
+    env_deltas: List[EnvDelta] = []
     for key, label in [
         ("nvidia_driver", "NVIDIA Driver"),
         ("os_version", "OS Version"),
@@ -305,8 +302,8 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
 
     # 3. Shared Configs (Intersection Set)
     shared_ids = sorted(set(scores_a.keys()) & set(scores_b.keys()))
-    config_deltas = []
-    tg_shifts = []
+    config_deltas: List[ConfigDelta] = []
+    tg_shifts: List[float] = []
     
     for cid in shared_ids:
         s_a = scores_a[cid]

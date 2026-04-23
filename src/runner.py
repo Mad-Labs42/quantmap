@@ -50,12 +50,12 @@ import logging
 import hashlib
 import os
 import statistics
-import subprocess
+import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import yaml
 from dotenv import load_dotenv  # type: ignore[import]
@@ -63,13 +63,18 @@ from src import ui
 
 load_dotenv()
 
-# Internal modules
-from src.config import CONFIGS_DIR, DEFAULT_HOST, LAB_ROOT, REQUESTS_DIR  # noqa: E402
-from src.measure import load_request_payload, measure_request_sync, RequestOutcome
-from src import telemetry as tele
-from src import doctor
-from src.db import init_db, get_connection, write_request, write_raw_jsonl
-from src.run_plan import RunPlan, resolve_run_mode, STANDARD_CYCLES_PER_CONFIG, QUICK_CYCLES_PER_CONFIG  # noqa: E402
+# Internal modules. src.config reads environment variables at import time.
+from src.config import CONFIGS_DIR, LAB_ROOT  # noqa: E402
+from src.measure import load_request_payload, measure_request_sync, RequestOutcome  # noqa: E402
+from src import telemetry as tele  # noqa: E402
+from src.db import init_db, get_connection, write_request, write_raw_jsonl  # noqa: E402
+from src.run_plan import (  # noqa: E402
+    QUICK_CYCLES_PER_CONFIG,
+    STANDARD_CYCLES_PER_CONFIG,
+    RunPlan,
+    resolve_run_mode,
+    resolve_scope_authority,
+)
 from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summary
 from src.artifact_paths import (  # noqa: E402
     ARTIFACT_CAMPAIGN_SUMMARY,
@@ -84,8 +89,9 @@ from src.artifact_paths import (  # noqa: E402
 )
 
 # Rich components
-from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]
-from rich.table import Table  # type: ignore[import]
+from rich.console import Console  # type: ignore[import]  # noqa: E402
+from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn  # type: ignore[import]  # noqa: E402
+from rich.table import Table  # type: ignore[import]  # noqa: E402
 
 console = ui.get_console()
 logger = logging.getLogger(__name__)
@@ -1280,7 +1286,9 @@ def _run_cycle(
         # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
         if not is_oom:
             try:
-                server_log = Path(request_files.get("speed_short")).parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
+                speed_short_path = request_files.get("speed_short")
+                if speed_short_path is not None:
+                    server_log = speed_short_path.parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
                 # actually srv["log_file"] was defined inside the `with` block, we might not have it.
                 # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
                 pass
@@ -1517,7 +1525,7 @@ def _run_config(
                        VALUES (?, ?, ?, 'pending')""",
                     (config_id, campaign_id, cycle_number),
                 )
-                cycle_id = cur.lastrowid
+                cycle_id = cast(int, cur.lastrowid)
                 conn.commit()
             except Exception as exc:
                 raise RuntimeError(f"FATAL: Failed to insert pending cycle in DB: {exc}") from exc
@@ -1657,6 +1665,8 @@ def run_campaign(
     values_override: list | None = None,
     baseline_path: Path = BASELINE_YAML,
     mode_flag: str | None = None,
+    scope_authority: str | None = None,
+    acpm_planning_metadata: dict[str, Any] | None = None,
 ) -> None:
     """
     Run a complete campaign from start to finish (or resume if interrupted).
@@ -1814,6 +1824,7 @@ def run_campaign(
     # what mode, which identity, which values, what schedule, which paths.
     # Validate / dry-run / execution / reporting all read from it.
     _run_mode = resolve_run_mode(values_override, mode_flag)
+    _scope_authority = resolve_scope_authority(values_override, scope_authority)
 
     # Mode-specific filter overrides:
     # - Custom: relax min_valid_warm_count to 1 (intentionally sparse targeted run)
@@ -1834,6 +1845,7 @@ def run_campaign(
         parent_campaign_id=campaign_id,
         effective_campaign_id=effective_campaign_id,
         run_mode=_run_mode,
+        scope_authority=_scope_authority,
         variable=variable,
         all_campaign_values=campaign.get("values", []),
         selected_values=[c["variable_value"] for c in configs],
@@ -1987,7 +1999,7 @@ def run_campaign(
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
         from src.telemetry_policy import enforce_current_run_readiness  # noqa: PLC0415
-        availability = enforce_current_run_readiness()
+        enforce_current_run_readiness()
         console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
         console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
@@ -2134,6 +2146,7 @@ def run_campaign(
             baseline=baseline,
             quantmap_identity=capture_quantmap_identity(),
             run_plan_snapshot=run_plan.to_snapshot_dict(),
+            acpm_planning_metadata=acpm_planning_metadata,
         )
 
         # Add gpu_vram_total_mb for NGL sweep VRAM headroom reporting.
@@ -2393,9 +2406,9 @@ def run_campaign(
                                 config_id, consecutive_ooms,
                             )
                             console.print(
-                                f"\n[bold red]OOM boundary confirmed[/bold red] "
-                                f"(2 consecutive OOM failures). Terminating sweep.\n"
-                                f"All remaining configs will be marked skipped_oom."
+                                "\n[bold red]OOM boundary confirmed[/bold red] "
+                                "(2 consecutive OOM failures). Terminating sweep.\n"
+                                "All remaining configs will be marked skipped_oom."
                             )
                             # Mark all remaining configs skipped_oom in DB + progress
                             # BEFORE break, so crash recovery skips them on resume.
@@ -2550,7 +2563,6 @@ def run_campaign(
     report_ok = False
     analysis_ok = False
     try:
-        from src.analyze import analyze_campaign
         from src.score import score_campaign
         from src.report import generate_report
 
@@ -2614,6 +2626,59 @@ def run_campaign(
                 (now_status, now_status, effective_campaign_id),
             )
             _status_conn.commit()
+
+        # ACPM Slice 2: persist effective filter policy after scoring.
+        # Written before report/export so trust-bearing artifacts can use persisted truth.
+        try:
+            from src.effective_filter_policy import (  # noqa: PLC0415
+                build_effective_filter_policy,
+                build_override_layers,
+            )
+            _scoring_profile = scores.get("scoring_profile")
+            _base_gates: dict = dict(_scoring_profile.gate_overrides) if _scoring_profile else {}
+            _snap_id = scores.get("methodology_snapshot_id")
+            _efp_base_source: dict = {
+                "source": "methodology_snapshot" if _snap_id else "unknown",
+                "snapshot_id": _snap_id,
+                "profile_name": getattr(_scoring_profile, "name", None),
+                "profile_version": getattr(_scoring_profile, "version", None),
+                "methodology_version": None,
+                "capture_quality": "complete",
+                "capture_source": "score_campaign:initial_scoring",
+            }
+            _efp_layers = build_override_layers(
+                run_plan.to_snapshot_dict(),
+                campaign.get("elimination_overrides") or {},
+            )
+            _efp = build_effective_filter_policy(
+                _base_gates,
+                _efp_base_source,
+                _efp_layers,
+                score_effective_filters=scores.get("effective_filters"),
+            )
+            _efp_json = json.dumps(_efp, sort_keys=True)
+            with get_connection(_eff_db_path) as _efp_conn:
+                _efp_conn.execute(
+                    "UPDATE campaign_start_snapshot"
+                    " SET effective_filter_policy_json=?"
+                    " WHERE campaign_id=?",
+                    (_efp_json, effective_campaign_id),
+                )
+                _efp_conn.commit()
+            if _efp.get("scoring_confirmation", {}).get("status") == "mismatch":
+                logger.error(
+                    "TRUST FAILURE: effective filter policy mismatch for %s — "
+                    "runner-computed expected filters differ from scorer-applied filters. "
+                    "expected=%s actual=%s",
+                    effective_campaign_id,
+                    _efp.get("effective_filters"),
+                    scores.get("effective_filters"),
+                )
+        except Exception as _efp_exc:
+            logger.warning(
+                "Could not persist effective_filter_policy_json for %s (non-fatal): %s",
+                effective_campaign_id, _efp_exc,
+            )
 
         report_path = generate_report(
             effective_campaign_id, _eff_db_path, baseline, scores, stats,
@@ -2819,7 +2884,7 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
 def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False) -> None:
     """Run environment checks and print a compact summary if issues are found."""
     from src import doctor
-    from src.diagnostics import DiagnosticReport, Status
+    from src.diagnostics import Status
 
     results = []
     # 0. Backend execution boundary
@@ -2855,14 +2920,14 @@ def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is
 
 
 
-def _parse_values_arg(raw: str) -> list:
+def _parse_values_arg(raw: str) -> list[int | str]:
     """
     Parse the --values string into a typed list.
 
     Tries int conversion first; keeps original string on failure.
     Example: "30,80,999" → [30, 80, 999]
     """
-    result = []
+    result: list[int | str] = []
     for part in raw.split(","):
         part = part.strip()
         if not part:
