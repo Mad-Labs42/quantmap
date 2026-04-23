@@ -290,7 +290,7 @@ def test_quick_mode_layer_same_value_as_base_no_changed_key() -> None:
     policy = build_effective_filter_policy(_BASE_GATES, _BASE_SOURCE, layers)
 
     assert policy["policy_id"] == "depth_required_relaxation"
-    assert policy["effective_filters"]["min_valid_warm_count"] == 3.0
+    assert policy["effective_filters"]["min_valid_warm_count"] == 3
     assert "min_valid_warm_count" not in policy["changed_filter_keys"]
     # Authority chain still records execution_mode because a layer exists.
     assert "execution_mode" in policy["authority_chain"]
@@ -305,7 +305,7 @@ def test_yaml_override_sets_campaign_override_modifier() -> None:
     assert policy["policy_id"] == "profile_default"
     assert "campaign_override" in policy["policy_modifiers"]
     assert policy["final_policy_authority"] == "campaign_yaml"
-    assert policy["effective_filters"]["max_outliers"] == 5.0
+    assert policy["effective_filters"]["max_outliers"] == 5
     assert "max_outliers" in policy["changed_filter_keys"]
 
 
@@ -318,11 +318,11 @@ def test_custom_plus_yaml_override_stacks_correctly() -> None:
     assert policy["policy_id"] == "user_directed_sparse_custom"
     assert "campaign_override" in policy["policy_modifiers"]
     assert policy["effective_filters"]["min_valid_warm_count"] == 1
-    assert policy["effective_filters"]["max_outliers"] == 5.0
+    assert policy["effective_filters"]["max_outliers"] == 5
     # YAML wins on conflicting keys: if yaml also overrides min_valid_warm_count
     layers2 = build_override_layers(_CUSTOM_RUN_PLAN_SNAP, {"min_valid_warm_count": 2.0})
     policy2 = build_effective_filter_policy(_BASE_GATES, _BASE_SOURCE, layers2)
-    assert policy2["effective_filters"]["min_valid_warm_count"] == 2.0  # YAML wins
+    assert policy2["effective_filters"]["min_valid_warm_count"] == 2  # YAML wins
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +411,7 @@ def test_legacy_reconstructed_yaml_adds_campaign_override_modifier() -> None:
     proj = project_legacy_filter_policy(methodology, run_plan, campaign_yaml)
 
     assert "campaign_override" in proj["policy_modifiers"]
-    assert proj["effective_filters"]["max_outliers"] == 5.0
+    assert proj["effective_filters"]["max_outliers"] == 5
 
 
 # ---------------------------------------------------------------------------
