@@ -2,8 +2,24 @@
   "chat.instructionsFilesLocations": {
     ".github/instructions": true
   },
+  "task.allowAutomaticTasks": "on",
   "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
   "python.terminal.activateEnvironment": true,
+  "python.terminal.activateEnvInCurrentTerminal": true,
+  "terminal.integrated.defaultProfile.windows": "PowerShell (QuantMap .venv)",
+  "terminal.integrated.profiles.windows": {
+    "PowerShell (QuantMap .venv)": {
+      "source": "PowerShell",
+      "args": [
+        "-NoLogo",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-NoExit",
+        "-Command",
+        "if (Test-Path '.\\.venv\\Scripts\\Activate.ps1') { . .\\.venv\\Scripts\\Activate.ps1 }"
+      ]
+    }
+  },
   "ruff.nativeServer": "on",
   "ruff.organizeImports": true,
   "ruff.fixAll": true,

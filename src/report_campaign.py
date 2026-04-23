@@ -25,16 +25,8 @@ Public API:
 
 from __future__ import annotations
 
-_STR_NOT_SET_IN_BASELINE = "not set in baseline"
-_STR_NOT_RECORDED = "not recorded"
-_STR_NOT_CAPTURED = "not captured"
-_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
-_KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
-
-
 import json
 import logging
-import os
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -50,6 +42,12 @@ from src.artifact_paths import (
 )
 
 logger = logging.getLogger(__name__)
+
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
+_STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
+_KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
 LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
 
@@ -341,8 +339,6 @@ def _aggregate_environment(contexts: list[dict[str, Any]]) -> dict[str, Any]:
         "failed_probe_names":      sorted(failed_probe_names),
         "missing_capability_names": sorted(missing_cap_names),
         "inapplicable_capability_names": sorted(inapplicable_cap_names),
-        "top_interferers":         top_interferers[:5],
-        "top_reasons":             top_reasons[:8],
     }
 
 # ---------------------------------------------------------------------------
@@ -503,7 +499,7 @@ def _section_methodology(
     lines.append(f"| Max warm TTFT P90 | ≤ {ef.get('max_warm_ttft_p90_ms', 500):.0f} ms | Hard latency ceiling for interactive use |")
     lines.append(f"| Min success rate | ≥ {ef.get('min_success_rate', 0.90):.0%} | Unreliable server responses invalidate results |")
     lines.append(f"| Min warm TG P10 | ≥ {ef.get('min_warm_tg_p10', 7.0):.1f} t/s | Floor below which throughput is unusable |")
-    lines.append(f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 10)} | Minimum for statistical validity |")
+    lines.append(f"| Min valid warm samples | ≥ {ef.get('min_valid_warm_count', 3)} | Minimum for statistical validity |")
     lines.append("")
     # Scoring Profile
     profile_obj = scores_result.get("scoring_profile")
@@ -704,9 +700,9 @@ def _section_primary_results(
         
         if highest_tg == winner:
             lines.append(
-                f"| Highest raw TG | _(same as score winner)_ | — | — | — "
-                f"| TG leader and score leader are the same config "
-                f"(based on TG Median and Composite Score columns) |"
+                "| Highest raw TG | _(same as score winner)_ | — | — | — "
+                "| TG leader and score leader are the same config "
+                "(based on TG Median and Composite Score columns) |"
             )
         else:
             lines.append(
@@ -887,8 +883,8 @@ def _section_primary_results(
                 diff_note = f" ({diff_pct:.1f}% lower raw TG than score winner)"
         
         tradeoff_text = (
-            f"If this throughput difference exceeds the observed run-to-run variability (CV), "
-            f"it may represent a throughput/score tradeoff."
+            "If this throughput difference exceeds the observed run-to-run variability (CV), "
+            "it may represent a throughput/score tradeoff."
         ) if n_h >= 3 else "CV is mathematically unreliable at this sample size, preventing strict stability comparisons."
 
         interp.append(
@@ -1848,19 +1844,17 @@ def _compute_background_interference(
             total_tracked_rss_mb = snapshot_rss_total
 
     # R1: Top 5 CPU consumers by peak (all processes)
-    top_cpu = sorted(
-        [{"name": n, "peak_cpu_pct": v, "snapshots": presence.get(n, 0)}
-         for n, v in peak_cpu.items()],
-        key=lambda x: -x["peak_cpu_pct"],
-    )[:5]
+    top_cpu = [
+        {"name": n, "peak_cpu_pct": v, "snapshots": presence.get(n, 0)}
+        for n, v in sorted(peak_cpu.items(), key=lambda item: -item[1])[:5]
+    ]
 
     # R2: Top 5 RAM consumers by peak
     # (llama-server already excluded in collection loop)
-    top_ram = sorted(
-        [{"name": n, "peak_rss_mb": v, "snapshots": presence.get(n, 0)}
-         for n, v in peak_rss.items()],
-        key=lambda x: -x["peak_rss_mb"],
-    )[:5]
+    top_ram = [
+        {"name": n, "peak_rss_mb": v, "snapshots": presence.get(n, 0)}
+        for n, v in sorted(peak_rss.items(), key=lambda item: -item[1])[:5]
+    ]
 
     # Aggregate RAM pressure from captured processes (excluding llama-server)
     # This surfaces "death by a thousand cuts" — many mid-sized processes together
@@ -2273,19 +2267,19 @@ def _section_supporting_artifacts(
     lines.append(
         "_Copy and run against `lab.sqlite` (or the DB path above) in any SQLite client._\n"
     )
-    lines.append(f"```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
+    lines.append("```sql\n-- Hardware samples: CPU/GPU temps, VRAM, clocks, server metrics")
     lines.append(f"SELECT * FROM telemetry WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n")
-    lines.append(f"-- Background process snapshots: all notable processes every 10 s")
+    lines.append("-- Background process snapshots: all notable processes every 10 s")
     lines.append(
         f"SELECT timestamp, all_notable_procs_json, gpu_proc_vram_json\n"
         f"FROM background_snapshots WHERE campaign_id = '{campaign_id}' ORDER BY timestamp;\n"
     )
-    lines.append(f"-- Report generation history")
+    lines.append("-- Report generation history")
     lines.append(
         f"SELECT artifact_type, path, status, sha256, verification_source, error_message, created_at FROM artifacts\n"
         f"WHERE campaign_id = '{campaign_id}' ORDER BY created_at DESC;\n"
     )
-    lines.append(f"-- Per-config score detail")
+    lines.append("-- Per-config score detail")
     lines.append(
         f"SELECT config_id, composite_score, rank_overall, is_score_winner,\n"
         f"       passed_filters, elimination_reason\n"
@@ -2442,7 +2436,6 @@ def generate_campaign_report(
     # Compute analysis if not provided
     if scores_result is None:
         from src.score import score_campaign  # noqa: PLC0415
-        from src import governance
         scores_result = score_campaign(campaign_id, db_path, baseline)
     if stats is None:
         stats = scores_result["stats"]

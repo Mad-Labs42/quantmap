@@ -768,6 +768,27 @@ def generate_metadata_json(
         "environment_summary":  env_summary,
         "run_context_summary":  run_context_summary,
         "baseline_identity": _build_baseline_identity(snap, model_cfg, trust_identity.sources),
+        # ACPM Slice 2: run-effective filter policy projection.
+        # methodology.eligibility_filters remains base methodology gates for compatibility.
+        # filter_policy.effective_filters is the authoritative run-effective threshold set.
+        "filter_policy": {
+            "truth_status": trust_identity.filter_policy.get("truth_status"),
+            "policy_id": trust_identity.filter_policy.get("policy_id"),
+            "policy_modifiers": trust_identity.filter_policy.get("policy_modifiers", []),
+            "final_policy_authority": trust_identity.filter_policy.get("final_policy_authority"),
+            "effective_filters": trust_identity.filter_policy.get("effective_filters"),
+            "changed_filter_keys": trust_identity.filter_policy.get("changed_filter_keys", []),
+            "rankability_affecting_keys": trust_identity.filter_policy.get("rankability_affecting_keys", []),
+            "effective_filters_sha256": trust_identity.filter_policy.get("effective_filters_sha256"),
+            "scoring_confirmation_status": (
+                trust_identity.filter_policy.get("scoring_confirmation", {}).get("status")
+            ),
+            "source": (
+                "campaign_start_snapshot.effective_filter_policy_json"
+                if trust_identity.sources.get("filter_policy") == "snapshot"
+                else trust_identity.sources.get("filter_policy", "unknown")
+            ),
+        },
         "provenance_sources": trust_identity.sources,
         "artifacts":          artifact_inventory,
         "warnings":           warnings_list,

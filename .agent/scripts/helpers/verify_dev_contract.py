@@ -59,11 +59,17 @@ def tail(text: str, limit: int = 1200) -> str:
     return clean[-limit:]
 
 
-def run_command(command: list[str], timeout: int = PYTEST_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+def run_command(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = PYTEST_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         capture_output=True,
         text=True,
+        cwd=str(cwd) if cwd else None,
         timeout=timeout,
         check=False,
     )
@@ -100,7 +106,9 @@ def check_python_version() -> CheckResult:
     return CheckResult("Python version", "ok", found)
 
 
-def check_venv_ownership(root: Path, ci_mode: bool) -> CheckResult:
+def check_venv_ownership(
+    root: Path, ci_mode: bool, allow_non_venv: bool
+) -> CheckResult:
     expected = expected_venv_python(root)
     active = Path(sys.executable)
     expected_exists = expected.exists()
@@ -108,11 +116,11 @@ def check_venv_ownership(root: Path, ci_mode: bool) -> CheckResult:
 
     if active_matches:
         return CheckResult("Interpreter ownership", "ok", "active interpreter is repo .venv")
-    if ci_mode:
+    if ci_mode or allow_non_venv:
         return CheckResult(
             "Interpreter ownership",
             "warn",
-            f"CI/non-local interpreter accepted: {active}",
+            f"non-repo interpreter accepted by override: {active}",
         )
     if not expected_exists:
         raise ContractError(
@@ -159,16 +167,20 @@ def check_tool_importable(tool_name: str, package_import_name: str | None = None
     return CheckResult(tool_name, "ok", "importable")
 
 
-def check_pytest_cov_plugin() -> CheckResult:
+def check_pytest_cov_plugin(root: Path) -> CheckResult:
     try:
-        result = run_command([sys.executable, "-m", "pytest", "--help", "--no-cov"], timeout=15)
+        result = run_command(
+            [sys.executable, "-m", "pytest", "--help"], cwd=root, timeout=15
+        )
     except subprocess.TimeoutExpired as exc:
-        raise ContractError("pytest --help --no-cov timed out while checking pytest-cov availability") from exc
+        raise ContractError(
+            "pytest --help timed out while checking pytest-cov availability"
+        ) from exc
 
     combined = f"{result.stdout}\n{result.stderr}"
     if result.returncode != 0:
         raise ContractError(
-            f"{classify_pytest_failure(result)} while running pytest --help --no-cov. "
+            f"{classify_pytest_failure(result)} while running pytest --help. "
             f"stderr tail: {tail(result.stderr)}"
         )
     if "--cov" not in combined:
@@ -179,10 +191,10 @@ def check_pytest_cov_plugin() -> CheckResult:
     return CheckResult("pytest-cov plugin", "ok", "--cov option available")
 
 
-def check_pytest_config_collect() -> CheckResult:
+def check_pytest_config_collect(root: Path) -> CheckResult:
     command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-cov"]
     try:
-        result = run_command(command)
+        result = run_command(command, cwd=root)
     except subprocess.TimeoutExpired as exc:
         raise ContractError("pytest collection timed out with coverage disabled") from exc
 
@@ -225,6 +237,11 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--quick", action="store_true", help="Run interpreter and import checks only.")
     mode.add_argument("--full", action="store_true", help="Run quick checks plus pytest config checks.")
     parser.add_argument("--ci", action="store_true", help="Use CI semantics; do not require repo .venv ownership.")
+    parser.add_argument(
+        "--allow-non-venv",
+        action="store_true",
+        help="Allow non-repo interpreter ownership for advanced local scenarios.",
+    )
     return parser
 
 
@@ -237,7 +254,10 @@ def main(argv: list[str] | None = None) -> int:
     print_environment(root, ci_mode=ci_mode)
 
     checks = [
-        ("Interpreter ownership", lambda: check_venv_ownership(root, ci_mode)),
+        (
+            "Interpreter ownership",
+            lambda: check_venv_ownership(root, ci_mode, args.allow_non_venv),
+        ),
         ("DevStore anchor", lambda: check_devstore_anchor(ci_mode)),
         ("Python version", check_python_version),
         ("pytest", lambda: check_tool_importable("pytest")),
@@ -252,6 +272,17 @@ def main(argv: list[str] | None = None) -> int:
                 ("pytest config collection", check_pytest_config_collect),
             ]
         )
+
+    if full_mode:
+        checks = [
+            (
+                name,
+                (lambda func=func: func(root))
+                if name in {"pytest-cov plugin", "pytest config collection"}
+                else func,
+            )
+            for name, func in checks
+        ]
 
     failures: list[tuple[str, str]] = []
     warnings = 0

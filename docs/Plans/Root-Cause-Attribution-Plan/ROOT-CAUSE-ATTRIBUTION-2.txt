@@ -1,0 +1,876 @@
+CLAUDE ROOT CAUSE ATTRIBUTION 2
+
+Good. I have everything I need. A few specific findings before writing:
+
+gpu_throttle_reasons (TEXT, SILENT tier) already exists in the telemetry table and stores comma-separated strings like "SW_POWER_CAP,HW_THERMAL" — the prior memo's proposed "add a bitmask column" is unnecessary.
+power_limit_throttling (ABORT-tier bool) is specifically the SW_POWER_CAP bit — always populated if a campaign completed.
+cpu_temp_c is ABORT-tier — always present. gpu_temp_c is WARN-tier — usually present.
+background_snapshots has defender_process_running, windows_update_active, search_indexer_active, antivirus_scan_active, high_cpu_process_count, gpu_proc_vram_json.
+requests.timestamp_start exists — telemetry correlation by timestamp range is possible without schema changes.
+campaign_start_snapshot has cpu_temp_at_start_c, gpu_temp_at_start_c, gpu_vram_total_mb, power_plan.
+cycles.startup_duration_s and cycles.invalid_reason already exist.
+Writing now.
+
+QuantMap Root-Cause Attribution — MVP Implementation Spec
+Status: Approved for implementation planning
+Date: 2026-04-11
+Prepared for: Joshua Davis Sr.
+Supersedes: Root-Cause Attribution Design Memo (full design, 2026-04-11)
+
+1. Purpose of the MVP
+This spec defines the smallest version of root-cause attribution worth shipping in QuantMap. It is a deliberate narrowing from the full design memo.
+
+The prior memo established the right principles, the right architecture, and a sound taxonomy. The problem is scope: the full taxonomy is too broad to implement carefully in a first pass. Features that require multi-signal correlation across ambiguous evidence, or that depend on signals that may not consistently exist in practice, should wait until the simpler cases are proven and trusted.
+
+The MVP must satisfy one test: an operator looking at an eliminated config or invalid cycle should see a credible, evidence-bound explanation — not a guess, not silence. Everything beyond that is v1.1.
+
+The feature fails if it emits confidently wrong attributions. The feature succeeds if it is honest and useful even when it has to say "cannot determine."
+
+2. What Is In v1 / What Is Out
+In v1
+Six event families, selected because evidence is either ABORT-tier (always present) or reliably WARN/SILENT-tier (present in the vast majority of campaigns). Rules are simple and deterministic.
+
+Event Family	Primary evidence	Evidence tier
+GPU software power-cap throttle	power_limit_throttling = 1	ABORT
+GPU hardware thermal throttle	gpu_throttle_reasons contains HW_THERMAL	SILENT
+GPU other hardware throttle	gpu_throttle_reasons contains HW_SLOWDOWN or HW_POWER_BRAKE	SILENT
+CPU thermal approach/trip	cpu_temp_c >= 95	ABORT
+VRAM pressure	gpu_vram_used_mb / gpu_vram_total_mb	ABORT + snapshot
+Known-bad background process	background_snapshots named flags	SILENT
+Out of v1
+These are deferred — not abandoned. Reasons are given explicitly.
+
+Event Family	Reason for deferral
+BG_CPU_CONTENTION (general)	high_cpu_process_count and top_cpu_procs_json exist but correlating a process to a specific metric degradation requires per-request window joins — complexity disproportionate to evidence strength
+BG_GPU_CONTENTION via VRAM attribution	gpu_proc_vram_json exists but attributing VRAM consumption to a specific non-llama-server process requires name heuristics that are fragile and environment-specific
+CPU frequency throttle	cpu_pcore_freq_ghz and cpu_freq_mhz are SILENT-tier — may be absent; rule would need to handle missing data in ways that could produce spurious LOW-confidence attributions
+SERVER_STARTUP_ANOMALY	cycles.startup_duration_s exists but no intra-campaign baseline median is computed yet; comparison threshold is arbitrary without it
+Per-request telemetry correlation	Timestamp-window joins across requests and telemetry are feasible but add query complexity; reserve for v1.1 where the payoff (latency spike attribution) justifies it
+ENV_POWER_PLAN_DEGRADED	Available in both campaign_start_snapshot.power_plan and background_snapshots.power_plan; low operator value relative to the GPU/CPU throttle events; add to v1.1 batch
+Voltage/reliability limit inference	Requires SW_THERMAL at low temperature — two-signal cross-reference; too speculative for v1
+Not recommended / too speculative
+These should not be implemented in this feature at any version without a fundamental change in evidence quality:
+
+Any attribution based solely on process name pattern-matching without a confirmed metric impact
+Any attribution that concludes thermal or contention "must have caused" a CV violation without corroborating telemetry timestamps
+Any inference that a config "would have passed" under better conditions — attribution describes what happened, not what would have happened
+3. MVP Event Families
+The six v1 event families, fully specified.
+
+EF-1: GPU_SW_POWER_CAP — GPU Software Power Cap Throttle
+What it means: The GPU reduced compute clocks because active power draw hit or exceeded the configured TDP limit. Driver-enforced via NVML SW_POWER_CAP.
+
+Primary evidence: telemetry.power_limit_throttling = 1 for at least one row in the config's measurement window.
+
+Corroborating evidence (raises confidence):
+
+telemetry.gpu_graphics_clock_mhz is depressed relative to its median for other configs in the same campaign
+telemetry.gpu_power_w is elevated (at or near a hard ceiling — requires knowing the GPU's power limit from campaign_start_snapshot.gpu_name or a known-limit lookup)
+gpu_throttle_reasons contains "SW_POWER_CAP" (redundant with power_limit_throttling, but confirms the signal is consistent)
+Conflating events: GPU_HW_THERMAL — both can fire simultaneously. Both should be reported as co-occurring. Rule checks gpu_throttle_reasons for co-occurrence.
+
+Confidence derivation:
+
+power_limit_throttling = 1 present → gate passed
+Count of throttle rows vs total telemetry rows for this config (throttle_fraction): > 0.10 is "sustained"
+Clock depression corroborated → HIGH
+No clock data (SILENT-tier absent) → MODERATE
+Single throttle row (transient) with no clock data → LOW
+Severity: rank_invalidating (backs the existing max_thermal_events = 0 elimination)
+
+Remediation hint: "SW_POWER_CAP throttle was active in {N} of {M} telemetry samples for this config ({pct:.0%}). The GPU was power-constrained during inference. Consider: (1) increasing GPU power limit via nvidia-smi if headroom exists, (2) closing concurrent GPU workloads, (3) accepting this as a hardware ceiling for this model size."
+
+EF-2: GPU_HW_THERMAL — GPU Hardware Thermal Throttle
+What it means: GPU hardware self-protection reduced clocks because die temperature reached the thermal throttle threshold (typically 83–87°C on NVIDIA consumer hardware).
+
+Primary evidence: gpu_throttle_reasons contains "HW_THERMAL" for at least one telemetry row in this config's window.
+
+Note on evidence tier: gpu_throttle_reasons is SILENT-tier (populated when available, not an abort condition). Confirmed populated whenever NVML is initialized — which is already ABORT-tier. In practice this field will be present on all successful campaigns. The rule must still handle NULL gracefully.
+
+Corroborating evidence:
+
+gpu_temp_c at or above 83°C during the window (WARN-tier — usually present)
+gpu_hotspot_temp_c (SILENT / HWiNFO) if available, above hotspot threshold (~100°C)
+gpu_graphics_clock_mhz depressed during the throttle window
+Confidence derivation:
+
+gpu_throttle_reasons contains "HW_THERMAL" → gate passed
+gpu_temp_c >= 83°C in same window → HIGH
+gpu_temp_c < 83°C but throttle reason present → MODERATE with note: "Thermal throttle bit set but GPU die temp was below expected threshold — may indicate brief hotspot event or sensor timing gap"
+gpu_temp_c NULL (WARN-tier absent) → MODERATE; note what's missing
+gpu_throttle_reasons is NULL for all rows → UNKNOWN (cannot assess)
+Severity: rank_invalidating
+
+Remediation hint: "HW_THERMAL throttle was observed with GPU die temperature of {max_gpu_temp:.1f}°C during this config. Thermal throttling indicates the GPU cooler is insufficient for sustained inference load at this configuration. Check: GPU cooler seating, case airflow, and whether ambient temperature or chassis congestion is elevated."
+
+EF-3: GPU_HW_OTHER_THROTTLE — GPU Hardware Slowdown / Power Brake
+What it means: A hardware-level GPU throttle not covered by EF-2. HW_SLOWDOWN is a general hardware protection indicator. HW_POWER_BRAKE reflects an external electrical constraint (PCIe slot power delivery, PSU signaling).
+
+Primary evidence: gpu_throttle_reasons contains "HW_SLOWDOWN" or "HW_POWER_BRAKE" and neither EF-1 nor EF-2 has already fired as the primary cause.
+
+Design note: This is a catch-all for the HW_ family. It is not a high-frequency event. Its purpose is to ensure that NVML throttle bits that QuantMap observes are never silently dropped — every observed throttle reason gets a corresponding attribution event.
+
+Confidence derivation:
+
+Bit present → MODERATE (we know something happened but distinguishing HW_SLOWDOWN from co-occurring thermal/power events requires more signal than we have)
+gpu_graphics_clock_mhz depressed during window → MODERATE (corroborated but not fully discriminated)
+Severity: rank_invalidating
+
+Remediation hint conditional on reason:
+
+HW_SLOWDOWN: "Hardware slowdown throttle was observed. This often co-occurs with thermal or power constraints. Check GPU cooler, power delivery, and concurrent GPU workloads."
+HW_POWER_BRAKE: "Hardware power brake throttle was observed. This suggests a power delivery constraint external to the GPU (PCIe slot power, PSU capacity, or power connectors). Verify GPU power connectors are fully seated and PSU capacity is sufficient."
+EF-4: CPU_THERMAL_HIGH — CPU Temperature Near or At TjMax
+What it means: CPU junction temperature approached or reached 100°C during inference. At this temperature, the CPU engages thermal throttle (reduces frequency), which can affect inference throughput on CPU-heavy operations (tokenization, sampling, prompt processing).
+
+Primary evidence: telemetry.cpu_temp_c >= 95.0 for at least one row in the config's window. (95°C is the warning threshold; 100°C is the trip point. Both are alertable; severity differs.)
+
+Evidence tier: cpu_temp_c is ABORT-tier — always present if the campaign ran. This is the most evidence-secure event in the v1 set.
+
+Two sub-levels:
+
+cpu_temp_c >= 100.0 → actual TjMax trip (existing thermal_events query already counts these)
+cpu_temp_c in [95, 100) → approach, warning-level
+Corroborating evidence:
+
+cpu_power_w elevated (WARN-tier from HWiNFO) — high power precedes thermal events
+liquid_temp_c elevated (SILENT / HWiNFO, AIO cooler only) — if AIO liquid temp > 40°C, cooling is struggling
+cpu_pcore_freq_ghz depressed (SILENT / HWiNFO) — confirms throttle is actually reducing frequency
+Confidence:
+
+cpu_temp_c >= 100.0 → HIGH (this is a hard, directly observed fact; no inference needed)
+cpu_temp_c in [95, 100) → MODERATE (approach, not confirmed throttle)
+cpu_power_w corroborates → raises by one level where applicable
+Severity:
+
+Trip (>= 100°C): rank_invalidating (consistent with analyze.py thermal_events counting this)
+Approach (95–100°C): warning
+Remediation hint: "CPU temperature reached {max_temp:.1f}°C during this config (TjMax = 100°C). At this temperature, CPU frequency throttle engages automatically. Verify: CPU cooler contact pressure and paste condition, case airflow, and whether any power-hungry background processes are competing during inference."
+
+EF-5: VRAM_PRESSURE — GPU VRAM Utilization High
+What it means: GPU VRAM utilization was high enough during inference that KV cache, model layers, or compute buffers may have been constrained. At >90–95% VRAM utilization, performance is typically degraded and OOM risk is elevated.
+
+Primary evidence: telemetry.gpu_vram_used_mb / campaign_start_snapshot.gpu_vram_total_mb > 0.90 for a sustained portion of the config's measurement window.
+
+Evidence tier: gpu_vram_used_mb is ABORT-tier. gpu_vram_total_mb is in campaign_start_snapshot (added in migration 4). Both always present.
+
+Sub-cases:
+
+configs.status = 'oom' → VRAM_EXHAUSTION (confirmed OOM; evidence is direct from the process exit)
+configs.status = 'skipped_oom' → VRAM_SKIPPED (known unsafe from prior OOM, no inference ran)
+Sustained VRAM > 90% but no OOM → VRAM_PRESSURE (warning)
+VRAM > 95% → VRAM_PRESSURE_CRITICAL (stronger warning, rank-invalidating only if correlated with CV or outlier violation)
+Confidence:
+
+OOM status confirmed in configs.status → HIGH (fact, not attribution)
+VRAM > 95% sustained (> 50% of telemetry rows for this config) → HIGH
+VRAM > 90% but < 95% → MODERATE
+VRAM > 85% → LOW (notable, not yet concerning at all model sizes)
+gpu_vram_total_mb absent → cap at MODERATE (cannot compute utilization ratio)
+Severity: rank_invalidating on OOM/skipped; warning on sustained pressure; diagnostic on low-level approach.
+
+Remediation hint: "VRAM utilization reached {max_pct:.0%} ({max_used:.0f}MB of {total:.0f}MB) during this config. At this utilization, KV cache allocation is constrained. Consider: reducing --n-gpu-layers to leave headroom, closing GPU-consuming background applications, or accepting that this model size is near the VRAM ceiling for this GPU."
+
+EF-6: BG_SYSTEM_ACTIVITY — Known-Bad Background System Process Active
+What it means: A background system process known to introduce measurement noise was active during the config's measurement window. This is evidence-secure because QuantMap already specifically tracks the named processes: Windows Defender scan, Windows Update, Search Indexer, Antivirus scan.
+
+Primary evidence: Any of these fields in background_snapshots for rows in this config's window:
+
+antivirus_scan_active = 1
+windows_update_active = 1
+search_indexer_active = 1
+These flags are already computed specifically by telemetry.py — not inferred from raw process names.
+
+Excluded from v1: defender_process_running = 1 alone is not sufficient. MsMpEng.exe running doesn't mean an active scan is occurring. Only antivirus_scan_active = 1 (which requires CPU activity above threshold) qualifies. This avoids a very common false positive.
+
+Corroborating evidence:
+
+Correlation with CV spike (config eliminated for cv_too_high and background activity was present)
+Background snapshot high_cpu_process_count > 0 during window
+Confidence:
+
+antivirus_scan_active = 1 → HIGH (specific, named, known-bad)
+windows_update_active = 1 → HIGH (same reasoning)
+search_indexer_active = 1 → MODERATE (intermittent indexer can overlap benignly with inference; it is notable but less reliably impactful than active AV scan)
+Any of the above without CV or performance correlation → warning tier (the activity was present but no confirmed measurement impact)
+CV violation AND any of the above → rank_invalidating attribution
+Severity: warning by default; rank_invalidating when co-occurring with an elimination cause.
+
+Remediation hint: "Windows Defender active scan / Windows Update / Search Indexer was active during this config's measurement window. This is a known source of measurement noise. Terminate or defer these services before running QuantMap, then rerun this config in a clean environment."
+
+4. Pre-Implementation Evidence Validation Checklist
+This checklist must be worked through against actual campaign data before implementation begins. Do not assume. Verify.
+
+Each row: the evidence assumption, where it comes from, likelihood of presence, what to verify, and fallback behavior if absent.
+
+EVID-1: telemetry.power_limit_throttling
+Assumption: Always present (ABORT-tier). If a campaign completed, this column is non-NULL.
+
+Source: NVML nvmlDeviceGetCurrentClocksThrottleReasons, SW_POWER_CAP bit extraction in telemetry.py:_nvml_throttle_reasons_str()
+
+Likely present: Yes — ABORT check at startup verifies throttle reason query succeeds (startup_check() raises TelemetryStartupError if it fails).
+
+Verify:
+
+SELECT campaign_id, COUNT(*) as total,
+       SUM(CASE WHEN power_limit_throttling IS NULL THEN 1 ELSE 0 END) as nulls
+FROM telemetry
+GROUP BY campaign_id
+ORDER BY campaign_id DESC LIMIT 10;
+
+Expected: nulls = 0 for all recent campaigns.
+
+If absent: This is impossible if the campaign completed (ABORT check would have prevented it). If NULLs appear in older data, flag the rows as legacy and suppress EF-1 for that campaign.
+
+EVID-2: telemetry.gpu_throttle_reasons
+Assumption: Present on all campaigns where NVML is initialized. Stored as comma-separated string (e.g., "SW_POWER_CAP", "NONE", "HW_THERMAL,SW_POWER_CAP").
+
+Source: telemetry.py:_nvml_throttle_reasons_str() → stored in TelemetrySample.gpu_throttle_reasons
+
+Likely present: Yes, but SILENT-tier — no startup abort if it fails. However, since NVML is ABORT-tier and _nvml_throttle_reasons_str() is called unconditionally when NVML is initialized, it will be present in all campaigns that have NVML.
+
+Verify:
+
+SELECT campaign_id,
+       COUNT(*) as total,
+       SUM(CASE WHEN gpu_throttle_reasons IS NULL THEN 1 ELSE 0 END) as nulls,
+       SUM(CASE WHEN gpu_throttle_reasons = 'NONE' THEN 1 ELSE 0 END) as none_rows
+FROM telemetry
+GROUP BY campaign_id
+ORDER BY campaign_id DESC LIMIT 10;
+
+And spot-check:
+
+SELECT DISTINCT gpu_throttle_reasons FROM telemetry WHERE gpu_throttle_reasons != 'NONE';
+
+If absent (NULL rows): EF-2 and EF-3 degrade to UNKNOWN for those rows. If ALL rows are NULL for a campaign, emit TELEMETRY_DEGRADED event for the GPU throttle family. Attribution for EF-2/EF-3 is suppressed; EF-1 still works via power_limit_throttling.
+
+Important: This field already exists and stores the data we need. The prior memo's proposal to "add a bitmask column" is not necessary. gpu_throttle_reasons already captures all reason strings.
+
+EVID-3: telemetry.cpu_temp_c
+Assumption: Always present (ABORT-tier). Always from HWiNFO. Will never be NULL for a successful campaign.
+
+Source: HWiNFO shared memory, "CPU Package" temperature sensor.
+
+Likely present: Yes — campaign aborts if HWiNFO is unavailable (startup_check() raises). HWiNFO being ABORT-tier means cpu_temp_c is the most reliable signal in the entire telemetry set.
+
+Verify:
+
+SELECT campaign_id,
+       COUNT(*) as total,
+       SUM(CASE WHEN cpu_temp_c IS NULL THEN 1 ELSE 0 END) as nulls,
+       MAX(cpu_temp_c) as max_temp,
+       MIN(cpu_temp_c) as min_temp
+FROM telemetry
+GROUP BY campaign_id
+ORDER BY campaign_id DESC LIMIT 10;
+
+If absent: Campaign-level data corruption; not a feature limitation. Log and skip attribution for this campaign.
+
+EVID-4: telemetry.gpu_temp_c
+Assumption: WARN-tier — present in most campaigns, but not guaranteed.
+
+Source: HWiNFO "GPU Temperature" or pynvml nvmlDeviceGetTemperature, whichever is available.
+
+Likely present: Yes, for NVIDIA GPU setups. The WARN-tier startup log will indicate if unavailable.
+
+Verify:
+
+SELECT campaign_id,
+       COUNT(*) as total,
+       SUM(CASE WHEN gpu_temp_c IS NULL THEN 1 ELSE 0 END) as nulls
+FROM telemetry
+GROUP BY campaign_id
+ORDER BY campaign_id DESC LIMIT 5;
+
+If absent (all NULL): EF-2 confidence cap: MODERATE instead of HIGH. Emit note in confidence_note: "gpu_temp_c unavailable — cannot corroborate HW_THERMAL throttle reason with temperature reading."
+
+EVID-5: telemetry.gpu_vram_used_mb + campaign_start_snapshot.gpu_vram_total_mb
+Assumption: gpu_vram_used_mb is ABORT-tier (always present). gpu_vram_total_mb was added in migration 4 — present in all DB instances at schema version >= 4.
+
+Verify:
+
+SELECT s.campaign_id, s.gpu_vram_total_mb
+FROM campaign_start_snapshot s
+ORDER BY s.campaign_id DESC LIMIT 10;
+
+And:
+
+SELECT PRAGMA user_version; -- or check schema_version table
+SELECT version FROM schema_version;
+
+If gpu_vram_total_mb absent (old schema): Compute VRAM utilization ratio cannot be made. Fall back to absolute gpu_vram_used_mb thresholds from a GPU-name lookup table (optional, v1.1). For v1, cap EF-5 at MODERATE when total_mb is absent.
+
+EVID-6: background_snapshots named flags
+Assumption: antivirus_scan_active, windows_update_active, search_indexer_active are present and correctly populated.
+
+Source: telemetry.py BackgroundSnapshot dataclass, background_snapshots table.
+
+Verify presence:
+
+SELECT campaign_id, COUNT(*) as snap_count,
+       SUM(antivirus_scan_active) as av_active,
+       SUM(windows_update_active) as wu_active,
+       SUM(search_indexer_active) as idx_active
+FROM background_snapshots
+GROUP BY campaign_id
+ORDER BY campaign_id DESC LIMIT 10;
+
+Also verify cycle_id linkage (migration 8):
+
+SELECT COUNT(*) FROM background_snapshots WHERE cycle_id IS NULL;
+
+If absent (no background_snapshots rows for a campaign): EF-6 suppressed for that campaign. Emit TELEMETRY_DEGRADED diagnostic.
+
+If cycle_id is NULL for all rows (pre-migration-8 data): Fall back to config_id-scoped time window. The attribution is still possible but the cycle-scoped filter is less precise.
+
+EVID-7: telemetry.cycle_id linkage
+Assumption: cycle_id is populated in both telemetry and background_snapshots for campaigns at schema version >= 8.
+
+Verify:
+
+SELECT COUNT(*) as total,
+       SUM(CASE WHEN cycle_id IS NULL THEN 1 ELSE 0 END) as without_cycle
+FROM telemetry
+WHERE campaign_id IN (
+    SELECT id FROM campaigns ORDER BY created_at DESC LIMIT 3
+);
+
+If absent: Use (campaign_id, config_id, timestamp range) scoping instead. Per-cycle precision is lost but per-config attribution still works.
+
+EVID-8: telemetry.gpu_graphics_clock_mhz (corroboration signal)
+Assumption: SILENT-tier. Present when NVML is initialized (which is always). Used as corroborating signal for EF-1 and EF-2.
+
+Verify:
+
+SELECT COUNT(*) as total,
+       SUM(CASE WHEN gpu_graphics_clock_mhz IS NULL THEN 1 ELSE 0 END) as nulls
+FROM telemetry
+WHERE campaign_id IN (SELECT id FROM campaigns ORDER BY created_at DESC LIMIT 3);
+
+If absent: Confidence stays at MODERATE for EF-1/EF-2 (no clock corroboration available). Rule handles gracefully — clock data is corroborating, not primary.
+
+EVID-9: requests.timestamp_start
+Assumption: ISO8601 UTC string. Present for all requests.
+
+Verify:
+
+SELECT COUNT(*) as total,
+       SUM(CASE WHEN timestamp_start IS NULL THEN 1 ELSE 0 END) as nulls
+FROM requests
+ORDER BY id DESC LIMIT 1000;
+
+Importance for v1: Not needed for the six core event families — they are config-window attributed, not per-request. Needed for v1.1 per-request latency spike correlation.
+
+EVID-10: configs.status for OOM detection
+Assumption: status can be 'oom' or 'skipped_oom'. failure_detail contains log excerpt.
+
+Verify:
+
+SELECT status, COUNT(*) FROM configs GROUP BY status;
+
+Expected: oom and skipped_oom should be present if NGL sweep campaigns have been run.
+
+EVID-11: telemetry.gpu_hotspot_temp_c (corroboration for EF-2)
+Assumption: SILENT-tier from HWiNFO. May or may not be present depending on HWiNFO sensor availability.
+
+Verify:
+
+SELECT COUNT(*) as total,
+       SUM(CASE WHEN gpu_hotspot_temp_c IS NULL THEN 1 ELSE 0 END) as nulls
+FROM telemetry
+WHERE campaign_id IN (SELECT id FROM campaigns ORDER BY created_at DESC LIMIT 3);
+
+If absent: Not a problem. Hotspot temp is optional corroboration for EF-2. Rule treats it as an upgrade path for HIGH confidence, not a requirement.
+
+5. MVP Confidence Model
+Four levels. Semantics are explicit, not aspirational.
+
+HIGH
+What it means: The primary signal for this event was directly and unambiguously observed. At least one independent corroborating signal is also present. No conflicting signals exist.
+
+Example: power_limit_throttling = 1 in 8 of 30 telemetry rows AND gpu_graphics_clock_mhz shows a corresponding drop in the same rows.
+
+Rule: primary signal present AND ≥1 corroborating signal present AND no conflicts.
+
+MODERATE
+What it means: The primary signal was observed, but corroboration is absent or only partial. The attribution is credible but relies on a single data source.
+
+Example: gpu_throttle_reasons contains "HW_THERMAL" but gpu_temp_c is NULL (WARN-tier unavailable) — the bit was observed but cannot be independently confirmed via temperature.
+
+Rule: primary signal present AND (corroboration absent OR corroboration is indirect).
+
+LOW
+What it means: The evidence is suggestive but not confirmatory. The primary signal is either borderline (just above threshold) or present only briefly (single row). The attribution is worth noting but should not be acted on without further investigation.
+
+Example: A single telemetry row has power_limit_throttling = 1 out of 30 rows, with no clock depression corroboration.
+
+Rule: primary signal present, but (a) only in ≤ 5% of rows (transient) OR (b) threshold proximity (within 5% of the trigger value) OR (c) primary signal is indirect.
+
+UNKNOWN
+What it means: The evidence needed to evaluate this event class was not collected or was not available during this campaign. This is not the same as "the event did not occur." The absence of the signal is reported, not the conclusion.
+
+Example: All gpu_throttle_reasons rows are NULL for this campaign → EF-2 and EF-3 cannot be assessed.
+
+Rule: minimum required evidence for the rule's gate condition was not present.
+
+Important: UNKNOWN always includes a confidence_note identifying the specific missing signal. "Cannot assess — gpu_throttle_reasons is NULL for all telemetry rows in this campaign" is a required output, not optional context.
+
+Confidence caps
+The following conditions cap confidence downward, regardless of individual rule results:
+
+Condition	Cap
+run_context.observation_completeness = "low" (from machine_profile_json)	All hardware-event attributions capped at MODERATE
+telemetry row count for the config window is < 5	All attributions capped at LOW
+Campaign run_mode = 'quick' (single cycle)	All structural vs transient distinctions suppressed; all attributions capped at MODERATE with note
+cycle_id is NULL for all telemetry rows (legacy data)	Per-cycle attributions capped at MODERATE (config-scoped only)
+Suppression threshold
+Attribution is suppressed entirely (emitted as UNKNOWN) — not LOW — when:
+
+The minimum gate evidence is NULL for the entire config window
+The event family requires a signal that was ABORT-tier-absent (impossible in practice for EF-1, EF-4, EF-5; relevant for EF-2/EF-3 if telemetry was corrupted)
+Attribution is not suppressed because the value is merely "below concern threshold." A power_limit_throttling = 0 result for all rows is a valid, useful negative result — it just means EF-1 does not fire, not that attribution failed.
+
+6. MVP Output / UX Behavior
+Live run output (runner.py)
+Attribution does not run during the live campaign. It runs post-campaign, after score.py completes. This is by design:
+
+Live attribution would require reading telemetry mid-run, before the window is complete
+Post-run attribution has the full evidence set
+The runner already emits inline notes for thermal events and cycle invalidation during the run
+Live run output is unchanged in v1. Attribution results appear only in post-run outputs.
+
+One addition: When scoring completes and attribution is triggered, a single status line:
+
+Attribution: generated for 4 configs (2 eliminations, 2 warnings)
+
+This confirms attribution ran without producing a wall of output during the run.
+
+Report output (report.py / report_campaign.py)
+A new section is added per eliminated config, between the elimination reason and any notes:
+
+Config: ngl_35  |  Status: ELIMINATED  |  Reason: Thermal Throttling
+
+  Attribution
+  -----------
+  GPU_SW_POWER_CAP  [MODERATE]   Observed in 6/28 telemetry samples
+                                 No clock corroboration available
+  CPU_THERMAL_HIGH  [HIGH]       cpu_temp_c reached 99.4°C (TjMax approach)
+
+  Next checks: verify GPU power limit; inspect chassis airflow
+
+For passing configs with warning-tier events, a compact one-line note:
+
+Config: ngl_30  [NOTE: BG_SYSTEM_ACTIVITY — antivirus_scan_active in 3 snapshots]
+
+For passing configs with no notable events: nothing added.
+
+The report section must not grow proportionally with the number of configs. If a campaign has 12 configs and 10 are eliminated, the attribution section should not add 10 lengthy paragraphs. Max two lines per eliminated config in the summary table; full detail available only in explain.
+
+Explain output (explain.py)
+This is the deepest surface. explain is where the full four-section output lives:
+
+Config: ngl_35
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OBSERVED FACT
+  power_limit_throttling = 1 in 6 of 28 telemetry samples (21%)
+  cpu_temp_c max = 99.4°C (threshold: 95°C warning, 100°C TjMax)
+
+CANDIDATE CAUSES (ranked by confidence)
+  1. GPU_SW_POWER_CAP  [MODERATE]
+     SW power cap throttle observed in 6 samples.
+     Clock corroboration: unavailable (gpu_graphics_clock_mhz absent).
+  2. CPU_THERMAL_HIGH  [HIGH]
+     CPU temperature approached TjMax during cycles 2–4.
+
+CONFIDENCE NOTE
+  GPU throttle confidence is MODERATE because clock data is absent.
+  CPU thermal confidence is HIGH: direct measurement, no inference.
+  Missing: gpu_temp_c (WARN-tier absent) — GPU die temperature not available.
+
+NEXT CHECKS
+  1. Run nvidia-smi -q -d POWER to check configured GPU power limit.
+  2. Confirm chassis airflow: CPU cooler is reaching near-TjMax temperatures.
+  3. Rerun with --verbose telemetry to capture clock data if HWiNFO GPU clocks are unavailable.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+The Briefing dataclass in explain.py gains an attribution_events: list[AttributionEvent] field. The get_campaign_briefing() function reads attribution from the DB if the attribution_events table is present and populated; falls back to generating on-demand if not.
+
+DB storage
+Every attribution run writes to the attribution_events table (proposed in Section 7). Attribution results are always reachable by config_id + campaign_id query. explain reads from this table first; regenerates if absent.
+
+Export (.qmap)
+attribution_events table included by default. Included in --lite exports as well (it is small). Raw telemetry can be stripped in --lite but attribution results travel with the campaign data.
+
+7. MVP Storage Strategy
+Recommendation: Dedicated attribution_events DB table
+Decision: Yes, write attribution results to a dedicated table in lab.sqlite. This is the right choice for QuantMap and here is why.
+
+Comparison of alternatives
+Report-time regeneration only (no storage)
+
+Pro: zero schema change; attribution is always fresh
+Con: explain must re-query and re-evaluate on every call; compare cannot diff attribution across campaigns without re-running both; .qmap export cannot include results; no way to query "show me all campaigns where GPU_SW_POWER_CAP fired" without scanning all telemetry
+Verdict: Not suitable. QuantMap's architecture treats the DB as the single source of truth for queryable campaign data. Attribution results are queryable campaign data.
+JSON sidecar file per campaign
+
+Pro: no schema change; simple to write; can be regenerated
+Con: separate from DB lifecycle; not included in .qmap without explicit packaging; explain must locate the sidecar; inconsistency between DB and file-based artifacts
+Verdict: Not suitable. QuantMap already has a artifacts table for file references, but attribution results are structured data, not unstructured artifacts. Putting them in a sidecar creates a second truth source.
+Embed in existing tables (e.g., adding attribution_json columns to scores or configs)
+
+Pro: no new table; accessible from existing queries
+Con: JSON blob in a relational table defeats the ability to query, filter, and join on attribution data; scores and configs already have clear responsibilities; embedding attribution would violate single-responsibility
+Verdict: Not suitable for anything beyond a very simple flag. A single attribution_summary_json column in scores could be a lightweight v1 option (see below), but the full attribution data needs its own table.
+Dedicated attribution_events table
+
+Pro: fully queryable; one row per event (not one JSON blob per config); joinable with telemetry, cycles, and scores; consistent with QuantMap's schema approach; included in .qmap export by adding one table name; explain reads it directly
+Con: requires a schema migration (migration 9); must manage the table alongside the rest of the schema
+Verdict: Correct choice.
+Proposed attribution_events table DDL
+CREATE TABLE IF NOT EXISTS attribution_events (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    campaign_id          TEXT NOT NULL REFERENCES campaigns(id),
+    config_id            TEXT,           -- NULL for campaign-level events
+    cycle_id             INTEGER,        -- NULL for config-level events
+    event_code           TEXT NOT NULL,  -- e.g. "GPU_SW_POWER_CAP"
+    severity             TEXT NOT NULL,  -- "rank_invalidating"|"warning"|"diagnostic"
+    confidence           TEXT NOT NULL,  -- "HIGH"|"MODERATE"|"LOW"|"UNKNOWN"
+    confidence_note      TEXT,
+    observed_or_inferred TEXT NOT NULL,  -- "observed"|"inferred"|"partially_inferred"
+    evidence_summary     TEXT,           -- human-readable, 1-2 sentences
+    evidence_json        TEXT,           -- serialized list of EvidenceFragment dicts
+    next_checks_json     TEXT,           -- serialized list of strings
+    remediation_json     TEXT,           -- serialized list of strings
+    suppressed           INTEGER NOT NULL DEFAULT 0,  -- bool
+    suppression_reason   TEXT,
+    generated_at         TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attribution_config
+    ON attribution_events(campaign_id, config_id);
+
+CREATE INDEX IF NOT EXISTS idx_attribution_code
+    ON attribution_events(event_code, confidence);
+
+This is migration 9. It follows all existing migration rules: append-only, idempotent (IF NOT EXISTS).
+
+Migration strategy for existing campaigns
+Attribution is generated at campaign completion time. Older campaigns without attribution entries will show attribution as "not generated" in explain — they will not show false negatives, and explain can offer to generate attribution on-demand from existing telemetry.
+
+8. MVP Architecture
+Modules
+New module: src/attribution.py
+
+Single responsibility: generate attribution events from a completed campaign's DB data.
+
+Dependencies:
+
+src.db (for get_connection)
+stdlib only (dataclasses, json, logging, datetime)
+No imports from report.py, ui.py, runner.py, score.py, analyze.py
+This isolation is deliberate. Attribution must not need to know how campaigns are run, how scores are computed, or how reports are rendered. It only needs the DB.
+
+Existing modules that call attribution.py:
+
+score.py — calls attribute_campaign() at the end of compute_scores() (or the caller of compute_scores() in runner.py). This is where attribution is triggered automatically after scoring.
+explain.py — reads from attribution_events table; calls attribute_campaign() on-demand if table is empty for the requested campaign.
+report.py / report_campaign.py — reads from attribution_events table; renders the per-config attribution section.
+export.py — adds attribution_events to the table list (one-line change).
+No new CLI command for v1. Attribution surfaces through the existing explain, report, and run output. Adding a standalone quantmap attribute command is a v1.1 concern.
+
+attribution.py internal structure
+# Public API
+attribute_campaign(campaign_id, db_path) -> list[AttributionEvent]
+    # Runs all rules for all configs in campaign; writes to attribution_events table
+    # Returns the list of events generated
+
+attribute_config(config_id, campaign_id, db_path) -> list[AttributionEvent]
+    # Runs all rules for a single config; does NOT write to DB (caller decides)
+
+# Data types
+@dataclass AttributionEvent     # one per event code per config
+@dataclass EvidenceFragment     # pointer to specific DB row/column/value
+
+# Evidence loading
+_load_telemetry_for_config(config_id, campaign_id, conn) -> pd.DataFrame (or list of dicts)
+_load_background_for_config(config_id, campaign_id, conn) -> list of dicts
+_load_config_meta(config_id, campaign_id, conn) -> dict
+_load_campaign_snapshot(campaign_id, conn) -> dict
+
+# Rule functions (one per event family)
+_rule_gpu_sw_power_cap(evidence) -> AttributionEvent | None
+_rule_gpu_hw_thermal(evidence) -> AttributionEvent | None
+_rule_gpu_hw_other_throttle(evidence) -> AttributionEvent | None
+_rule_cpu_thermal_high(evidence) -> AttributionEvent | None
+_rule_vram_pressure(evidence) -> AttributionEvent | None
+_rule_bg_system_activity(evidence) -> AttributionEvent | None
+
+# Rule registry
+RULES: list[Callable] = [
+    _rule_gpu_sw_power_cap,
+    _rule_gpu_hw_thermal,
+    _rule_gpu_hw_other_throttle,
+    _rule_cpu_thermal_high,
+    _rule_vram_pressure,
+    _rule_bg_system_activity,
+]
+
+# Confidence helper
+_compute_confidence(primary_met, corroborations_met, conflicts_present,
+                    observation_completeness, throttle_fraction) -> tuple[str, str]
+
+# DB write
+_write_attribution_events(events, conn) -> None
+
+Rule function contract:
+
+Input: an evidence dict assembled from the four _load_* functions
+Output: AttributionEvent if the gate condition is met; None if gate is not met (evidence absent, event doesn't apply)
+Must not raise — all failures go to logger.warning and return None
+Must have a corresponding unit test with synthetic evidence input
+Evidence bundle structure:
+Rather than passing DataFrames through rules (which can encourage lazy slicing), each rule receives a pre-structured evidence dict:
+
+evidence = {
+    "telemetry_rows": list[dict],    # all telemetry rows for this config
+    "throttle_rows": list[dict],     # rows where power_limit_throttling = 1
+    "bg_snapshots": list[dict],      # background_snapshots for this config
+    "config_meta": dict,             # config row (status, failure_detail, etc.)
+    "campaign_snapshot": dict,       # campaign_start_snapshot row
+    "telemetry_row_count": int,      # total rows (for fraction calculations)
+    "observation_completeness": str, # from run_context confidence layer
+}
+
+This structure is assembled once per config by attribute_config() and passed to all rules. Rules cannot mutate it.
+
+What not to couple it to
+attribution.py must not import score.py or know about elimination filters
+attribution.py must not import analyze.py — if it needs CV or outlier counts, it reads them from the scores table
+attribution.py must not import ui.py — output rendering is the caller's job
+attribution.py must not import governance.py — attribution is independent of the scoring profile
+Attribution rule thresholds (95°C for CPU warning, 90% for VRAM pressure, etc.) are constants defined at the top of attribution.py, commented with their rationale. They are not pulled from YAML or governance config in v1.
+Keeping it testable
+The rule functions take a dict of evidence, not a DB connection. This means they can be tested with synthetic dicts without needing a real database. The test pattern:
+
+def test_gpu_sw_power_cap_high_confidence():
+    evidence = build_synthetic_evidence(
+        throttle_rows=[{"power_limit_throttling": 1, "gpu_graphics_clock_mhz": 850}],
+        telemetry_row_count=30,
+        # ... other fields
+    )
+    event = _rule_gpu_sw_power_cap(evidence)
+    assert event is not None
+    assert event.confidence == "HIGH"
+    assert event.event_code == "GPU_SW_POWER_CAP"
+
+def test_gpu_sw_power_cap_no_throttle():
+    evidence = build_synthetic_evidence(throttle_rows=[], telemetry_row_count=30)
+    event = _rule_gpu_sw_power_cap(evidence)
+    assert event is None  # gate not met
+
+build_synthetic_evidence() is a test fixture helper that returns a minimal well-formed evidence dict. It lives in tests/ not in src/attribution.py.
+
+Preventing framework creep
+The architecture is deliberately flat. One module, one evidence bundle structure, one public function, six rule functions. The test that a contribution is over-engineering: if adding a new event family in v1.1 requires changing anything other than (a) adding one _rule_* function and (b) appending it to RULES, the architecture has become a framework. Keep it flat.
+
+9. Staged Implementation Plan
+The sequence matters. Each stage has a clear dependency and a completion condition. Do not start the next stage until the previous one is complete and its test passes.
+
+Stage 1: Evidence Audit
+What gets built: Nothing in code. This is a verification step against actual campaign data.
+
+Tasks:
+
+Run the SQL queries from Section 4 against the current lab.sqlite
+Document the results: which fields are present, any nulls, any surprises
+Note whether cycle_id is populated in telemetry (migration 8 check)
+Check gpu_throttle_reasons for format consistency (is it always "NONE" or "" or NULL when no throttle?)
+Verify gpu_vram_total_mb is present in campaign_start_snapshot
+Verify background_snapshots flags are populated in recent campaigns
+Dependency: None — can be done immediately.
+
+Success: All six event families' primary evidence sources have been confirmed present (or their fallback behavior documented). No surprises that would block implementation.
+
+What to test: N/A — this is an audit, not code.
+
+Stage 2: Core module + first two rules
+What gets built: src/attribution.py with the full module structure (dataclasses, evidence loading functions, confidence helper) and the first two rules: _rule_gpu_sw_power_cap and _rule_cpu_thermal_high.
+
+Why these two first: They are the evidence-strongest. Both primary signals are ABORT-tier (always present). They produce the most trustworthy HIGH-confidence outputs and will reveal any structural issues with the rule contract early.
+
+Tasks:
+
+Define AttributionEvent and EvidenceFragment dataclasses
+Implement _load_telemetry_for_config(), _load_config_meta(), _load_campaign_snapshot()
+Implement _compute_confidence()
+Implement _rule_gpu_sw_power_cap() and _rule_cpu_thermal_high()
+Implement attribute_config() (runs rules, collects results, no DB write yet)
+Write unit tests for both rules with synthetic evidence (see Section 8)
+Write one integration test: load a real campaign from test fixtures and confirm the rules fire correctly (or correctly don't fire)
+Dependency: Stage 1 evidence audit complete.
+
+Success criteria:
+
+Both rules pass their unit tests (including gate-not-met / returns-None cases)
+Clean run: on a campaign with no known throttle events, neither rule fires
+Thermal run: on a campaign with power_limit_throttling = 1 in telemetry, EF-1 fires with correct confidence level
+attribute_config() returns a list (may be empty); never raises
+Stage 3: DB table migration + persistence
+What gets built: Migration 9 (the attribution_events table) in db.py, and the _write_attribution_events() function in attribution.py. The attribute_campaign() public function is implemented.
+
+Tasks:
+
+Add migration 9 to _MIGRATIONS in db.py with the attribution_events DDL from Section 7
+Implement _write_attribution_events() — deduplicates by (campaign_id, config_id, event_code) before inserting
+Implement attribute_campaign() — iterates configs, calls attribute_config(), writes to DB
+Test: run a campaign end-to-end and query attribution_events to confirm rows are written
+Test: run attribute_campaign() twice on the same campaign — confirm no duplicate rows
+Dependency: Stage 2 complete.
+
+Success criteria:
+
+attribution_events table exists after init_db()
+Rows are written after campaign completion
+No duplicate rows on repeated calls (idempotent write)
+.qmap export test: add attribution_events to export.py's table list; confirm it appears in export
+Stage 4: Remaining four rules
+What gets built: The other four rules: _rule_gpu_hw_thermal, _rule_gpu_hw_other_throttle, _rule_vram_pressure, _rule_bg_system_activity.
+
+Tasks:
+
+Implement _load_background_for_config()
+Implement all four rules with unit tests
+Add all four to RULES
+Integration test: confirm no spurious fires on clean campaigns; confirm correct fires on campaigns with known events
+Dependency: Stage 3 complete (DB persistence is in place so integration tests can verify stored results).
+
+Success criteria:
+
+All four rules pass unit tests (positive and negative cases)
+On a clean campaign (no throttle, no background noise), zero rank_invalidating events
+Each rule's UNKNOWN path fires correctly when evidence is absent (synthetic test with NULLs)
+Stage 5: Explain integration
+What gets built: explain.py extended to read and display attribution events.
+
+Tasks:
+
+Add attribution_events: list[AttributionEvent] to Briefing dataclass
+Modify get_campaign_briefing() to read from attribution_events table if present; call attribute_campaign() on-demand if absent
+Modify print_briefing() to render the four-section attribution output (see Section 6) for each eliminated config
+Ensure the output is correctly separated: observed fact vs candidate causes vs confidence note vs next checks
+Test: quantmap explain <campaign_id> for a campaign with known eliminations
+Dependency: Stage 4 complete.
+
+Success criteria:
+
+explain output shows the four sections for eliminated configs
+Attribution output is absent (not blank, not placeholder) for passing configs with no notable events
+UNKNOWN events display correctly with their confidence note
+explain on a pre-attribution-table campaign (migration 8 or earlier) does not crash — it generates attribution on-demand
+Stage 6: Report integration
+What gets built: report.py / report_campaign.py extended to include attribution in the per-config section.
+
+Tasks:
+
+Add attribution section to eliminated config blocks in the report
+Add one-line warning note for passing configs with warning-tier events
+Test: generate a full report for a campaign with eliminations; confirm attribution appears; confirm it does not appear for clean passing configs
+Dependency: Stage 5 complete.
+
+Success criteria:
+
+Report includes attribution for eliminated configs
+Report does not include attribution noise for passing, clean configs
+Report generation does not fail if attribution_events table is absent (graceful fallback)
+Stage 7: Export + final polish
+What gets built: Export support and final cleanup.
+
+Tasks:
+
+Add attribution_events to export.py's table list (one-line change)
+Confirm .qmap file contains the table when opened in SQLite browser
+Add the "Attribution: generated for N configs" status line after scoring in runner.py (or wherever attribute_campaign() is called)
+Documentation pass: docstrings for public functions, inline comments on rule thresholds
+Final acceptance test run (see Section 10)
+Dependency: Stage 6 complete.
+
+Success criteria: All acceptance criteria in Section 10 pass.
+
+10. Acceptance Criteria
+This is the "good enough to ship" checklist. Every item must pass before the feature is considered complete for v1.
+
+AC-1: No false confident attribution on clean runs
+Test: Run a campaign in a known-clean environment (HWiNFO running, no background processes, GPU temperatures normal, no throttling). After campaign completion, query attribution_events for rank_invalidating events.
+
+Pass: Zero rank_invalidating events, zero HIGH-confidence events.
+
+AC-2: UNKNOWN emits correctly when required evidence is absent
+Test: Create a test campaign DB with gpu_throttle_reasons set to NULL for all telemetry rows. Run attribute_campaign() on it.
+
+Pass: EF-2 (GPU_HW_THERMAL) and EF-3 (GPU_HW_OTHER_THROTTLE) emit as UNKNOWN with suppression_reason = "gpu_throttle_reasons is NULL for all telemetry rows in this config." EF-1 still fires correctly from power_limit_throttling.
+
+AC-3: Attribution never contradicts elimination
+Test: For every eliminated config in any test campaign, query attribution_events for that config_id.
+
+Pass: At least one non-suppressed attribution event exists for every eliminated config, OR a TELEMETRY_DEGRADED diagnostic event is present explaining why attribution could not be made. Zero cases of eliminated configs with no attribution and no explanation.
+
+AC-4: Explain output clearly separates observed fact from candidate causes
+Test: Run quantmap explain <campaign_id> for a campaign with at least one eliminated config.
+
+Pass: The output for eliminated configs contains all four labeled sections: OBSERVED FACT, CANDIDATE CAUSES, CONFIDENCE NOTE, NEXT CHECKS. The observed fact section contains only directly measured values (no inferred statements). The candidate causes section contains the event label, confidence, and short description.
+
+AC-5: Export contains attribution results
+Test: Export a campaign with quantmap export <campaign_id>. Open the resulting .qmap file in SQLite and query attribution_events.
+
+Pass: The table exists and is populated. Row count matches attribution_events in the source DB.
+
+AC-6: No attribution on pre-stage-3 campaigns fails gracefully
+Test: Open explain for a campaign that predates the attribution_events table (or for which the table is empty).
+
+Pass: explain generates attribution on-demand from telemetry and displays it. Does not crash or display an error. Attribution generated on-demand matches the stored version if subsequently stored.
+
+AC-7: LOW and UNKNOWN are visually distinct from HIGH and MODERATE
+Test: Inspect the explain and report output for campaigns with mixed confidence events.
+
+Pass: HIGH and MODERATE are clearly more prominent than LOW. UNKNOWN is visually distinct from LOW (different symbol or label). The word "candidate" appears before attributed causes — not "cause" or "reason."
+
+AC-8: Single-cycle campaigns cap confidence correctly
+Test: Run a Quick mode campaign and run attribution on it.
+
+Pass: No event is emitted with confidence HIGH for any event that would require multi-cycle structural confirmation. A note appears in the attribution output: "Quick mode (1 cycle) — structural vs transient distinction not available; confidence capped at MODERATE."
+
+AC-9: Attribution is idempotent
+Test: Run attribute_campaign() twice on the same campaign.
+
+Pass: Row count in attribution_events is unchanged after the second run. No duplicates.
+
+AC-10: Remediation hints are specific, not generic
+Test: Review the remediation text for each event family in the output.
+
+Pass: Each remediation hint names the specific observation (e.g., "power_limit_throttling was observed in 6 of 28 samples") rather than a generic "check your hardware." Hints use hedged language ("consider", "verify") not imperative language ("fix the cooling").
+
+11. Deferred Roadmap
+These are genuine future work items, not things that were cut due to quality concerns.
+
+v1.1 (next iteration after v1 proves stable)
+Per-request telemetry correlation: Join requests.timestamp_start against telemetry.timestamp windows to attribute latency spikes to specific telemetry states. This unlocks LATENCY_SPIKE and TG_OUTLIER_CLUSTER attribution with request-level precision. The query pattern is straightforward — this was deferred only to keep v1 focused.
+
+BG_GPU_CONTENTION via gpu_proc_vram_json: background_snapshots.gpu_proc_vram_json already captures per-process VRAM usage via NVML. A rule that identifies non-llama-server VRAM consumers is now achievable with a JSON parse and name-matching heuristic. Requires a maintained known-GPU-workload process list (or conservative "any process using > N MB" threshold).
+
+CPU frequency throttle: cpu_pcore_freq_ghz (HWiNFO SILENT-tier) supports this rule, but the base frequency reference needs to be established from campaign_start_snapshot or inter-config median. Design the baseline logic first.
+
+ENV_POWER_PLAN_DEGRADED: Available in campaign_start_snapshot.power_plan. Simple rule; low operator value relative to v1 events. Add in the v1.1 batch.
+
+Compare attribution differentials: Query attribution_events across two campaigns and surface differences. Requires compare.py integration.
+
+v2 (future, structural)
+Server startup anomaly attribution: Requires computing an intra-campaign median startup duration from cycles.startup_duration_s across configs in the same campaign. Once that baseline is available, the rule is straightforward.
+
+Automated clean-environment rerun suggestion: When a high-confidence BG_SYSTEM_ACTIVITY event co-occurs with an elimination, suggest a rerun command specifically for that config with a prompt to close the offending process.
+
+Standalone quantmap attribute command: Allow operators to regenerate attribution for historical campaigns as attribution rules are updated.
+
+Attribution rule versioning: Track which version of the attribution rules generated each set of attribution_events. Required for replay correctness when rules change.
+
+This spec is a binding implementation guide. Changes to scope require explicit review against the evidence validation checklist and the acceptance criteria. Scope expansion must demonstrate evidence security before implementation is authorized.

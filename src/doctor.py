@@ -11,12 +11,10 @@ import json
 import logging
 import subprocess
 import sys
-import os
 from pathlib import Path
 from typing import List
 
-from src import ui
-from src.diagnostics import Status, CheckResult, DiagnosticReport, Readiness
+from src.diagnostics import CheckResult, DiagnosticReport, Readiness, Status
 
 logger = logging.getLogger("doctor")
 
@@ -136,7 +134,9 @@ def check_server_binary(server_bin: Path | None, detail: str | None = None) -> C
         )
 
     try:
-        from src.backend_execution_policy import assess_backend_execution  # noqa: PLC0415
+        from src.backend_execution_policy import (
+            assess_backend_execution,  # noqa: PLC0415
+        )
 
         assessment = assess_backend_execution(server_bin)
         if not assessment.allowed:
@@ -175,7 +175,9 @@ def check_backend_execution_policy(server_bin: Path | None) -> CheckResult:
         )
 
     try:
-        from src.backend_execution_policy import assess_backend_execution  # noqa: PLC0415
+        from src.backend_execution_policy import (
+            assess_backend_execution,  # noqa: PLC0415
+        )
 
         assessment = assess_backend_execution(server_bin)
     except Exception as exc:
@@ -368,7 +370,7 @@ def check_telemetry_provider_readiness() -> CheckResult:
         provider_status = provider.get("status") or "unknown"
         provider_bits.append(f"{label}: {provider_status}")
 
-    detail_lines = []
+    detail_lines: list[str] = []
     detail_lines.extend(readiness.get("blocked") or [])
     detail_lines.extend(readiness.get("warnings") or [])
     detail_lines.append(f"Execution support tier: {support_tier}; measurement-grade: {measurement_grade}")

@@ -76,7 +76,7 @@ Use impact level `major` for architecture changes, major rewrites, destructive o
 6. if agent policy/docs/scripts changed, run `.\.venv\Scripts\python.exe .agent\scripts\agent_workflow_smokecheck.py`
 7. `.\.venv\Scripts\python.exe .agent\scripts\generate_agent_handoff.py` when completing or handing off
 
-If step 1 fails because `.venv` is missing or anchored to the wrong Python, recreate it with `& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv`, then run `.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'`.
+Do not begin implementation until step 1 passes. Normal work uses the existing repo `.venv`; if step 1 fails because `.venv` is missing, locked, or anchored to the wrong Python, use the `QuantMap: Repair Dev Venv` VS Code task or the repair procedure in `.agent/docs/dev-contract.md`, then rerun step 1.
 
 ## Script Intent (When to Use)
 

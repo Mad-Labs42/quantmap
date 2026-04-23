@@ -15,7 +15,17 @@ Purpose: Standardized, token-efficient command workflows for coding agents.
   - fails when the repo `.venv` is not anchored to `D:\.store\mise\data\installs\python\3.13.13`
   - fails when the active Python minor is not 3.13
   - fails when required dev tools are not importable
-- Remediation: recreate `.venv` with `& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv`, run `.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'`, then rerun the contract check with `.\.venv\Scripts\python.exe`.
+- Remediation: normal work uses the existing `.venv`. If `.venv` is missing, locked, or drifted, run the `QuantMap: Repair Dev Venv` VS Code task or the repair procedure in `.agent/docs/dev-contract.md`, then rerun the contract check with `.\.venv\Scripts\python.exe`.
+
+### VS Code Startup Tasks
+
+- Preflight task: `QuantMap: Dev Contract Preflight`
+  - Runs `.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick`.
+  - Runs on folder open when VS Code automatic tasks are allowed.
+  - Fails loudly when `.venv` is missing, uses the wrong Python minor, or is not anchored to the approved DevStore target.
+- Repair task: `QuantMap: Repair Dev Venv`
+  - Explicit repair workflow only; not normal startup.
+  - Stops workspace-scoped Python/Ruff/mypy holders, rebuilds `.venv` from `D:\.store\mise\data\installs\python\3.13.13\python.exe`, reinstalls dev dependencies with repo `.venv` pip, and runs the full contract check.
 
 ### Agent Surface Audit
 

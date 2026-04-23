@@ -23,14 +23,8 @@ The report is gitignored (*.md rule). It is regenerable from lab.sqlite.
 
 from __future__ import annotations
 
-_STR_NOT_SET_IN_BASELINE = "not set in baseline"
-_STR_NOT_RECORDED = "not recorded"
-_STR_NOT_CAPTURED = "not captured"
-
-
 import json
 import logging
-import os
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +33,7 @@ from typing import Any
 import pandas as pd
 
 from src.db import get_connection
-from src.analyze import analyze_campaign, get_telemetry_summary, get_background_interference_summary
+from src.analyze import get_telemetry_summary, get_background_interference_summary
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
 from src.artifact_paths import (
@@ -55,6 +49,10 @@ from src.artifact_paths import (
     infer_model_identity,
     report_paths,
 )
+
+_STR_NOT_SET_IN_BASELINE = "not set in baseline"
+_STR_NOT_RECORDED = "not recorded"
+_STR_NOT_CAPTURED = "not captured"
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -287,9 +285,9 @@ def _ngl_sweep_section(
 
     for cfg_id_row, val_json, status, failure_detail in config_rows:
         try:
-            ngl_val = int(json.loads(val_json))
+            ngl_display: int | str = int(json.loads(val_json))
         except (TypeError, ValueError):
-            ngl_val = "?"
+            ngl_display = "?"
         cfg_vram = vram_data.get(cfg_id_row)
         cfg_stats = stats.get(cfg_id_row, {})
         cfg_score_row = {}
@@ -313,7 +311,7 @@ def _ngl_sweep_section(
         # Est. Max Context
         est_ctx_str = "—"
         if status == "complete" and free_mb is not None and model_params_available:
-            bpt = _kv_bytes_per_token(baseline, int(ngl_val))
+            bpt = _kv_bytes_per_token(baseline, int(ngl_display))
             if bpt and bpt > 0:
                 est_tokens = int((free_mb * 1024 * 1024) / bpt)
                 if est_tokens >= 1000:
@@ -344,7 +342,7 @@ def _ngl_sweep_section(
                 notes_parts.append("★ top config")
             else:
                 notes_parts.append("★ score winner")
-        if diminishing_ngl is not None and ngl_val == diminishing_ngl:
+        if diminishing_ngl is not None and ngl_display == diminishing_ngl:
             notes_parts.append("← diminishing returns beyond this point")
         if status == "oom":
             first_line = (failure_detail or "CUDA OOM").splitlines()[0][:100]
@@ -354,7 +352,7 @@ def _ngl_sweep_section(
 
         notes = " | ".join(notes_parts) if notes_parts else "—"
         sections.append(
-            f"| {ngl_val} | {tg_str} | {p10_str} | {peak_str} | {free_str} | {est_ctx_str} | {score_str} | {notes} |"
+            f"| {ngl_display} | {tg_str} | {p10_str} | {peak_str} | {free_str} | {est_ctx_str} | {score_str} | {notes} |"
         )
 
     sections.append("")
@@ -1175,10 +1173,10 @@ def _build_markdown(
         tg_p10_str= f"{tg_p10:.2f} t/s" if tg_p10 is not None else "N/A"
         ttft_str  = f"{ttft:.0f}ms"    if ttft   is not None else "N/A"
 
-        if _is_custom:
+        if _is_custom and run_plan is not None:
             # Custom mode: honest scope-limited language.
             # Never claims "validated optimal" — only "best among tested".
-            _rp = run_plan  # type: ignore[union-attr]  # _is_custom guarantees non-None
+            _rp = run_plan
             _tested_n = len(_rp.selected_values)
             _total_n  = len(_rp.all_campaign_values)
             _untested  = _rp.untested_values
@@ -1201,10 +1199,10 @@ def _build_markdown(
                     "These were not measured in this run. The true optimum may lie "
                     "elsewhere. Run Full to measure all campaign values."
                 )
-        elif _is_quick:
+        elif _is_quick and run_plan is not None:
             # Quick mode: complete coverage, 1 cycle, broad but shallow.
             # Not "validated optimal" — lowest-confidence full-coverage result.
-            _rp = run_plan  # type: ignore[union-attr]  # _is_quick guarantees non-None
+            _rp = run_plan
             _total_vals = len(_rp.all_campaign_values)
             _q_c = _rp.cycles_per_config
             _q_cw = "cycle" if _q_c == 1 else "cycles"
@@ -1229,10 +1227,10 @@ def _build_markdown(
                 'Run Standard or Full to confirm with higher-confidence statistics before '
                 'treating this as a production recommendation.'
             )
-        elif _is_standard:
+        elif _is_standard and run_plan is not None:
             # Standard mode: complete coverage, reduced repetition, development-grade.
             # Not "validated optimal" — development-grade, confirm with Full.
-            _rp = run_plan  # type: ignore[union-attr]  # _is_standard guarantees non-None
+            _rp = run_plan
             _total_vals = len(_rp.all_campaign_values)
             sections.append(
                 f'> **Standard Run — Development-Grade Result:**\n>\n'

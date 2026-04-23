@@ -29,7 +29,7 @@ Purpose: Keep changes correct, reproducible, low-risk, and token-efficient.
 
 ## Preferred Validation
 - Run the dev contract preflight before implementation work: `.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick`.
-- If `.venv` is missing or fails interpreter/anchor checks, recreate it with `& D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv` and reinstall with `.\.venv\Scripts\python.exe -m pip install --no-user -e '.[dev]'`.
+- Do not begin implementation until preflight passes. If `.venv` is missing, locked, or fails interpreter/anchor checks, use the `QuantMap: Repair Dev Venv` task or the repair procedure in `.agent/docs/dev-contract.md`, then rerun preflight.
 - Fast syntax/parse check before broad tests.
 - Run focused tests near changed modules.
 - Treat verification as required before claiming success.

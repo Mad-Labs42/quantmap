@@ -88,7 +88,7 @@ class EstimatorType(str, Enum):
     p10 = "p10"
     p90 = "p90"
     max = "max"
-    count = "count"
+    sample_count = "count"
 
 
 class OutlierPolicy(str, Enum):

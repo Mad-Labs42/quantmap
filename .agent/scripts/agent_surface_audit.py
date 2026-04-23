@@ -32,12 +32,14 @@ REQUIRED_FILES = [
     ".agent/scripts/helpers/terminal_preflight_check.py",
     ".agent/scripts/helpers/terminal_guardrail_selftest.py",
     ".agent/reference/terminal_guardrails.md",
+    ".vscode/tasks.json",
 ]
 
 REQUIRED_SETTINGS = {
     "chat.instructionsFilesLocations": {
         ".github/instructions": True,
     },
+    "task.allowAutomaticTasks": "on",
     "ruff.nativeServer": "on",
 }
 
@@ -145,6 +147,11 @@ REQUIRED_POLICY_PHRASES = {
         '.\\.venv\\Scripts\\python.exe .agent\\scripts\\helpers\\terminal_preflight_check.py --shell powershell --command "<command>"',
         ".\\.venv\\Scripts\\python.exe .agent\\scripts\\helpers\\terminal_guardrail_selftest.py",
     ],
+}
+
+REQUIRED_TASK_LABELS = {
+    "QuantMap: Dev Contract Preflight",
+    "QuantMap: Repair Dev Venv",
 }
 
 
@@ -531,6 +538,103 @@ def main() -> int:
                     ".vscode/settings.json",
                     f"recommended search.exclude missing: {must}",
                     "Add the recommended search.exclude entry to reduce noisy context.",
+                )
+
+    tasks_path = root / ".vscode" / "tasks.json"
+    if tasks_path.exists():
+        try:
+            tasks_doc = load_json(tasks_path)
+            tasks = tasks_doc.get("tasks", [])
+        except Exception as exc:
+            add_issue(
+                failures,
+                failure_items,
+                "settings",
+                ".vscode/tasks.json",
+                f"invalid json ({exc})",
+                remediation_hints["settings"],
+            )
+            tasks = []
+
+        labels = {
+            task.get("label")
+            for task in tasks
+            if isinstance(task, dict) and isinstance(task.get("label"), str)
+        }
+        for label in sorted(REQUIRED_TASK_LABELS - labels):
+            add_issue(
+                failures,
+                failure_items,
+                "settings",
+                ".vscode/tasks.json",
+                f"missing task label: {label}",
+                remediation_hints["settings"],
+            )
+
+        preflight = next(
+            (
+                task
+                for task in tasks
+                if isinstance(task, dict)
+                and task.get("label") == "QuantMap: Dev Contract Preflight"
+            ),
+            {},
+        )
+        if isinstance(preflight, dict):
+            command_value = preflight.get("command", "")
+            args_value = preflight.get("args", [])
+            task_parts: list[str] = []
+            if isinstance(command_value, str):
+                task_parts.append(command_value)
+            if isinstance(args_value, list):
+                task_parts.extend(str(item) for item in args_value)
+            elif isinstance(args_value, str):
+                task_parts.append(args_value)
+
+            task_text = " ".join(task_parts).replace("/", "\\").lower()
+
+            if (
+                ".\\.venv\\scripts\\python.exe" not in task_text
+                and ".venv\\scripts\\python.exe" not in task_text
+            ):
+                add_issue(
+                    failures,
+                    failure_items,
+                    "settings",
+                    ".vscode/tasks.json",
+                    "preflight task must run .\\.venv\\Scripts\\python.exe",
+                    remediation_hints["settings"],
+                )
+            if ".agent\\scripts\\helpers\\verify_dev_contract.py" not in task_text:
+                add_issue(
+                    failures,
+                    failure_items,
+                    "settings",
+                    ".vscode/tasks.json",
+                    "preflight task must call verify_dev_contract.py",
+                    remediation_hints["settings"],
+                )
+            if "--quick" not in task_text:
+                add_issue(
+                    failures,
+                    failure_items,
+                    "settings",
+                    ".vscode/tasks.json",
+                    "preflight task must call verify_dev_contract.py with --quick",
+                    remediation_hints["settings"],
+                )
+            run_options = preflight.get("runOptions", {})
+            if (
+                not isinstance(run_options, dict)
+                or run_options.get("runOn") != "folderOpen"
+            ):
+                add_issue(
+                    warnings,
+                    warning_items,
+                    "settings",
+                    ".vscode/tasks.json",
+                    "preflight task should run on folderOpen",
+                    "Set runOptions.runOn to folderOpen for deterministic startup preflight.",
                 )
 
     report = {

@@ -45,6 +45,18 @@ STANDARD_CYCLES_PER_CONFIG: int = 3
 QUICK_CYCLES_PER_CONFIG: int = 1
 
 
+SCOPE_AUTHORITY_CAMPAIGN_YAML = "campaign_yaml"
+SCOPE_AUTHORITY_USER = "user"
+SCOPE_AUTHORITY_PLANNER = "planner"
+SCOPE_AUTHORITY_UNKNOWN = "unknown"
+_VALID_SCOPE_AUTHORITIES = {
+    SCOPE_AUTHORITY_CAMPAIGN_YAML,
+    SCOPE_AUTHORITY_USER,
+    SCOPE_AUTHORITY_PLANNER,
+}
+_READABLE_SCOPE_AUTHORITIES = _VALID_SCOPE_AUTHORITIES | {SCOPE_AUTHORITY_UNKNOWN}
+
+
 def resolve_run_mode(values_override: list | None, mode_flag: str | None = None) -> str:
     """
     Resolve the effective run mode for this execution.
@@ -63,6 +75,31 @@ def resolve_run_mode(values_override: list | None, mode_flag: str | None = None)
     if values_override is not None:
         return "custom"
     return "full"
+
+
+def resolve_scope_authority(
+    values_override: list | None,
+    explicit_scope_authority: str | None = None,
+) -> str:
+    """Resolve who selected the run scope, independent of execution depth."""
+    if explicit_scope_authority is not None:
+        if explicit_scope_authority not in _VALID_SCOPE_AUTHORITIES:
+            raise ValueError(
+                "scope_authority must be one of "
+                f"{sorted(_VALID_SCOPE_AUTHORITIES)}, got {explicit_scope_authority!r}"
+            )
+        return explicit_scope_authority
+    if values_override is not None:
+        return SCOPE_AUTHORITY_USER
+    return SCOPE_AUTHORITY_CAMPAIGN_YAML
+
+
+def scope_authority_from_snapshot(snapshot: dict[str, Any]) -> str:
+    """Read persisted scope authority without rewriting legacy snapshots."""
+    value = snapshot.get("scope_authority")
+    if isinstance(value, str) and value in _READABLE_SCOPE_AUTHORITIES:
+        return value
+    return SCOPE_AUTHORITY_UNKNOWN
 
 
 # Human-readable mode labels used in reports and console output.
@@ -104,6 +141,12 @@ class RunPlan:
 
     run_mode : str
         "custom" | "full" | "standard" | "quick"
+
+    scope_authority : str
+        Generic execution-truth label for who selected the scope:
+        "campaign_yaml" | "user" | "planner".  Legacy snapshots that lack
+        this field are read explicitly as "unknown"; new RunPlan snapshots
+        always write a concrete authority.
 
     variable : str
         The campaign variable being swept.
@@ -198,6 +241,11 @@ class RunPlan:
     # Stored for audit trail; None means mode was resolved implicitly (Full or Custom).
     mode_flag: str | None = None
 
+    # Generic execution-truth scope selector.  This is separate from run_mode:
+    # run_mode describes execution depth; scope_authority describes who selected
+    # the scope.  Default preserves current full-campaign constructor behavior.
+    scope_authority: str = SCOPE_AUTHORITY_CAMPAIGN_YAML
+
     # Original user-provided CLI overrides — stored verbatim for audit trail.
     values_override: list | None = None
     cycles_override: int | None = None
@@ -211,6 +259,7 @@ class RunPlan:
             "parent_campaign_id": self.parent_campaign_id,
             "effective_campaign_id": self.effective_campaign_id,
             "run_mode": self.run_mode,
+            "scope_authority": self.scope_authority,
             "variable": self.variable,
             "all_campaign_values": self.all_campaign_values,
             "selected_values": self.selected_values,

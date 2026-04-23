@@ -16,7 +16,18 @@ The active focus is **Phase 3: Platform Generalization**. Phase 2 Operational Ro
 
 ## Developer Setup
 
-Use the repo contract directly from a fresh clone:
+Normal local work assumes the repo `.venv` already exists. On open, VS Code has a repo task named `QuantMap: Dev Contract Preflight` that runs the required startup check:
+
+```powershell
+.\.venv\Scripts\python.exe .agent\scripts\helpers\verify_dev_contract.py --quick
+```
+
+If that check passes, keep using `.\.venv\Scripts\python.exe` for repo-health commands. Shell activation and bare `python`/`pip` are not the local contract.
+If the quick check fails because `.venv` is missing or drifted, folder-open preflight performs one self-heal rebuild and reruns the quick check.
+
+First open still requires VS Code workspace trust before any workspace task can run. After trust is granted, checked-in workspace settings allow the preflight task to run automatically on folder open.
+
+For a fresh clone or explicit repair, rebuild the repo `.venv` from the approved DevStore Python target:
 
 ```powershell
 & D:\.store\mise\data\installs\python\3.13.13\python.exe -m venv .venv
@@ -26,7 +37,7 @@ Use the repo contract directly from a fresh clone:
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-The repo `.venv` must be created from the DevStore-managed Python 3.13 target above. The contract check is the fastest way to confirm that the active interpreter matches the repo's declared dev tooling before you start editing. Local repo-health commands should use `.\.venv\Scripts\python.exe` explicitly; shell activation and VS Code interpreter selection are convenience only. Development scaffolding such as `.agent`, CI checks, and editor defaults must not become QuantMap runtime behavior.
+If `.venv` is locked or drifted in VS Code, run the `QuantMap: Repair Dev Venv` task. It stops workspace-scoped Python/Ruff/mypy holders, rebuilds `.venv` from DevStore Python 3.13.13, reinstalls dev dependencies, and reruns the full contract check. Development scaffolding such as `.agent`, CI checks, and editor defaults must not become QuantMap runtime behavior.
 
 ---
 

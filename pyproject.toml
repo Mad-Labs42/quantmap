@@ -8,7 +8,8 @@ version = "0.9.0"
 description = "QuantMap: LLM Quantization & Inference Benchmarking Governance Tool"
 readme = "README.md"
 requires-python = ">=3.12"
-license = {text = "MIT"}
+license = "BSL-1.1"
+license-files = ["LICENSE"]
 authors = [
     {name = "Josh", email = "deepthought8342@gmail.com"}
 ]
@@ -27,6 +28,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "pytest>=9.0.0",
+    "pytest-cov>=6.0.0",
+    "mypy>=1.13.0",
+    "ruff>=0.8.0",
     "types-psutil",
     "types-PyYAML",
     "pandas-stubs",
@@ -54,4 +59,17 @@ exclude = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "--cov=. --cov-report=xml:coverage.xml"
+addopts = "--cov --cov-report=xml:coverage.xml"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    ".venv/*",
+    "build/*",
+    "dist/*",
+    "*.egg-info/*",
+    "tools/*",
+]
+
+[tool.coverage.report]
+skip_empty = true

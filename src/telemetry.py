@@ -39,12 +39,11 @@ import ctypes.wintypes
 import io
 import json
 import logging
-import os
 import sqlite3
 import struct
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -541,7 +540,7 @@ def startup_check() -> dict[str, Any]:
             f"ABORT: HWiNFO is running and shared memory is accessible, but no CPU "
             f"Package temperature sensor was found.\n\n"
             f"Available temperature sensors ({len(temp_labels)}):\n"
-            + "\n".join(f"  - {l}" for l in temp_labels[:20])
+            + "\n".join(f"  - {label}" for label in temp_labels[:20])
             + "\n\nCheck HWiNFO sensor list and ensure the CPU sensor is enabled."
         )
 
@@ -569,7 +568,7 @@ def startup_check() -> dict[str, Any]:
     gpu_vram_available = False
     if nvml_ok:
         try:
-            mem = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
+            pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
             report["abort"]["gpu_vram_used_mb"] = True
             gpu_vram_available = True
         except Exception as exc:
@@ -1541,11 +1540,11 @@ def collect_campaign_start_snapshot(
     baseline: dict[str, Any] | None = None,
     quantmap_identity: dict[str, Any] | None = None,
     run_plan_snapshot: dict[str, Any] | None = None,
+    acpm_planning_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect a complete system fingerprint at campaign start (MDD §10.5)."""
     import hashlib
     import platform
-    import subprocess
     import sys
 
     snap: dict[str, Any] = {
@@ -1571,7 +1570,7 @@ def collect_campaign_start_snapshot(
             stat.st_mtime, tz=timezone.utc
         ).isoformat()
         snap["model_path"] = str(model_path)
-    except Exception as exc:
+    except Exception:
         snap["model_file_size_bytes"] = None
         snap["model_mtime_utc"] = None
 
@@ -1628,6 +1627,10 @@ def collect_campaign_start_snapshot(
         snap["quantmap_identity_json"] = json.dumps(quantmap_identity, sort_keys=True)
     if run_plan_snapshot is not None:
         snap["run_plan_json"] = json.dumps(run_plan_snapshot, sort_keys=True)
+    if acpm_planning_metadata is not None:
+        snap["acpm_planning_metadata_json"] = json.dumps(
+            acpm_planning_metadata, sort_keys=True
+        )
     snap["snapshot_schema_version"] = 2
     snap["snapshot_capture_quality"] = "complete" if snap.get("baseline_yaml_content") else "partial"
     execution_environment = classify_execution_environment()

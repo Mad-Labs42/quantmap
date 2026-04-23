@@ -48,6 +48,7 @@ $RECYCLE.BIN/
 # Editor artifacts
 .vscode/*
 !.vscode/settings.json
+!.vscode/tasks.json
 .idea/
 *.suo
 *.user
