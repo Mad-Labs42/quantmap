@@ -26,6 +26,7 @@ from src.artifact_paths import (
 from src.trust_identity import (
     load_run_identity,
     methodology_source_label,
+    recommendation_projection,
 )
 
 _logger = logging.getLogger(__name__)
@@ -576,6 +577,11 @@ def _build_run_context_summary(
     return summary
 
 
+def _build_recommendation_projection(trust_identity: object) -> dict:
+    """Return the compact recommendation projection for metadata.json."""
+    return recommendation_projection(trust_identity)  # type: ignore[arg-type]
+
+
 def _register_metadata_artifact(
     campaign_id: str,
     db_path: Path,
@@ -789,6 +795,7 @@ def generate_metadata_json(
                 else trust_identity.sources.get("filter_policy", "unknown")
             ),
         },
+        "recommendation": _build_recommendation_projection(trust_identity),
         "provenance_sources": trust_identity.sources,
         "artifacts":          artifact_inventory,
         "warnings":           warnings_list,

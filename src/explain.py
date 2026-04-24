@@ -66,10 +66,15 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
     methodology_label = "methodology_unknown"
     trust_evidence_lines: list[str] = []
     try:
-        from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+        from src.trust_identity import (  # noqa: PLC0415
+            load_run_identity,
+            methodology_source_label,
+            recommendation_projection,
+        )
 
         identity = load_run_identity(campaign_id, db_path)
         methodology_label = methodology_source_label(identity.methodology)
+        recommendation = recommendation_projection(identity)
         snapshot = identity.start_snapshot
 
         execution_raw = snapshot.get("execution_environment_json")
@@ -108,6 +113,26 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
         capture_quality = snapshot.get("telemetry_capture_quality")
         if capture_quality:
             trust_evidence_lines.append(f"Telemetry capture quality: {capture_quality}")
+        if recommendation.get("available"):
+            trust_evidence_lines.extend(
+                [
+                    f"ACPM recommendation status: {recommendation.get('status')}",
+                    f"Leading config: {recommendation.get('leading_config_id') or 'none'}",
+                    (
+                        f"Recommended config: {recommendation.get('recommended_config_id')}"
+                        if recommendation.get("recommended_config_id")
+                        else "Recommended config: none issued"
+                    ),
+                    f"Handoff ready: {recommendation.get('handoff_ready')}",
+                    f"Caveat codes: {', '.join(recommendation.get('caveat_codes', [])) or 'none'}",
+                ]
+            )
+            if recommendation.get("coverage_class"):
+                trust_evidence_lines.append(
+                    f"Recommendation coverage class: {recommendation.get('coverage_class')}"
+                )
+        else:
+            trust_evidence_lines.append("ACPM recommendation authority: not recorded")
     except Exception as exc:
         logger.debug("Could not load trust methodology context for briefing: %s", exc)
 

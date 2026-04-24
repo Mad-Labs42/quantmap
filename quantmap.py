@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -59,7 +60,90 @@ except ImportError:
     __methodology_version__ = "methodology unknown"
 
 
-from src.settings_env import EnvPath, read_env_path, require_env_path
+from src.settings_env import EnvPath, read_env_path, require_env_path  # noqa: E402
+
+
+TOP_LEVEL_EPILOG = """Primary workflow:
+  1. quantmap doctor                    # Verify environment readiness
+  2. quantmap run --campaign <ID> --validate  # Pre-flight check
+  3. quantmap run --campaign <ID>              # Execute
+  4. quantmap list                           # Check results
+  5. quantmap explain <ID> --evidence       # Technical briefing
+
+Command family:
+  * Health: status (fast pulse), doctor (deep check), self-test (tooling)
+  * Campaign: run (execute), run --validate (pre-flight)
+  * History: list, explain, compare, export, artifacts
+  * ACPM: acpm info, acpm plan, acpm validate, acpm run
+
+Run `quantmap <cmd> --help` for details on a specific command."""
+
+RUN_EPILOG = """Examples:
+  quantmap run --campaign B_low_sample --validate    # Pre-flight only
+  quantmap run --campaign B_low_sample                 # Full run
+  quantmap run --campaign NGL_sweep --mode standard    # Standard depth
+  quantmap run --campaign NGL_sweep --values 30,80     # Subset
+  quantmap run --campaign NGL_sweep --dry-run          # Dry run
+
+Safety: This command modifies state (creates campaign artifacts).
+
+Note: Redirected output (>) hides live progress.
+To monitor redirected output in another terminal:
+  Get-Content "<path>" -Tail 80 -Wait"""
+
+DOCTOR_EPILOG = """Checks the current shell and local lab setup.
+
+This command verifies:
+  * Server binary and model file presence
+  * Baseline YAML validity
+  * Request JSON files
+  * Lab directory structure
+  * Defender and hardware configuration
+
+When to use:
+  * Before the first run
+  * After path changes
+  * When readiness is unclear
+  * After `quantmap status` shows degradation"""
+
+STATUS_EPILOG = """Provides a fast operational pulse:
+  * Environment readiness (lab, server, model)
+  * Campaign count and recent history
+  * Database and artifact status
+
+When to use:
+  * Quick status check
+  * Before `quantmap doctor` for detailed diagnostics
+  * Not a substitute for `doctor` or `self-test`
+
+See also: quantmap doctor (deep check), quantmap self-test (tooling)"""
+
+SELFTEST_EPILOG = """Verifies QuantMap's internal tooling:
+  * Python package integrity
+  * Internal import paths
+  * Module version alignment
+
+This is NOT measurement readiness. It only verifies that the tooling itself is functional.
+Use `quantmap doctor` to verify model and server readiness.
+
+See also: quantmap doctor (full environment check), quantmap status (operational pulse)"""
+
+LIST_EPILOG = """Shows campaign history, post-run status, and summary paths.
+
+Tip: Full campaign IDs are shown in the footer for easy copying.
+Use `quantmap artifacts <ID>` to see exact artifact locations."""
+
+ACPM_EPILOG = """ACPM-guided campaign planning and execution.
+
+This namespace provides ACPM-specific profiles and tiers for structured experimentation.
+
+Examples:
+  quantmap acpm info                              # List available profiles
+  quantmap acpm plan --campaign NGL_sweep --profile Balanced    # Preview plan
+  quantmap acpm validate --campaign NGL_sweep --profile Balanced  # Validate inputs
+  quantmap acpm run --campaign NGL_sweep --profile Balanced --tier 1x  # Execute
+
+Tip: Use `--validate` (validation) before running to catch input errors."""
 
 
 def _load_lab_root() -> Path:
@@ -200,9 +284,9 @@ def cmd_status(args):
         elif db_p is None:
             console.print("  [bold]Campaigns:[/bold]     unavailable (lab root unavailable)")
         else:
-            console.print(f"  [bold]Campaigns:[/bold]     0 (DB not found)")
+            console.print("  [bold]Campaigns:[/bold]     0 (DB not found)")
     except Exception:
-        console.print(f"  [bold]Campaigns:[/bold]     Unknown")
+        console.print("  [bold]Campaigns:[/bold]     Unknown")
 
     if methodology_ok:
         console.print("  [bold]Historical Trust:[/bold] snapshot-complete runs remain DB-authoritative")
@@ -245,10 +329,22 @@ def cmd_status(args):
     final = report.readiness
     if final == Readiness.READY:
         console.print(f"  [green]{ui.SYM_OK} Environment Ready[/green]")
+        ui.print_next_actions([
+            "quantmap run --campaign <ID> --validate",
+            "quantmap list",
+        ])
     elif final == Readiness.WARNINGS:
         console.print(f"  [yellow]{ui.SYM_WARN} Ready with Warnings (run 'quantmap doctor' for details)[/yellow]")
+        ui.print_next_actions([
+            "quantmap doctor",
+            "quantmap run --campaign <ID> --validate",
+        ])
     else:
         console.print(f"  [red]{ui.SYM_FAIL} BLOCKED (run 'quantmap doctor' to diagnose)[/red]")
+        ui.print_next_actions([
+            "quantmap doctor",
+            "quantmap run --campaign <ID> --validate",
+        ])
 
     console.print("")
 
@@ -305,16 +401,17 @@ def cmd_audit(args):
         sys.exit(1)
     m1 = audit_methodology.get_methodology(args.campaign1, db_path)
     m2 = audit_methodology.get_methodology(args.campaign2, db_path)
-    
+
     if not m1:
         print(f"Error: No methodology snapshot found for {args.campaign1}")
         sys.exit(1)
     if not m2:
         print(f"Error: No methodology snapshot found for {args.campaign2}")
         sys.exit(1)
-        
+
     ok = audit_methodology.compare_methodologies(args.campaign1, m1, args.campaign2, m2)
     sys.exit(0 if ok else 1)
+
 
 def cmd_list(args):
     """List all campaigns and their status."""
@@ -325,6 +422,264 @@ def cmd_list(args):
         sys.exit(1)
 
     runner.list_campaigns()
+
+
+ARTIFACTS_EPILOG = """Examples:
+  quantmap artifacts B_low_sample
+  quantmap artifacts NGL_sweep --db /path/to/lab.sqlite
+"""
+
+
+def cmd_artifacts(args):
+    """Discover artifact paths and DB-registered status for a campaign."""
+    from src import ui  # noqa: PLC0415
+    from src.artifact_paths import get_campaign_artifact_paths  # noqa: PLC0415
+
+    console = ui.get_console()
+    try:
+        lab_root = _load_lab_root()
+        db_path = args.db or _default_db_path()
+    except Exception as exc:
+        _print_path_resolution_error("could not resolve lab root or DB path", exc)
+        sys.exit(1)
+
+    artifacts = get_campaign_artifact_paths(lab_root, args.campaign, db_path=db_path)
+    if not artifacts:
+        console.print(f"[yellow]No artifact paths resolved for: {args.campaign}[/yellow]")
+        sys.exit(1)
+
+    ui.print_banner(f"Artifacts: {args.campaign}")
+    ui.render_artifact_block(args.campaign, artifacts, target_console=console)
+
+
+ACPM_EPILOG = """ACPM-guided campaign planning and execution.
+
+This namespace provides ACPM-specific profiles and tiers for structured experimentation.
+
+Examples:
+  quantmap acpm info                              # List available profiles
+  quantmap acpm plan --campaign NGL_sweep --profile Balanced    # Preview plan
+  quantmap acpm validate --campaign NGL_sweep --profile Balanced  # Validate inputs
+  quantmap acpm run --campaign NGL_sweep --profile Balanced --tier 1x  # Execute
+
+Tip: Use `--validate` (validation) before running to catch input errors."""
+
+
+def cmd_acpm_info(args):
+    """Show available ACPM profiles or details for a specific profile."""
+    from src import ui  # noqa: PLC0415
+    from src.acpm_planning import V1_ACPM_PROFILE_IDS, get_acpm_profile_info  # noqa: PLC0415
+
+    console = ui.get_console()
+
+    if args.profile:
+        try:
+            info = get_acpm_profile_info(args.profile)
+        except ValueError:
+            console.print(f"[red]Unknown profile: {args.profile}[/red]")
+            console.print(f"Valid profiles: {', '.join(sorted(V1_ACPM_PROFILE_IDS))}")
+            sys.exit(1)
+        ui.print_banner(f"ACPM Profile: {info['display_label']}")
+        console.print(f"  Profile ID:     {args.profile}")
+        console.print(f"  Display name:   {info['display_name']}")
+        console.print(f"  Lens:           {info['lens_description']}")
+        console.print(f"  Scoring profile: {info['scoring_profile_name']}")
+        console.print("")
+        return
+
+    ui.print_banner("ACPM Profiles")
+    console.print("  Available profiles for ACPM planning:\n")
+    for pid in sorted(V1_ACPM_PROFILE_IDS):
+        info = get_acpm_profile_info(pid)
+        console.print(f"  [bold]{info['display_label']}[/bold] — {info['lens_description']}")
+    console.print("")
+    console.print("  Use --profile <name> to see details for a specific profile.")
+    console.print("")
+
+
+def cmd_acpm_plan(args):
+    """Preview an ACPM run plan without executing."""
+    from src import ui  # noqa: PLC0415
+    from src.acpm_planning import (  # noqa: PLC0415
+        V1_ACPM_PROFILE_IDS,
+        compile_acpm_plan,
+    )
+    from src.runner import CAMPAIGNS_DIR
+
+    console = ui.get_console()
+
+    campaign_path = CAMPAIGNS_DIR / f"{args.campaign}.yaml"
+    if not campaign_path.is_file():
+        console.print(f"[red]Campaign not found: {args.campaign}[/red]")
+        console.print("Hint: use `quantmap list` to see available campaign IDs.")
+        sys.exit(1)
+
+    import yaml
+    with open(campaign_path, encoding="utf-8") as f:
+        campaign = yaml.safe_load(f)
+
+    if args.profile not in V1_ACPM_PROFILE_IDS:
+        console.print(f"[red]Unknown profile: {args.profile}[/red]")
+        console.print(f"Valid profiles: {', '.join(sorted(V1_ACPM_PROFILE_IDS))}")
+        sys.exit(1)
+
+    try:
+        plan_output = compile_acpm_plan(
+            campaign,
+            profile_name=args.profile,
+            repeat_tier=args.tier,
+        )
+    except Exception as exc:
+        console.print(f"[red]Plan compilation failed: {exc}[/red]")
+        sys.exit(1)
+
+    ui.print_banner(f"ACPM Plan Preview: {args.campaign}")
+    ui.render_acpm_plan_preview(plan_output, target_console=console)
+
+
+def cmd_acpm_validate(args):
+    """Validate ACPM inputs without executing."""
+    from src import ui  # noqa: PLC0415
+    from src.acpm_planning import (  # noqa: PLC0415
+        V1_ACPM_PROFILE_IDS,
+        REPEAT_TIER_1X,
+        REPEAT_TIER_3X,
+        REPEAT_TIER_5X,
+        check_campaign_applicability,
+        get_acpm_profile_info,
+    )
+    from src.runner import CAMPAIGNS_DIR
+
+    console = ui.get_console()
+    _ALL_TIERS = {REPEAT_TIER_1X, REPEAT_TIER_3X, REPEAT_TIER_5X}
+
+    campaign_path = CAMPAIGNS_DIR / f"{args.campaign}.yaml"
+    campaign_exists = campaign_path.is_file()
+
+    profile_ok = args.profile in V1_ACPM_PROFILE_IDS
+    tier_ok = args.tier in _ALL_TIERS
+
+    profile_info = None
+    if profile_ok:
+        try:
+            profile_info = get_acpm_profile_info(args.profile)
+        except ValueError:
+            profile_ok = False
+
+    applicability = check_campaign_applicability({})
+    if campaign_exists:
+        import yaml
+        with open(campaign_path, encoding="utf-8") as f:
+            campaign = yaml.safe_load(f)
+        applicability = check_campaign_applicability(campaign)
+
+    ui.render_acpm_validate_result(
+        args.campaign,
+        args.profile,
+        args.tier,
+        applicability,
+        profile_info=profile_info,
+        tier_ok=tier_ok,
+        profile_ok=profile_ok,
+        campaign_exists=campaign_exists,
+        target_console=console,
+    )
+    sys.exit(0 if (campaign_exists and profile_ok and tier_ok and applicability.applicable) else 1)
+
+
+def cmd_acpm_run(args):
+    """Execute an ACPM-guided campaign."""
+    from src import ui  # noqa: PLC0415
+    from src.acpm_planning import (  # noqa: PLC0415
+        V1_ACPM_PROFILE_IDS,
+        REPEAT_TIER_1X,
+        REPEAT_TIER_3X,
+        REPEAT_TIER_5X,
+        compile_acpm_plan,
+        check_campaign_applicability,
+    )
+    from src import runner  # noqa: PLC0415
+    from src.runner import CAMPAIGNS_DIR
+
+    console = ui.get_console()
+    _ALL_TIERS = {REPEAT_TIER_1X, REPEAT_TIER_3X, REPEAT_TIER_5X}
+
+    campaign_path = CAMPAIGNS_DIR / f"{args.campaign}.yaml"
+    if not campaign_path.is_file():
+        console.print(f"[red]Campaign not found: {args.campaign}[/red]")
+        console.print("Hint: use `quantmap list` to see available campaign IDs.")
+        sys.exit(1)
+
+    if args.profile not in V1_ACPM_PROFILE_IDS:
+        console.print(f"[red]Unknown profile: {args.profile}[/red]")
+        console.print(f"Valid profiles: {', '.join(sorted(V1_ACPM_PROFILE_IDS))}")
+        sys.exit(1)
+
+    if args.tier not in _ALL_TIERS:
+        console.print(f"[red]Unknown tier: {args.tier}[/red]")
+        console.print(f"Valid tiers: {', '.join(sorted(_ALL_TIERS))}")
+        sys.exit(1)
+
+    import yaml
+    with open(campaign_path, encoding="utf-8") as f:
+        campaign = yaml.safe_load(f)
+
+    applicability = check_campaign_applicability(campaign)
+    if not applicability.applicable:
+        console.print(f"[red]Campaign '{args.campaign}' is not ACPM-applicable: {applicability.reason}[/red]")
+        console.print("Hint: ACPM only supports campaigns with supported variables.")
+        sys.exit(1)
+
+    plan_compiled = compile_acpm_plan(campaign, args.profile, args.tier)
+
+    execution_inputs = plan_compiled.to_execution_inputs()
+    run_values = execution_inputs.get("selected_values")
+    scope_authority = execution_inputs.get("scope_authority")
+    scoring_profile_name = execution_inputs.get("scoring_profile_name")
+    planning_metadata = plan_compiled.to_planning_metadata_snapshot()
+    selected_config_ids = execution_inputs.get("selected_config_ids", [])
+
+    n_runs = len(selected_config_ids) if selected_config_ids else 1
+    cycles_override = n_runs
+    requests_per_cycle_override = None
+
+    if args.validate:
+        console.print("[bold]Running pre-flight validation...[/bold]")
+        ok = runner.validate_campaign(
+            args.campaign,
+            values_override=run_values,
+            baseline_path=runner.BASELINE_YAML,
+            mode_flag=None,
+        )
+        sys.exit(0 if ok else 1)
+
+    if args.dry_run:
+        ui.print_banner(f"ACPM Dry Run: {args.campaign}")
+        console.print(f"  Campaign:   {args.campaign}")
+        console.print(f"  Profile:     {args.profile}")
+        console.print(f"  Tier:       {args.tier}")
+        console.print(f"  Scope:      {scope_authority}")
+        console.print(f"  Values:     {run_values}")
+        console.print(f"  Cycles:     {cycles_override}")
+        console.print(f"  Scoring:    {scoring_profile_name}")
+        sys.exit(0)
+
+    console.print("[bold]Executing ACPM campaign...[/bold]")
+    runner.run_campaign(
+        campaign_id=args.campaign,
+        dry_run=False,
+        resume=True,
+        cycles_override=cycles_override,
+        requests_per_cycle_override=requests_per_cycle_override,
+        values_override=run_values,
+        baseline_path=runner.BASELINE_YAML,
+        mode_flag=None,
+        scope_authority=scope_authority,
+        acpm_planning_metadata=planning_metadata,
+        acpm_scoring_profile_name=scoring_profile_name,
+    )
+    sys.exit(0)
+
 
 def cmd_explain(args):
     """Generate a technical briefing explaining a campaign outcome."""
@@ -417,11 +772,11 @@ def cmd_compare(args):
     # 2. Methodology Gate
     if result.methodology["grade"] == "mismatch":
         console.print(f"\n[bold red]{ui.SYM_FAIL} METHODOLOGY MISMATCH DETECTED[/bold red]")
-        console.print(f"  [red]Campaigns use different anchors or Registry versions.[/red]")
+        console.print("  [red]Campaigns use different anchors or Registry versions.[/red]")
         if not args.force:
-            console.print(f"\n[yellow]Comparison blocked for methodological integrity. Use --force to override.[/yellow]")
+            console.print("\n[yellow]Comparison blocked for methodological integrity. Use --force to override.[/yellow]")
             sys.exit(1)
-        console.print(f"\n[red bold]WARNING: Proceeding with --force despite mismatch. Deltas may be invalid.[/red bold]\n")
+        console.print("\n[red bold]WARNING: Proceeding with --force despite mismatch. Deltas may be invalid.[/red bold]\n")
     elif result.methodology["grade"] == "warnings":
         console.print(f"\n[bold yellow]{ui.SYM_WARN} METHODOLOGY WARNING: Minor anchor drift detected.[/bold yellow]\n")
 
@@ -454,23 +809,19 @@ def cmd_compare(args):
     console.print(f"  [cyan]{output_path}[/cyan]\n")
 
 def _fmt(val, spec, missing="—"):
-    if val is None: return missing
+    if val is None:
+        return missing
     try:
         return format(val, spec)
     except Exception:
         return missing
 
-import argparse
-import os
-import sys
-from pathlib import Path
-
-# ... bootstrap code exists above ...
-
 def main():
     parser = argparse.ArgumentParser(
         prog="quantmap",
-        description="QuantMap: LLM Quantization & Inference Benchmarking Governance Tool."
+        description="QuantMap: LLM Quantization and inference benchmarking governance tool.",
+        epilog=TOP_LEVEL_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
     )
     # Global flags
     parser.add_argument("--plain", action="store_true", help="Use plain ASCII output and disable emojis")
@@ -483,7 +834,13 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True, help="Subcommands")
 
     # --- RUN ---
-    run_parser = subparsers.add_parser("run", help="Execute or validate a benchmark campaign")
+    run_parser = subparsers.add_parser(
+        "run",
+        help="Execute or validate a benchmark campaign",
+        description="Validate or run a campaign on the existing QuantMap shell.",
+        epilog=RUN_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     run_parser.add_argument("--campaign", required=True, help="Campaign ID (e.g. C01_threads_batch)")
     run_parser.add_argument("--baseline", help="Path to baseline.yaml override")
     run_parser.add_argument("--validate", action="store_true", help="Perform pre-flight checks and exit")
@@ -496,7 +853,13 @@ def main():
     run_parser.set_defaults(func=cmd_run)
 
     # --- DOCTOR ---
-    doctor_parser = subparsers.add_parser("doctor", help="Perform environment health checks")
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Perform environment health checks",
+        description="Check local shell, lab, backend, and telemetry readiness.",
+        epilog=DOCTOR_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     doctor_parser.add_argument("--fix", action="store_true", help="Automate safe environment repairs")
     doctor_parser.set_defaults(func=cmd_doctor)
 
@@ -505,12 +868,24 @@ def main():
     init_parser.set_defaults(func=cmd_init)
 
     # --- SELF-TEST ---
-    selftest_parser = subparsers.add_parser("self-test", help="Verify tool integrity suite")
+    selftest_parser = subparsers.add_parser(
+        "self-test",
+        help="Verify QuantMap tooling integrity",
+        description="Run internal QuantMap tooling checks without a campaign run.",
+        epilog=SELFTEST_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     selftest_parser.add_argument("--live", action="store_true", help="Include live server/telemetry validation")
     selftest_parser.set_defaults(func=cmd_selftest)
 
     # --- STATUS ---
-    status_parser = subparsers.add_parser("status", help="Display high-level operational status")
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Display high-level operational status",
+        description="Show a quick readiness pulse, current methodology, and campaign count.",
+        epilog=STATUS_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     status_parser.set_defaults(func=cmd_status)
 
     # --- RESCORE ---
@@ -530,7 +905,13 @@ def main():
     audit_parser.set_defaults(func=cmd_audit)
 
     # --- LIST ---
-    list_parser = subparsers.add_parser("list", help="List campaign history and status")
+    list_parser = subparsers.add_parser(
+        "list",
+        help="List campaign history and status",
+        description="List prior campaigns and surface the key follow-up commands.",
+        epilog=LIST_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
     list_parser.set_defaults(func=cmd_list)
 
     # --- ABOUT ---
@@ -569,12 +950,94 @@ def main():
     export_parser.add_argument("--db", type=Path, help="Path to lab.sqlite override")
     export_parser.set_defaults(func=cmd_export)
 
+    # --- ARTIFACTS ---
+    artifacts_parser = subparsers.add_parser(
+        "artifacts",
+        help="Discover artifact paths and status for a campaign",
+        description="Show the disk location and DB-registered status of all four canonical artifacts.",
+        epilog=ARTIFACTS_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    artifacts_parser.add_argument("campaign", help="Campaign ID")
+    artifacts_parser.add_argument("--db", type=Path, help="Path to lab.sqlite override")
+    artifacts_parser.set_defaults(func=cmd_artifacts)
+
+    # --- ACPM ---
+    acpm_parser = subparsers.add_parser(
+        "acpm",
+        help="ACPM planner entry: plan, validate, and profile discovery",
+        description="ACPM-guided campaign planning. Preview a plan, validate inputs, or explore available profiles.",
+        epilog=ACPM_EPILOG,
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    acpm_subparsers = acpm_parser.add_subparsers(dest="acpm_command", required=True, help="ACPM subcommands")
+
+    acpm_info_parser = acpm_subparsers.add_parser(
+        "info",
+        help="List available ACPM profiles or show details for a specific profile",
+        description="List all available ACPM profiles, or show details for a named profile.",
+    )
+    acpm_info_parser.add_argument("--profile", help="Specific profile ID (e.g. Balanced, T/S, TTFT)")
+    acpm_info_parser.set_defaults(func=cmd_acpm_info)
+
+    acpm_plan_parser = acpm_subparsers.add_parser(
+        "plan",
+        help="Preview an ACPM run plan without executing",
+        description="Compile and preview the effective ACPM plan for a campaign/profile/tier combination without running it.",
+    )
+    acpm_plan_parser.add_argument("--campaign", required=True, help="Campaign ID")
+    acpm_plan_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_plan_parser.add_argument(
+        "--tier",
+        default="1x",
+        help="Repeat tier (1x, 3x, 5x). 1x=scaffolded quick, 3x=standard, 5x=full. Default: 1x",
+    )
+    acpm_plan_parser.set_defaults(func=cmd_acpm_plan)
+
+    acpm_validate_parser = acpm_subparsers.add_parser(
+        "validate",
+        help="Validate ACPM inputs without executing",
+        description="Check that a campaign, profile, and repeat tier combination is valid for ACPM planning.",
+    )
+    acpm_validate_parser.add_argument("--campaign", required=True, help="Campaign ID")
+    acpm_validate_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_validate_parser.add_argument(
+        "--tier",
+        default="1x",
+        help="Repeat tier (1x, 3x, 5x). Default: 1x",
+    )
+    acpm_validate_parser.set_defaults(func=cmd_acpm_validate)
+
+    acpm_run_parser = acpm_subparsers.add_parser(
+        "run",
+        help="Execute an ACPM-guided campaign",
+        description="Compile an ACPM plan and execute it via the runner.",
+    )
+    acpm_run_parser.add_argument("--campaign", required=True, help="Campaign ID")
+    acpm_run_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_run_parser.add_argument(
+        "--tier",
+        default="1x",
+        help="Repeat tier (1x, 3x, 5x). Default: 1x",
+    )
+    acpm_run_parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Run pre-flight validation only, skip execution",
+    )
+    acpm_run_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show plan without executing",
+    )
+    acpm_run_parser.set_defaults(func=cmd_acpm_run)
+
     args = parser.parse_args()
-    
+
     # Ensure plain mode is propagated if flag used
     if args.plain:
         os.environ["QUANTMAP_PLAIN"] = "1"
-        
+
     args.func(args)
 
 if __name__ == "__main__":

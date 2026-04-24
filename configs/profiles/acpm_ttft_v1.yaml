@@ -1,0 +1,65 @@
+# QuantMap — Experiment Profile: acpm_ttft_v1
+# ACPM Time-to-First-Token (TTFT) lens. Latency-biased; prioritizes first-token responsiveness.
+# IMPORTANT: Changing values in this file changes scoring behavior.
+
+name: acpm_ttft_v1
+version: "1.0.0"
+experiment_family: throughput
+description: >
+  ACPM Time-to-First-Token (TTFT) profile. Latency-biased recommendation lens.
+  Prioritizes warm and cold first-token responsiveness. Use when minimizing
+  time-to-first-token is the primary goal.
+
+active_metrics:
+  - warm_tg_median
+  - warm_tg_p10
+  - warm_ttft_median_ms
+  - warm_ttft_p90_ms
+  - cold_ttft_median_ms
+  - pp_median
+
+primary_metrics:
+  - warm_ttft_median_ms
+  - cold_ttft_median_ms
+
+secondary_metrics:
+  - warm_tg_median
+  - warm_tg_p10
+  - warm_ttft_p90_ms
+  - pp_median
+
+weights:
+  warm_tg_median: 0.10
+  warm_tg_p10: 0.05
+  warm_ttft_median_ms: 0.50
+  warm_ttft_p90_ms: 0.00
+  cold_ttft_median_ms: 0.30
+  pp_median: 0.05
+
+normalize_weights: true
+ranking_mode: composite
+composite_basis: lcb_score
+confidence_policy: lcb_k1
+min_sample_gate: 10
+outlier_policy: flag_symmetric
+outlier_fence_method: iqr_1_5
+
+gate_overrides:
+  max_cv: 0.05
+  max_thermal_events: 0
+  max_outliers: 3
+  max_warm_ttft_p90_ms: 500.0
+  min_success_rate: 0.90
+  min_warm_tg_p10: 7.0
+  min_valid_warm_count: 3
+
+report_emphasis:
+  - warm_ttft_median_ms
+  - cold_ttft_median_ms
+  - warm_tg_median
+
+diagnostic_metrics:
+  - warm_tg_cv
+  - thermal_events
+  - success_rate
+  - outlier_count

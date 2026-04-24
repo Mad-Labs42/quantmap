@@ -627,6 +627,41 @@ def _section_methodology(
     return lines
 
 
+def _section_recommendation(projection: dict[str, Any]) -> list[str]:
+    """Render the compact ACPM recommendation projection for run-reports.md."""
+    lines: list[str] = []
+    lines.append("## Recommendation Authority\n> Type: INTERPRETATION + LIMITATIONS\n")
+    if not projection.get("available"):
+        lines.append(
+            f"Recommendation authority not recorded for this campaign (`{projection.get('source', 'unknown')}`).\n"
+        )
+        return lines
+
+    lines.append("| Field | Value |")
+    lines.append("|-------|-------|")
+    lines.append(f"| Recommendation status | `{projection.get('status')}` |")
+    lines.append(f"| Leading config | `{projection.get('leading_config_id') or 'none'}` |")
+    recommended_config_id = projection.get("recommended_config_id")
+    if recommended_config_id:
+        lines.append(f"| Recommended config | `{recommended_config_id}` |")
+    else:
+        lines.append("| Recommended config | No ACPM recommendation issued |")
+    lines.append(f"| Handoff ready | `{projection.get('handoff_ready')}` |")
+    lines.append(
+        f"| Caveat codes | {', '.join(projection.get('caveat_codes', [])) or 'none'} |"
+    )
+    if projection.get("coverage_class"):
+        lines.append(f"| Coverage class | `{projection.get('coverage_class')}` |")
+    if projection.get("scope_authority"):
+        lines.append(f"| Scope authority | `{projection.get('scope_authority')}` |")
+    if projection.get("selected_ngl_values"):
+        values = ", ".join(str(v) for v in projection["selected_ngl_values"])
+        lines.append(f"| Selected NGL values | {values} |")
+    lines.append(f"| Source | `{projection.get('source', 'unknown')}` |")
+    lines.append("")
+    return lines
+
+
 def _section_primary_results(
     scores_result:      dict[str, Any],
     stats:              dict[str, dict[str, Any]],
@@ -2185,6 +2220,13 @@ def _section_supporting_artifacts(
     def _artifact_status(artifact_type: str, path: Path) -> str:
         row = artifact_rows.get(artifact_type)
         if not row:
+            if path.exists():
+                return _check(path)
+            # No DB row and file absent. run-reports.md is generated before
+            # metadata.json; show "pending" for canonical types rather than
+            # "missing" which would be stale once the run completes.
+            if artifact_type in _PENDING_TYPES:
+                return "pending"
             return _check(path)
         status = row.get("status") or _STR_NOT_RECORDED
         verification = row.get("verification_source") or _STR_NOT_RECORDED
@@ -2197,11 +2239,19 @@ def _section_supporting_artifacts(
             parts.append(f"error={str(error)[:80]}")
         return "; ".join(parts)
     from src.artifact_paths import (  # noqa: PLC0415
+        ARTIFACT_CAMPAIGN_SUMMARY,
+        ARTIFACT_RUN_REPORTS,
+        ARTIFACT_METADATA,
+        ARTIFACT_RAW_TELEMETRY,
         FILENAME_RAW_TELEMETRY,
         FILENAME_CAMPAIGN_SUMMARY,
         FILENAME_RUN_REPORTS,
         FILENAME_METADATA,
     )
+    _PENDING_TYPES = {
+        ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_RUN_REPORTS,
+        ARTIFACT_METADATA, ARTIFACT_RAW_TELEMETRY,
+    }
     raw_telemetry_jsonl = measurements_dir / FILENAME_RAW_TELEMETRY
     campaign_summary_md = reports_dir / FILENAME_CAMPAIGN_SUMMARY
     run_reports_md      = reports_dir / FILENAME_RUN_REPORTS
@@ -2400,6 +2450,7 @@ def generate_campaign_report(
     from src.trust_identity import (  # noqa: PLC0415
         load_baseline_for_historical_use,
         load_run_identity,
+        recommendation_projection,
     )
     baseline, baseline_source = load_baseline_for_historical_use(
         campaign_id,
@@ -2408,6 +2459,7 @@ def generate_campaign_report(
         allow_current_input=False,
     )
     trust_identity = load_run_identity(campaign_id, db_path)
+    recommendation = recommendation_projection(trust_identity)
     legacy_results_dir = effective_lab_root / "results" / campaign_id
     model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
     model_identity = infer_model_identity(
@@ -2529,6 +2581,13 @@ def generate_campaign_report(
         logger.warning("report: primary results section failed: %s", exc)
         sections.extend(_section_failure_stub("## Primary Results", exc))
         section_failures.append(("primary_results", str(exc)))
+
+    try:
+        sections.extend(_section_recommendation(recommendation))
+    except Exception as exc:
+        logger.warning("report: recommendation section failed: %s", exc)
+        sections.extend(_section_failure_stub("## Recommendation Authority", exc))
+        section_failures.append(("recommendation", str(exc)))
 
     # Variability & Reliability
     try:

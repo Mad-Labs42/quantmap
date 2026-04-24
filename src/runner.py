@@ -1953,9 +1953,12 @@ def run_campaign(
             f"  Requests per cycle:{reqs_per_cycle} (1 cold + {warm_per_cycle} warm){reqs_src}",
             f"  Warm samples/cfg:  {warm_samples}",
             f"  Total requests:    {total_requests}",
+            f"  First value:      {configs[0].get('variable_value') if configs else 'N/A'}",
             f"  Request types:     {', '.join(sorted(request_files.keys()))}",
             f"  Elimination filters: {elimination_filter_summary}",
             "",
+            "  Duration:  estimate unavailable until first request completes.",
+            "  Timing will display after config 1 finishes.",
         ]
         if warm_samples < 20:
             if run_plan.is_custom:

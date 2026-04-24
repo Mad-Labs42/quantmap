@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
     report_completed_at TEXT,
     report_failed_at    TEXT,
     report_failure_reason TEXT,
+    recommendation_record_json TEXT,
     status_model_version INTEGER NOT NULL DEFAULT 1
 );
 
@@ -371,7 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_campaign_type ON artifacts(campaign_id,
 
 # Increment this whenever a new migration is added to _MIGRATIONS below.
 # This is the version the current codebase expects.
-SCHEMA_VERSION: int = 14
+SCHEMA_VERSION: int = 15
 
 
 class SchemaVersionError(RuntimeError):
@@ -664,6 +665,14 @@ _MIGRATIONS: list[tuple[int, str, list[MigrationStep]]] = [
             "ALTER TABLE campaign_start_snapshot ADD COLUMN effective_filter_policy_json TEXT",
         ],
     ),
+    (
+        15,
+        "ACPM Slice 5: add nullable recommendation_record_json to campaigns as "
+        "the sole persisted recommendation authority record.",
+        [
+            "ALTER TABLE campaigns ADD COLUMN recommendation_record_json TEXT",
+        ],
+    ),
 ]
 
 
@@ -837,6 +846,32 @@ def write_request(conn: sqlite3.Connection, cycle_id: int, result_dict: dict) ->
     placeholders = ", ".join("?" for _ in cols)
     col_str = ", ".join(cols)
     conn.execute(f"INSERT INTO requests ({col_str}) VALUES ({placeholders})", values)
+
+
+def write_recommendation_record(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+    record: dict[str, Any],
+) -> None:
+    """Persist the ACPM recommendation authority record for one campaign."""
+    conn.execute(
+        "UPDATE campaigns SET recommendation_record_json=? WHERE id=?",
+        (json.dumps(record, sort_keys=True), campaign_id),
+    )
+
+
+def read_recommendation_record(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+) -> dict[str, Any] | None:
+    """Return the persisted ACPM recommendation record, if present."""
+    row = conn.execute(
+        "SELECT recommendation_record_json FROM campaigns WHERE id=?",
+        (campaign_id,),
+    ).fetchone()
+    if row is None or row["recommendation_record_json"] is None:
+        return None
+    return json.loads(row["recommendation_record_json"])
 
 
 def write_raw_jsonl(

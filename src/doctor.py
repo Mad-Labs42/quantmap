@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import List
 
+from src import ui
 from src.diagnostics import CheckResult, DiagnosticReport, Readiness, Status
 
 logger = logging.getLogger("doctor")
@@ -314,7 +315,7 @@ def check_windows_search() -> CheckResult:
                 "Indexer spikes can cause outlier 'cold' TTFT values.",
                 "Consider pausing Windows Search (WSearch service) during long campaigns."
             )
-    except:
+    except Exception:
         pass
     return CheckResult("Windows Search", Status.PASS, "Not indexed or not interfering")
 
@@ -466,6 +467,10 @@ def run_doctor(
     
     # Print results
     report.print_summary()
+    next_actions = ["quantmap run --campaign <ID> --validate", "quantmap status"]
+    if report.readiness != Readiness.READY:
+        next_actions.insert(0, "quantmap doctor")
+    ui.print_next_actions(next_actions)
     
     return report.readiness != Readiness.BLOCKED # Strictly, any FAIL makes it not successful
 

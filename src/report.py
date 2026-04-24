@@ -55,6 +55,39 @@ _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 
 
+def _recommendation_projection_lines(projection: dict[str, Any]) -> list[str]:
+    """Render the compact ACPM recommendation projection for the summary report."""
+    lines = ["## ACPM Recommendation\n"]
+    if not projection.get("available"):
+        lines.append(
+            f"- **Recommendation authority:** not recorded (`{projection.get('source', 'unknown')}`)"
+        )
+        lines.append("")
+        return lines
+
+    lines.append(f"- **Recommendation status:** `{projection.get('status')}`")
+    lines.append(f"- **Leading config:** `{projection.get('leading_config_id') or 'none'}`")
+    recommended_config_id = projection.get("recommended_config_id")
+    if recommended_config_id:
+        lines.append(f"- **Recommended config:** `{recommended_config_id}`")
+    else:
+        lines.append("- **Recommended config:** No ACPM recommendation issued")
+    lines.append(f"- **Handoff ready:** `{projection.get('handoff_ready')}`")
+    lines.append(
+        f"- **Caveat codes:** {', '.join(projection.get('caveat_codes', [])) or 'none'}"
+    )
+    if projection.get("coverage_class"):
+        lines.append(f"- **Coverage class:** `{projection.get('coverage_class')}`")
+    if projection.get("scope_authority"):
+        lines.append(f"- **Scope authority:** `{projection.get('scope_authority')}`")
+    if projection.get("selected_ngl_values"):
+        values = ", ".join(str(v) for v in projection["selected_ngl_values"])
+        lines.append(f"- **Selected NGL values:** {values}")
+    lines.append(f"- **Source:** `{projection.get('source', 'unknown')}`")
+    lines.append("")
+    return lines
+
+
 def _file_sha256(path: Path) -> str | None:
     try:
         h = hashlib.sha256()
@@ -569,9 +602,14 @@ def _build_markdown(
         ).fetchone()
 
     camp = dict(campaign_row) if campaign_row else {}
-    from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+    from src.trust_identity import (  # noqa: PLC0415
+        load_run_identity,
+        methodology_source_label,
+        recommendation_projection,
+    )
     trust_identity = load_run_identity(campaign_id, db_path)
     snap = trust_identity.start_snapshot
+    recommendation = recommendation_projection(trust_identity)
 
     # -------------------------------------------------------------------------
     # Title and metadata
@@ -1466,6 +1504,8 @@ def _build_markdown(
             sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these params")
         sections.append("")
 
+    sections.extend(_recommendation_projection_lines(recommendation))
+
     # -------------------------------------------------------------------------
     # Methodology note
     # -------------------------------------------------------------------------
@@ -1622,7 +1662,15 @@ def _build_markdown(
             if err:
                 parts.append(f"error={str(err)[:80]}")
             return "; ".join(parts)
-        return "file_present" if p.exists() else "not generated"
+        if p.exists():
+            return "file_present"
+        # No DB row and file absent. campaign-summary.md is written first; peer
+        # artifacts may not yet exist at generation time. Use "pending" for
+        # canonical types so the file does not permanently claim "not generated"
+        # for artifacts that will be present moments after this report is written.
+        _CANONICAL = {ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_RUN_REPORTS,
+                      ARTIFACT_METADATA, ARTIFACT_RAW_TELEMETRY}
+        return "pending" if artifact_type in _CANONICAL else "not generated"
 
     sections.append("\n---\n")
     sections.append("## Campaign Artifacts\n")

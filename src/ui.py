@@ -51,6 +51,117 @@ SYM_INFO: str = "ℹ " if not USE_ASCII else "[i]"
 SYM_RETRY: str = "↺" if not USE_ASCII else "[RETRY]"
 SYM_DIVIDER: str = "━" if not USE_ASCII else "-"
 
+
+def render_acpm_plan_preview(
+    plan_output: "ACPMPlannerOutput",  # noqa: F821
+    target_console: Console | None = None,
+) -> None:
+    """Render a compact ACPM plan preview for operator review.
+
+    plan_output: an ACPMPlannerOutput from acpm_planning.compile_acpm_plan().
+    """
+    console = target_console or get_console()
+    meta = plan_output.planning_metadata
+    scope = plan_output.selected_scope
+    coverage = meta.coverage_policy
+
+    console.print("[bold]ACPM Plan Preview[/bold]")
+    console.print(f"  Campaign:       {meta.source_campaign_ref}")
+    console.print(f"  Profile:        {meta.profile_name}")
+    console.print(f"  Repeat tier:    {plan_output.repeat_tier} → mode={plan_output.run_mode}")
+    console.print(f"  Scope authority: {meta.scope_authority}")
+    console.print(f"  Variable:       {scope.variable}")
+    console.print(
+        f"  Selected:       {len(scope.selected_values)} value(s): {scope.selected_values}"
+    )
+    console.print(
+        f"  Config IDs:     {', '.join(scope.selected_config_ids[:4])}"
+        + (f" +{len(scope.selected_config_ids) - 4} more" if len(scope.selected_config_ids) > 4 else "")
+    )
+    cov_class = coverage.get("ngl_coverage_class", "unknown")
+    console.print(f"  Coverage class: {cov_class}")
+    console.print("")
+
+
+def render_acpm_validate_result(
+    campaign_id: str,
+    profile_id: str,
+    repeat_tier: str,
+    applicability: "ACPMApplicabilityResult",  # noqa: F821
+    profile_info: dict[str, str] | None = None,
+    tier_ok: bool = True,
+    profile_ok: bool = True,
+    campaign_exists: bool = True,
+    target_console: Console | None = None,
+) -> None:
+    """Render ACPM validate check results.
+
+    Args:
+        campaign_id:    the campaign YAML ID
+        profile_id:     the requested profile (e.g. "Balanced")
+        repeat_tier:    the requested repeat tier (e.g. "1x")
+        applicability:  ACPMApplicabilityResult from acpm_planning
+        profile_info:    profile registry entry if profile is valid
+        tier_ok:        repeat tier is a known value
+        profile_ok:     profile_id is in V1_ACPM_PROFILE_IDS
+        campaign_exists: campaign YAML file exists in CONFIGS_DIR/campaigns/
+        target_console: console to render to
+    """
+    console = target_console or get_console()
+
+    def _check(passed: bool, label: str, detail: str = "") -> bool:
+        sym = SYM_OK if passed else SYM_FAIL
+        color = "green" if passed else "red"
+        msg = f"  [{color}]{sym}[/{color}]  {label}"
+        if detail:
+            msg += f"  [dim]— {detail}[/dim]"
+        console.print(msg)
+        return passed
+
+    console.print(f"[bold]ACPM Validate: {campaign_id}[/bold]")
+    console.print("=" * 60)
+    ok = True
+    ok = _check(campaign_exists, "campaign YAML exists", campaign_id) and ok
+    ok = _check(profile_ok, "profile valid", profile_id) and ok
+    if profile_info:
+        ok = _check(True, "profile loads", profile_info.get("display_label", profile_id)) and ok
+    ok = _check(tier_ok, "repeat tier valid", repeat_tier) and ok
+    if applicability.applicable:
+        ok = _check(
+            True,
+            "ACPM-applicable",
+            f"variable={applicability.variable}, {len(applicability.all_values)} values",
+        ) and ok
+        if repeat_tier == "1x":
+            from src.acpm_planning import (  # noqa: PLC0415
+                NGL_SCAFFOLD_1X,
+            )
+            scaffold = [v for v in NGL_SCAFFOLD_1X if v in applicability.all_values]
+            if scaffold:
+                ok = _check(
+                    True,
+                    "scaffold overlap",
+                    f"{len(scaffold)} scaffold values found: {scaffold}",
+                ) and ok
+            else:
+                ok = _check(
+                    False,
+                    "scaffold overlap",
+                    "no scaffold values found in campaign",
+                ) and ok
+    else:
+        ok = _check(
+            False,
+            "ACPM-applicable",
+            f"not applicable: {applicability.reason or 'unknown'}",
+        ) and ok
+    console.print("")
+    if ok:
+        console.print("[green]All ACPM pre-flight checks passed.[/green]")
+    else:
+        console.print("[red]ACPM pre-flight checks failed — fix errors above.[/red]")
+    console.print("")
+
 # ---------------------------------------------------------------------------
 # Unified Console
 # ---------------------------------------------------------------------------
@@ -123,3 +234,55 @@ def format_status(label: str, passed: bool, detail: str = "") -> str:
     if detail:
         msg += f"  [dim]— {detail}[/dim]"
     return msg
+
+
+def print_next_actions(
+    actions: list[str],
+    title: str = "Next actions",
+    target_console: Console | None = None,
+) -> None:
+    """Render a compact, consistent next-step block for operator flows."""
+    if not actions:
+        return
+
+    console = target_console or get_console()
+    console.print(f"[bold]{title}[/bold]")
+    for action in actions:
+        console.print(f"  {SYM_INFO} {action}")
+    console.print("")
+
+
+def render_artifact_block(
+    campaign_id: str,
+    artifacts: list[dict],
+    target_console: Console | None = None,
+) -> None:
+    """Print a compact artifact path/status block for post-run and discovery use.
+
+    artifacts: list of dicts from artifact_paths.get_campaign_artifact_paths().
+    Each entry: artifact_type, filename, path, exists, db_status, sha256.
+    """
+    console = target_console or get_console()
+    console.print(f"\n[bold]Artifacts — {campaign_id}[/bold]")
+    for a in artifacts:
+        atype    = a.get("artifact_type", "")
+        path     = a.get("path")
+        exists   = a.get("exists", False)
+        db_st    = a.get("db_status")
+
+        if db_st == "complete":
+            sym, color, label = SYM_OK,   "green",  "complete"
+        elif db_st and db_st not in ("missing", "pending"):
+            sym, color, label = SYM_WARN, "yellow", db_st
+        elif exists:
+            sym, color, label = SYM_OK,   "green",  "present"
+        else:
+            sym, color, label = SYM_FAIL, "red",    "not found"
+
+        path_str = str(path) if path else "[dim]path unknown[/dim]"
+        console.print(
+            f"  [{color}]{sym}[/{color}] [dim]{atype}[/dim]"
+            f"\n    {path_str}  [{color}]({label})[/{color}]"
+        )
+    console.print("")
+

@@ -214,3 +214,59 @@ def compare_default_report_path(lab_root: Path, campaign_a: str, campaign_b: str
         create=True,
     )
     return compare_dir / "compare.md"
+
+
+def get_campaign_artifact_paths(
+    lab_root: Path,
+    campaign_id: str,
+    db_path: "Path | None" = None,
+) -> list[dict]:
+    """Return canonical artifact path info for a campaign.
+
+    Resolves each of the 4 canonical artifact paths using find_artifact_dir
+    (no model slug required) and optionally enriches with DB-registered status.
+
+    Each entry contains:
+        artifact_type, filename, path (Path | None), exists (bool),
+        db_status (str | None), sha256 (str | None).
+
+    db_path: if provided, DB rows from the artifacts table are loaded and merged.
+    Uses a lazy import of src.trust_identity to avoid circular imports at
+    module load time (trust_identity imports from artifact_paths at top level).
+    """
+    report_dir = find_artifact_dir(lab_root, "reports", campaign_id)
+    meas_dir = find_artifact_dir(lab_root, "measurements", campaign_id)
+
+    db_rows: dict = {}
+    if db_path is not None:
+        try:
+            from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+            rows = load_artifact_summaries(campaign_id, db_path)
+            # rows ordered DESC (newest first); reversed iteration so newest wins.
+            for row in reversed(rows):
+                atype = row.get("artifact_type", "")
+                if atype:
+                    db_rows[atype] = dict(row)
+        except Exception:
+            pass
+
+    _CANONICAL: list[tuple[str, str, "Path | None"]] = [
+        (ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY, report_dir),
+        (ARTIFACT_RUN_REPORTS,      FILENAME_RUN_REPORTS,      report_dir),
+        (ARTIFACT_METADATA,         FILENAME_METADATA,         report_dir),
+        (ARTIFACT_RAW_TELEMETRY,    FILENAME_RAW_TELEMETRY,    meas_dir),
+    ]
+    entries: list[dict] = []
+    for atype, fname, base_dir in _CANONICAL:
+        path = (base_dir / fname) if base_dir is not None else None
+        exists = path.exists() if path is not None else False
+        row = db_rows.get(atype, {})
+        entries.append({
+            "artifact_type": atype,
+            "filename":      fname,
+            "path":          path,
+            "exists":        exists,
+            "db_status":     row.get("status") if row else None,
+            "sha256":        row.get("sha256") if row else None,
+        })
+    return entries
