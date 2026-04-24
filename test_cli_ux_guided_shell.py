@@ -118,7 +118,7 @@ def test_list_output_includes_exact_ids_and_follow_up_guidance(tmp_path, monkeyp
     conn.close()
 
     buf = io.StringIO()
-    test_console = Console(file=buf, force_terminal=False, no_color=True, width=140)
+    test_console = Console(file=buf, force_terminal=False, no_color=True, width=200)
 
     monkeypatch.setattr(runner, "DB_PATH", db_path)
     monkeypatch.setattr(runner, "init_db", lambda _path: None)
@@ -147,7 +147,10 @@ def test_setup_logging_can_skip_console_handler(tmp_path):
             root.removeHandler(handler)
             try:
                 handler.close()
-            except Exception:
+            except Exception:  # pragma: no cover
+                # handler.close() may fail for handlers that are already
+                # closed or that require resources unavailable in test context;
+                # ignore to ensure cleanup always completes.
                 pass
         for handler in old_handlers:
             root.addHandler(handler)

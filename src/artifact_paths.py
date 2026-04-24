@@ -240,14 +240,34 @@ def get_campaign_artifact_paths(
     db_rows: dict = {}
     if db_path is not None:
         try:
-            from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
-            rows = load_artifact_summaries(campaign_id, db_path)
-            # rows ordered DESC (newest first); reversed iteration so newest wins.
+            import sqlite3  # noqa: PLC0415
+            # Query artifact rows directly to avoid a circular import:
+            # trust_identity imports artifact_paths at module level, so importing
+            # trust_identity here (even lazily) creates a cyclic dependency.
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT artifact_type, path, sha256, created_at, status,
+                           producer, error_message, updated_at, verification_source
+                    FROM artifacts
+                    WHERE campaign_id=?
+                    ORDER BY created_at DESC, artifact_type
+                    """,
+                    (campaign_id,),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                rows = []
+            finally:
+                conn.close()
+            # Iterate oldest-first so newest entry wins when same type appears twice.
             for row in reversed(rows):
-                atype = row.get("artifact_type", "")
+                atype = row["artifact_type"] if row["artifact_type"] else ""
                 if atype:
                     db_rows[atype] = dict(row)
-        except Exception:
+        except Exception:  # pragma: no cover — DB unavailable or path invalid
+            # Non-fatal: artifact enrichment is best-effort; path/exists are still returned.
             pass
 
     _CANONICAL: list[tuple[str, str, "Path | None"]] = [

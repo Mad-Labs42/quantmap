@@ -676,7 +676,6 @@ def cmd_acpm_run(args):
         mode_flag=None,
         scope_authority=scope_authority,
         acpm_planning_metadata=planning_metadata,
-        acpm_scoring_profile_name=scoring_profile_name,
     )
     sys.exit(0)
 
