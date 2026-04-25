@@ -49,7 +49,6 @@ _STR_NOT_CAPTURED = "not captured"
 _STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
 _TBL_FIELD_VALUE     = "| Field | Value |"
 _TBL_SEP_FIELD_VALUE = "|-------|-------|"
-_COL_METRIC          = "| Metric |"
 _TBL_METRIC_VALUE    = "| Metric | Value |"
 _KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
