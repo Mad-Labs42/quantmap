@@ -7,7 +7,6 @@ from pathlib import Path
 
 from rich.console import Console
 
-from src.runner import run_campaign
 import src.runner as runner
 
 
@@ -67,7 +66,7 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     with sqlite3.connect(db_path) as conn:
         conn.execute("INSERT INTO campaigns (id, name, created_at) VALUES ('test_camp', 'test_camp', '2026-04-25T12:00:00Z')")
 
-    run_campaign(
+    runner.run_campaign(
         campaign_id="test_camp",
         dry_run=False,
         yolo_mode=yolo_mode,
