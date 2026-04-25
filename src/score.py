@@ -1071,7 +1071,7 @@ def _persist_methodology_snapshot(
     registry_path = Path(getattr(governance, "_METRICS_YAML"))
 
     def _read_text(path: Path) -> str | None:
-        """Read a text file; return empty string on any error."""
+        """Read a text file; return None on any error."""
         try:
             return path.read_text(encoding="utf-8")
         except Exception:
@@ -1303,7 +1303,6 @@ def _log_summary(campaign_id: str, result: dict[str, Any]) -> None:
     passing    = result["passing"]     # rankable only
     eliminated = result["eliminated"]
     unrankable = result.get("unrankable", {})
-    _scores_df = result["scores_df"]  # retained for future log expansion
 
     logger.info("=== SCORING SUMMARY: %s ===", campaign_id)
     logger.info("Total configs:  %d", len(stats))

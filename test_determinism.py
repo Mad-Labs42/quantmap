@@ -1,11 +1,9 @@
 import sys
-import os
 import pytest
 
 print('Starting deterministic test (waiting for pandas to load...)', flush=True)
 
 try:
-    import pandas as pd
     from src.score import rank_overall
 except Exception as e:
     print(f"Error importing: {e}", flush=True)

@@ -228,7 +228,7 @@ class MetricRegistry:
     """
 
     def __init__(self, metrics: dict[str, MetricDefinition]) -> None:
-        """Initialize the ExperimentProfile with validated fields."""
+        """Initialize the registry by storing the provided metric definitions mapping."""
         self._metrics = metrics
 
     def get(self, canonical_name: str) -> MetricDefinition:
@@ -388,7 +388,7 @@ class CurrentMethodologyLoadError(RuntimeError):
     """Raised when current live Registry/Profile files cannot be loaded."""
 
     def __init__(self, component: str, path: Path | None, original: Exception) -> None:
-        """Initialize the MetricRegistry from a metrics mapping."""
+        """Initialize the exception with the failed component name, its path, and the original cause."""
         self.component = component
         self.path = path
         self.original = original
@@ -622,15 +622,15 @@ class _LazyRegistry:
         return self._registry().all_metrics()
 
     def get_rank_bearing(self) -> list[MetricDefinition]:
-        """Return metric names that carry rank-bearing weight."""
+        """Return MetricDefinition objects for all rank-bearing metrics."""
         return self._registry().get_rank_bearing()
 
     def get_gate_capable(self) -> list[MetricDefinition]:
-        """Return metric names that can be used as elimination gates."""
+        """Return MetricDefinition objects for all gate-capable metrics."""
         return self._registry().get_gate_capable()
 
     def get_score_capable(self) -> list[MetricDefinition]:
-        """Return metric names eligible for composite scoring."""
+        """Return MetricDefinition objects for all score-capable metrics."""
         return self._registry().get_score_capable()
 
     def get_required_score_metrics(self) -> frozenset[str]:

@@ -55,35 +55,59 @@ _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 
 
-def _recommendation_projection_lines(projection: dict[str, Any]) -> list[str]:
-    """Render the compact ACPM recommendation projection for the summary report."""
-    lines = ["## ACPM Recommendation\n"]
+def render_recommendation_projection(
+    projection: dict[str, Any], 
+    as_table: bool = False, 
+    header: str | None = None
+) -> list[str]:
+    """Render the compact ACPM recommendation projection."""
+    lines: list[str] = []
+    if header:
+        lines.append(header)
+        
     if not projection.get("available"):
-        lines.append(
-            f"- **Recommendation authority:** not recorded (`{projection.get('source', 'unknown')}`)"
-        )
-        lines.append("")
+        if as_table:
+            lines.append(
+                f"Recommendation authority not recorded for this campaign (`{projection.get('source', 'unknown')}`).\n"
+            )
+        else:
+            lines.append(
+                f"- **Recommendation authority:** not recorded (`{projection.get('source', 'unknown')}`)"
+            )
+            lines.append("")
         return lines
 
-    lines.append(f"- **Recommendation status:** `{projection.get('status')}`")
-    lines.append(f"- **Leading config:** `{projection.get('leading_config_id') or 'none'}`")
+    if as_table:
+        lines.append("| Field | Value |")
+        lines.append("|-------|-------|")
+        def add_line(label: str, value: str) -> None:
+            lines.append(f"| {label} | {value} |")
+    else:
+        def add_line(label: str, value: str) -> None:
+            lines.append(f"- **{label}:** {value}")
+
+    add_line("Recommendation status", f"`{projection.get('status')}`")
+    add_line("Leading config", f"`{projection.get('leading_config_id') or 'none'}`")
+    
     recommended_config_id = projection.get("recommended_config_id")
     if recommended_config_id:
-        lines.append(f"- **Recommended config:** `{recommended_config_id}`")
+        add_line("Recommended config", f"`{recommended_config_id}`")
     else:
-        lines.append("- **Recommended config:** No ACPM recommendation issued")
-    lines.append(f"- **Handoff ready:** `{projection.get('handoff_ready')}`")
-    lines.append(
-        f"- **Caveat codes:** {', '.join(projection.get('caveat_codes', [])) or 'none'}"
-    )
+        add_line("Recommended config", "No ACPM recommendation issued")
+        
+    add_line("Handoff ready", f"`{projection.get('handoff_ready')}`")
+    add_line("Caveat codes", f"{', '.join(projection.get('caveat_codes', [])) or 'none'}")
+    
     if projection.get("coverage_class"):
-        lines.append(f"- **Coverage class:** `{projection.get('coverage_class')}`")
+        add_line("Coverage class", f"`{projection.get('coverage_class')}`")
     if projection.get("scope_authority"):
-        lines.append(f"- **Scope authority:** `{projection.get('scope_authority')}`")
+        add_line("Scope authority", f"`{projection.get('scope_authority')}`")
     if projection.get("selected_ngl_values"):
         values = ", ".join(str(v) for v in projection["selected_ngl_values"])
-        lines.append(f"- **Selected NGL values:** {values}")
-    lines.append(f"- **Source:** `{projection.get('source', 'unknown')}`")
+        add_line("Selected NGL values", values)
+        
+    add_line("Source", f"`{projection.get('source', 'unknown')}`")
+    
     lines.append("")
     return lines
 
@@ -1505,7 +1529,13 @@ def _build_markdown(
             sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these params")
         sections.append("")
 
-    sections.extend(_recommendation_projection_lines(recommendation))
+    sections.extend(
+        render_recommendation_projection(
+            recommendation, 
+            as_table=False, 
+            header="## ACPM Recommendation\n"
+        )
+    )
 
     # -------------------------------------------------------------------------
     # Methodology note

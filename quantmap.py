@@ -580,7 +580,7 @@ def cmd_acpm_validate(args):
             campaign = yaml.safe_load(f)
         applicability = check_campaign_applicability(campaign)
 
-    ui.render_acpm_validate_result(
+    validation_ok = ui.render_acpm_validate_result(
         args.campaign,
         args.profile,
         args.tier,
@@ -591,7 +591,7 @@ def cmd_acpm_validate(args):
         campaign_exists=campaign_exists,
         target_console=console,
     )
-    sys.exit(0 if (campaign_exists and profile_ok and tier_ok and applicability.applicable) else 1)
+    sys.exit(0 if (campaign_exists and profile_ok and tier_ok and applicability.applicable and validation_ok) else 1)
 
 
 def cmd_acpm_run(args):
@@ -637,7 +637,11 @@ def cmd_acpm_run(args):
         console.print("Hint: ACPM only supports campaigns with supported variables.")
         sys.exit(1)
 
-    plan_compiled = compile_acpm_plan(campaign, args.profile, args.tier)
+    try:
+        plan_compiled = compile_acpm_plan(campaign, args.profile, args.tier)
+    except Exception as exc:
+        console.print(f"[red]Plan compilation failed: {exc}[/red]")
+        sys.exit(1)
 
     execution_inputs = plan_compiled.to_execution_inputs()
     run_values = execution_inputs.get("selected_values")

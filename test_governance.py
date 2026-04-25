@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
 
-from src import governance
+
 from src.governance import (
     BUILTIN_REGISTRY, 
     DEFAULT_PROFILE, 
@@ -51,9 +51,7 @@ def test_profile_validation():
     validate_profile_against_registry(prof, reg)
     print("  [PASS] Default profile validated.")
     
-    # Initialize some dummy weights that sum to 1.0 for testing
-    valid_weights = {"warm_tg_median": 1.0}
-    active = ["warm_tg_median"]
+
 
     # Invalid profile — metric mismatch
     bad_prof_data = {

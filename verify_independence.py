@@ -15,14 +15,11 @@ import sys
 from pathlib import Path
 import copy
 import logging
-import numpy as np
-import pandas as pd
 
 # Ensure src is in path
 sys.path.append(str(Path(__file__).parent))
 
 from src import score
-from src import governance
 from src.config import LAB_ROOT
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")

@@ -1304,7 +1304,6 @@ def _run_cycle(
                     server_log = speed_short_path.parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
                 # actually srv["log_file"] was defined inside the `with` block, we might not have it.
                 # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
-                pass
             except Exception:
                 pass
             

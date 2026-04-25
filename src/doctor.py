@@ -315,10 +315,15 @@ def check_windows_search() -> CheckResult:
                 "Indexer spikes can cause outlier 'cold' TTFT values.",
                 "Consider pausing Windows Search (WSearch service) during long campaigns."
             )
-    except Exception:  # pragma: no cover
-        # Non-fatal: WSearch query failure (service absent, access denied) is
-        # acceptable — the check simply reports no interference.
-        pass
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Windows Search probe failed: %s", exc)
+        return CheckResult(
+            "Windows Search",
+            Status.WARN,
+            f"Probe failed: {exc}",
+            "Could not query the WSearch service status — unable to assess indexer interference.",
+            "Verify PowerShell is available and the WSearch service is accessible.",
+        )
     return CheckResult("Windows Search", Status.PASS, "Not indexed or not interfering")
 
 # ---------------------------------------------------------------------------

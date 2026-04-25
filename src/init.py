@@ -8,11 +8,9 @@ Sets up LAB_ROOT, inference paths, and writes the .env configuration.
 import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 from rich.prompt import Prompt, Confirm
 from src import ui
-from src.diagnostics import Status, CheckResult, DiagnosticReport
 
 def run_init():
     """Execute the interactive setup wizard."""
@@ -80,7 +78,7 @@ def run_init():
         if env_path.exists():
             try:
                 env_path.replace(backup_path)
-                console.print(f"[dim]Backed up existing .env to .env.bak[/dim]")
+                console.print("[dim]Backed up existing .env to .env.bak[/dim]")
             except Exception as e:
                 console.print(f"[yellow]Warning: Could not backup .env: {e}[/yellow]")
 
@@ -105,12 +103,12 @@ def run_init():
     success = doctor.run_doctor(server_bin, model_path, lab_root, fix=True)
     
     if success:
-        console.print(f"\n[bold green]Setup Complete![/bold green]")
-        console.print(f"  Run [bold]quantmap status[/bold] for a summary.")
-        console.print(f"  Run [bold]quantmap run --campaign C01[/bold] to start benchmarking.")
+        console.print("\n[bold green]Setup Complete![/bold green]")
+        console.print("  Run [bold]quantmap status[/bold] for a summary.")
+        console.print("  Run [bold]quantmap run --campaign C01[/bold] to start benchmarking.")
     else:
-        console.print(f"\n[bold yellow]Setup complete with warnings.[/bold yellow]")
-        console.print(f"  Review the Doctor output above to ensure the lab is clinical-grade.")
+        console.print("\n[bold yellow]Setup complete with warnings.[/bold yellow]")
+        console.print("  Review the Doctor output above to ensure the lab is clinical-grade.")
 
 if __name__ == "__main__":
     run_init()

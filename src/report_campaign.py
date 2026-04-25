@@ -636,37 +636,12 @@ def _section_methodology(
 
 def _section_recommendation(projection: dict[str, Any]) -> list[str]:
     """Render the compact ACPM recommendation projection for run-reports.md."""
-    lines: list[str] = []
-    lines.append("## Recommendation Authority\n> Type: INTERPRETATION + LIMITATIONS\n")
-    if not projection.get("available"):
-        lines.append(
-            f"Recommendation authority not recorded for this campaign (`{projection.get('source', 'unknown')}`).\n"
-        )
-        return lines
-
-    lines.append(_TBL_FIELD_VALUE)
-    lines.append(_TBL_SEP_FIELD_VALUE)
-    lines.append(f"| Recommendation status | `{projection.get('status')}` |")
-    lines.append(f"| Leading config | `{projection.get('leading_config_id') or 'none'}` |")
-    recommended_config_id = projection.get("recommended_config_id")
-    if recommended_config_id:
-        lines.append(f"| Recommended config | `{recommended_config_id}` |")
-    else:
-        lines.append("| Recommended config | No ACPM recommendation issued |")
-    lines.append(f"| Handoff ready | `{projection.get('handoff_ready')}` |")
-    lines.append(
-        f"| Caveat codes | {', '.join(projection.get('caveat_codes', [])) or 'none'} |"
+    from src.report import render_recommendation_projection  # noqa: PLC0415
+    return render_recommendation_projection(
+        projection,
+        as_table=True,
+        header="## Recommendation Authority\n> Type: INTERPRETATION + LIMITATIONS\n"
     )
-    if projection.get("coverage_class"):
-        lines.append(f"| Coverage class | `{projection.get('coverage_class')}` |")
-    if projection.get("scope_authority"):
-        lines.append(f"| Scope authority | `{projection.get('scope_authority')}` |")
-    if projection.get("selected_ngl_values"):
-        values = ", ".join(str(v) for v in projection["selected_ngl_values"])
-        lines.append(f"| Selected NGL values | {values} |")
-    lines.append(f"| Source | `{projection.get('source', 'unknown')}` |")
-    lines.append("")
-    return lines
 
 
 def _section_primary_results(
@@ -1827,7 +1802,6 @@ def _compute_background_interference(
     update_snapshots   = 0
     indexer_snapshots  = 0
     avscan_snapshots   = 0
-    total_high_cpu_proc_count = 0
     total_tracked_rss_mb = 0.0
     total_tracked_cpu_pct = 0.0
 
@@ -1840,7 +1814,6 @@ def _compute_background_interference(
             indexer_snapshots += 1
         if row["antivirus_scan_active"]:
             avscan_snapshots += 1
-        total_high_cpu_proc_count += row["high_cpu_process_count"] or 0
 
         try:
             procs: list[dict] = json.loads(row["all_notable_procs_json"] or "[]")

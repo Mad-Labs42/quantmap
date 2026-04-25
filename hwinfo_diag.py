@@ -55,7 +55,7 @@ for name in names_to_try:
             print(f"  Signature: 0x{sig:08X}  (expected 0x53695748 = 'HWiS')")
             print(f"  Version: {ver}  Revision: {rev}")
             if sig == 0x53695748:
-                print(f"  ✓ Valid HWiNFO shared memory!")
+                print("  ✓ Valid HWiNFO shared memory!")
                 # Read full header
                 (sig2, version, revision, poll_time,
                  off_sensor, sz_sensor, num_sensor,
@@ -64,7 +64,7 @@ for name in names_to_try:
                 print(f"  sz_sensor={sz_sensor}  sz_reading={sz_reading}")
                 print(f"  Total size needed: {off_reading + sz_reading * num_reading} bytes")
             else:
-                print(f"  ✗ Wrong signature — not HWiNFO data")
+                print("  ✗ Wrong signature — not HWiNFO data")
             k32.UnmapViewOfFile(ctypes.c_void_p(addr))
         else:
             map_err = k32.GetLastError()

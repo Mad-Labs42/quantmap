@@ -119,6 +119,29 @@ def _check_scaffold_overlap(
     )
 
 
+def _render_applicability_check(
+    applicability: "ACPMApplicabilityResult",  # noqa: F821
+    repeat_tier: str,
+    check_fn: Any,
+) -> bool:
+    """Render the ACPM applicability check and optional scaffold overlap."""
+    if applicability.applicable:
+        ok = check_fn(
+            True,
+            "ACPM-applicable",
+            f"variable={applicability.variable}, {len(applicability.all_values)} values",
+        )
+        ok = _check_scaffold_overlap(applicability, repeat_tier, check_fn) and ok
+        return ok
+
+    return check_fn(
+        False,
+        "ACPM-applicable",
+        f"not applicable: {applicability.reason or 'unknown'}",
+    )
+
+
+
 def _run_acpm_validate_checks(
     *,
     campaign_id: str,
@@ -139,19 +162,7 @@ def _run_acpm_validate_checks(
     if profile_info:
         ok = check_fn(True, "profile loads", profile_info.get("display_label", profile_id)) and ok
     ok = check_fn(tier_ok, "repeat tier valid", repeat_tier) and ok
-    if applicability.applicable:
-        ok = check_fn(
-            True,
-            "ACPM-applicable",
-            f"variable={applicability.variable}, {len(applicability.all_values)} values",
-        ) and ok
-        ok = _check_scaffold_overlap(applicability, repeat_tier, check_fn) and ok
-    else:
-        ok = check_fn(
-            False,
-            "ACPM-applicable",
-            f"not applicable: {applicability.reason or 'unknown'}",
-        ) and ok
+    ok = _render_applicability_check(applicability, repeat_tier, check_fn) and ok
     console.print("")
     if ok:
         console.print("[green]All ACPM pre-flight checks passed.[/green]")
@@ -171,7 +182,7 @@ def render_acpm_validate_result(
     profile_ok: bool = True,
     campaign_exists: bool = True,
     target_console: Console | None = None,
-) -> None:
+) -> bool:
     """Render ACPM validate check results.
 
     Args:
@@ -199,7 +210,7 @@ def render_acpm_validate_result(
 
     console.print(f"[bold]ACPM Validate: {campaign_id}[/bold]")
     console.print("=" * 60)
-    _run_acpm_validate_checks(
+    return _run_acpm_validate_checks(
         campaign_id=campaign_id,
         profile_id=profile_id,
         repeat_tier=repeat_tier,

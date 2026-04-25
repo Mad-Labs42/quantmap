@@ -192,7 +192,7 @@ def check_pytest_cov_plugin(root: Path) -> CheckResult:
 
 
 def check_pytest_config_collect(root: Path) -> CheckResult:
-    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "--no-cov"]
+    command = [sys.executable, "-m", "pytest", "-o", "addopts=", "--collect-only", "-q", "--no-cov"]
     try:
         result = run_command(command, cwd=root)
     except subprocess.TimeoutExpired as exc:
