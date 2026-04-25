@@ -44,7 +44,7 @@ def get_methodology(campaign_id: str, db_path: Path) -> dict[str, Any] | None:
     }
 
 def compare_methodologies(id1: str, m1: dict, id2: str, m2: dict) -> bool:
-    """Compare two methodology snapshots and return a diff summary."""
+    """Compare two methodology snapshots and return True if compatible, False if mismatched."""
     ui.print_banner(f"Methodology Audit: {id1} vs {id2}")
     
     v1 = m1.get("version", "unknown")

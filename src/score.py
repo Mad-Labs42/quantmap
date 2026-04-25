@@ -77,23 +77,23 @@ class _LazyGovernanceMapping(Mapping[str, float]):
     """Mapping proxy that loads current governance only when values are used."""
 
     def __init__(self, loader: Callable[[], dict[str, float]]) -> None:
-        """Initialize the lazy set from a callable returning a frozenset."""
+        """Initialize the mapping proxy from a callable returning a dict of metric weights."""
         self._loader = loader
 
     def _data(self) -> dict[str, float]:
-        """Load and cache the underlying frozenset on first access."""
+        """Load and return the underlying weight dict from the loader on each access."""
         return self._loader()
 
     def __getitem__(self, key: str) -> float:
-        """Not supported; raises TypeError."""
+        """Return the weight for the given metric name."""
         return self._data()[key]
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over the metric names in the lazy set."""
+        """Iterate over metric names in the mapping."""
         return iter(self._data())
 
     def __len__(self) -> int:
-        """Return the number of metrics in the lazy set."""
+        """Return the number of metrics in the mapping."""
         return len(self._data())
 
     def __repr__(self) -> str:
@@ -105,23 +105,23 @@ class _LazyGovernanceSet:
     """Set-like proxy for legacy metric constants without import-time loading."""
 
     def __init__(self, loader: Callable[[], frozenset[str]]) -> None:
-        """Initialize the lazy tuple from a callable returning a tuple."""
+        """Initialize the set proxy from a callable returning a frozenset of metric names."""
         self._loader = loader
 
     def _data(self) -> frozenset[str]:
-        """Load and cache the underlying tuple on first access."""
+        """Load and return the underlying frozenset from the loader."""
         return self._loader()
 
     def __contains__(self, value: object) -> bool:
-        """Return True if the metric name is in the tuple."""
+        """Return True if the metric name is in the set."""
         return value in self._data()
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over the metric names in the lazy tuple."""
+        """Iterate over the metric names in the set."""
         return iter(self._data())
 
     def __len__(self) -> int:
-        """Return the number of metrics in the lazy tuple."""
+        """Return the number of metrics in the set."""
         return len(self._data())
 
     def __repr__(self) -> str:
@@ -133,27 +133,27 @@ class _LazyGovernanceTuple:
     """Tuple-like proxy for legacy metric constants without import-time loading."""
 
     def __init__(self, loader: Callable[[], tuple[str, ...]]) -> None:
-        """Initialize the lazy governance set from a callable."""
+        """Initialize the tuple proxy from a callable returning a tuple of metric names."""
         self._loader = loader
 
     def _data(self) -> tuple[str, ...]:
-        """Load and cache the underlying set on first access."""
+        """Load and return the underlying tuple from the loader."""
         return self._loader()
 
     def __contains__(self, value: object) -> bool:
-        """Return True if the metric name is in the set."""
+        """Return True if the metric name is in the tuple."""
         return value in self._data()
 
     def __iter__(self) -> Iterator[str]:
-        """Iterate over the metric names in the lazy governance set."""
+        """Iterate over the metric names in the tuple."""
         return iter(self._data())
 
     def __len__(self) -> int:
-        """Return the number of metrics in the lazy governance set."""
+        """Return the number of metrics in the tuple."""
         return len(self._data())
 
     def __getitem__(self, index: int) -> str:
-        """Return the metric definition for the given name."""
+        """Return the metric name at the given index."""
         return self._data()[index]
 
     def __repr__(self) -> str:

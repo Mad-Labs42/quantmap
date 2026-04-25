@@ -32,6 +32,8 @@ def test_scoring_core() -> CheckResult:
         # Minimal fixture: one config with deterministic warm TG and TTFT values.
         # All required scoring metrics are present so the config is rankable.
         # Designed for I/O-free, RNG-free determinism.
+        # NOTE: valid_warm_request_count must be >= ELIMINATION_FILTERS["min_valid_warm_count"]
+        # (default 10) or the fixture config is eliminated before compute_scores is reached.
         fixture_stats: dict = {
             "fixture_cfg_A": {
                 "warm_tg_median":          10.0,
@@ -44,8 +46,8 @@ def test_scoring_core() -> CheckResult:
                 "thermal_events":            0,
                 "outlier_count":             0,
                 "success_rate":            1.0,
-                "valid_warm_request_count":  5,
-                "requests_total":            6,
+                "valid_warm_request_count": 10,
+                "requests_total":           11,
             }
         }
         profile  = get_default_profile()

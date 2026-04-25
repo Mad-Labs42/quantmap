@@ -72,11 +72,11 @@ def render_compare_markdown(result: CompareResult) -> str:
     lines.append(f"\n## [{_L_DATA}: RECOMMENDATION] Recommendation Authority")
     lines.append("| Field | Campaign A (Baseline) | Campaign B (Subject) |")
     lines.append("| :--- | :--- | :--- |")
-    lines.append(f"| Available | `{rec_a.get('available')}` | `{rec_b.get('available')}` |")
+    lines.append(f"| Available | {'yes' if rec_a.get('available') else 'no'} | {'yes' if rec_b.get('available') else 'no'} |")
     lines.append(f"| Status | `{rec_a.get('status') or 'not recorded'}` | `{rec_b.get('status') or 'not recorded'}` |")
     lines.append(f"| Leading config | `{rec_a.get('leading_config_id') or 'none'}` | `{rec_b.get('leading_config_id') or 'none'}` |")
     lines.append(f"| Recommended config | `{rec_a.get('recommended_config_id') or 'none issued'}` | `{rec_b.get('recommended_config_id') or 'none issued'}` |")
-    lines.append(f"| Handoff ready | `{rec_a.get('handoff_ready')}` | `{rec_b.get('handoff_ready')}` |")
+    lines.append(f"| Handoff ready | {'yes' if rec_a.get('handoff_ready') else 'no'} | {'yes' if rec_b.get('handoff_ready') else 'no'} |")
     lines.append(f"| Coverage class | `{rec_a.get('coverage_class') or 'not recorded'}` | `{rec_b.get('coverage_class') or 'not recorded'}` |")
     lines.append(
         f"| Caveat codes | {', '.join(rec_a.get('caveat_codes', [])) or 'none'} | "
