@@ -228,6 +228,7 @@ class MetricRegistry:
     """
 
     def __init__(self, metrics: dict[str, MetricDefinition]) -> None:
+        """Initialize the registry by storing the provided metric definitions mapping."""
         self._metrics = metrics
 
     def get(self, canonical_name: str) -> MetricDefinition:
@@ -278,12 +279,15 @@ class MetricRegistry:
         )
 
     def __len__(self) -> int:
+        """Return the number of metric definitions in the registry."""
         return len(self._metrics)
 
     def __contains__(self, canonical_name: str) -> bool:
+        """Return True if metric_name is a known metric."""
         return canonical_name in self._metrics
 
     def __repr__(self) -> str:
+        """Return a short debug representation of this registry."""
         return f"MetricRegistry({len(self._metrics)} metrics)"
 
 
@@ -336,6 +340,7 @@ class ExperimentProfile(BaseModel):
     @field_validator("weights")
     @classmethod
     def _weights_sum_to_one(cls, v: dict[str, float]) -> dict[str, float]:
+        """Return True if profile weights sum to approximately 1.0."""
         total = sum(v.values())
         if abs(total - 1.0) > 1e-6:
             raise ValueError(
@@ -383,6 +388,7 @@ class CurrentMethodologyLoadError(RuntimeError):
     """Raised when current live Registry/Profile files cannot be loaded."""
 
     def __init__(self, component: str, path: Path | None, original: Exception) -> None:
+        """Initialize the exception with the failed component name, its path, and the original cause."""
         self.component = component
         self.path = path
         self.original = original
@@ -604,36 +610,47 @@ class _LazyRegistry:
     """Compatibility proxy that avoids loading current Registry at module import."""
 
     def _registry(self) -> MetricRegistry:
+        """Return the backing MetricRegistry instance."""
         return get_builtin_registry()
 
     def get(self, canonical_name: str) -> MetricDefinition:
+        """Return the MetricDefinition for a metric name."""
         return self._registry().get(canonical_name)
 
     def all_metrics(self) -> dict[str, MetricDefinition]:
+        """Return all metric names in the registry."""
         return self._registry().all_metrics()
 
     def get_rank_bearing(self) -> list[MetricDefinition]:
+        """Return MetricDefinition objects for all rank-bearing metrics."""
         return self._registry().get_rank_bearing()
 
     def get_gate_capable(self) -> list[MetricDefinition]:
+        """Return MetricDefinition objects for all gate-capable metrics."""
         return self._registry().get_gate_capable()
 
     def get_score_capable(self) -> list[MetricDefinition]:
+        """Return MetricDefinition objects for all score-capable metrics."""
         return self._registry().get_score_capable()
 
     def get_required_score_metrics(self) -> frozenset[str]:
+        """Return primary (required) scoring metric names."""
         return self._registry().get_required_score_metrics()
 
     def get_optional_score_metrics(self) -> tuple[str, ...]:
+        """Return secondary (optional) scoring metric names."""
         return self._registry().get_optional_score_metrics()
 
     def __len__(self) -> int:
+        """Return the number of metrics in this registry."""
         return len(self._registry())
 
     def __contains__(self, canonical_name: str) -> bool:
+        """Return True if the metric name exists in this registry."""
         return canonical_name in self._registry()
 
     def __repr__(self) -> str:
+        """Return a short debug representation of this registry proxy."""
         return repr(self._registry())
 
 
@@ -641,15 +658,19 @@ class _LazyProfile:
     """Compatibility proxy that avoids loading current Profile at module import."""
 
     def _profile(self) -> ExperimentProfile:
+        """Return the backing ExperimentProfile instance."""
         return get_default_profile()
 
     def __getattr__(self, name: str) -> Any:
+        """Proxy attribute access to the underlying ExperimentProfile."""
         return getattr(self._profile(), name)
 
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """Return a dict representation of this profile."""
         return self._profile().model_dump(*args, **kwargs)
 
     def __repr__(self) -> str:
+        """Return a short debug representation of this profile proxy."""
         return repr(self._profile())
 
 

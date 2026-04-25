@@ -79,6 +79,7 @@ def test_acpm_planner_contract_compiles_only_structural_execution_inputs():
         "scope_authority": "planner",
         "selected_values": [10, 30],
         "selected_config_ids": ["NGL_10", "NGL_30"],
+        "scoring_profile_name": "acpm_balanced_v1",
     }
     assert output.to_planning_metadata_snapshot()["schema_id"] == "quantmap.acpm.planning_metadata"
 

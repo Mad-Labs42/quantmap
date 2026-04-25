@@ -26,6 +26,7 @@ from src.artifact_paths import (
 from src.trust_identity import (
     load_run_identity,
     methodology_source_label,
+    recommendation_projection,
 )
 
 _logger = logging.getLogger(__name__)
@@ -272,6 +273,7 @@ def _write_manifest(
     }
 
     def _manifest_value(val: object) -> str:
+        """Normalize a manifest field value for export."""
         text = str(val)
         if stripped and redaction_root is not None:
             lab_path = str(redaction_root)
@@ -576,6 +578,11 @@ def _build_run_context_summary(
     return summary
 
 
+def _build_recommendation_projection(trust_identity: object) -> dict:
+    """Return the compact recommendation projection for metadata.json."""
+    return recommendation_projection(trust_identity)  # type: ignore[arg-type]
+
+
 def _register_metadata_artifact(
     campaign_id: str,
     db_path: Path,
@@ -589,6 +596,7 @@ def _register_metadata_artifact(
     from src.artifact_paths import ARTIFACT_METADATA  # noqa: PLC0415
 
     def _sha256(p: Path) -> str | None:
+        """Compute SHA-256 hex digest of a file path."""
         try:
             h = hashlib.sha256()
             h.update(p.read_bytes())
@@ -789,6 +797,7 @@ def generate_metadata_json(
                 else trust_identity.sources.get("filter_policy", "unknown")
             ),
         },
+        "recommendation": _build_recommendation_projection(trust_identity),
         "provenance_sources": trust_identity.sources,
         "artifacts":          artifact_inventory,
         "warnings":           warnings_list,

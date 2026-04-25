@@ -9,8 +9,8 @@ used by 'init', 'doctor', and 'self-test'.
 from __future__ import annotations
 
 from enum import Enum, auto
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List
 
 class Status(Enum):
     PASS = auto()
@@ -58,10 +58,12 @@ class DiagnosticReport:
     """A collection of CheckResults that collapses into a final Readiness state."""
     
     def __init__(self, title: str):
+        """Initialize an empty diagnostics collector."""
         self.title = title
         self.results: List[CheckResult] = []
 
     def add(self, result: CheckResult):
+        """Append a diagnostic message to this collector."""
         self.results.append(result)
 
     @property
@@ -73,7 +75,13 @@ class DiagnosticReport:
             return Readiness.WARNINGS
         return Readiness.READY
 
-    def print_summary(self):
+    def print_summary(
+        self,
+        *,
+        ready_label: str = "ENVIRONMENT READY",
+        warnings_label: str = "READY WITH WARNINGS",
+        blocked_label: str = "BLOCKED",
+    ):
         """Standardized CLI summary rendering."""
         from src import ui
         console = ui.get_console()
@@ -93,9 +101,9 @@ class DiagnosticReport:
         
         final = self.readiness
         if final == Readiness.READY:
-            console.print(f"[bold green]{ui.SYM_OK} ENVIRONMENT READY[/bold green]")
+            console.print(f"[bold green]{ui.SYM_OK} {ready_label}[/bold green]")
         elif final == Readiness.WARNINGS:
-            console.print(f"[bold yellow]{ui.SYM_WARN} READY WITH WARNINGS[/bold yellow]")
+            console.print(f"[bold yellow]{ui.SYM_WARN} {warnings_label}[/bold yellow]")
         else:
-            console.print(f"[bold red]{ui.SYM_FAIL} BLOCKED[/bold red]")
+            console.print(f"[bold red]{ui.SYM_FAIL} {blocked_label}[/bold red]")
         console.print("")

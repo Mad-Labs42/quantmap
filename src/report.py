@@ -55,7 +55,65 @@ _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 
 
+def render_recommendation_projection(
+    projection: dict[str, Any], 
+    as_table: bool = False, 
+    header: str | None = None
+) -> list[str]:
+    """Render the compact ACPM recommendation projection."""
+    lines: list[str] = []
+    if header:
+        lines.append(header)
+        
+    if not projection.get("available"):
+        if as_table:
+            lines.append(
+                f"Recommendation authority not recorded for this campaign (`{projection.get('source', 'unknown')}`).\n"
+            )
+        else:
+            lines.append(
+                f"- **Recommendation authority:** not recorded (`{projection.get('source', 'unknown')}`)"
+            )
+            lines.append("")
+        return lines
+
+    if as_table:
+        lines.append("| Field | Value |")
+        lines.append("|-------|-------|")
+        def add_line(label: str, value: str) -> None:
+            lines.append(f"| {label} | {value} |")
+    else:
+        def add_line(label: str, value: str) -> None:
+            lines.append(f"- **{label}:** {value}")
+
+    add_line("Recommendation status", f"`{projection.get('status')}`")
+    add_line("Leading config", f"`{projection.get('leading_config_id') or 'none'}`")
+    
+    recommended_config_id = projection.get("recommended_config_id")
+    if recommended_config_id:
+        add_line("Recommended config", f"`{recommended_config_id}`")
+    else:
+        add_line("Recommended config", "No ACPM recommendation issued")
+        
+    add_line("Handoff ready", f"`{projection.get('handoff_ready')}`")
+    add_line("Caveat codes", f"{', '.join(projection.get('caveat_codes', [])) or 'none'}")
+    
+    if projection.get("coverage_class"):
+        add_line("Coverage class", f"`{projection.get('coverage_class')}`")
+    if projection.get("scope_authority"):
+        add_line("Scope authority", f"`{projection.get('scope_authority')}`")
+    if projection.get("selected_ngl_values"):
+        values = ", ".join(str(v) for v in projection["selected_ngl_values"])
+        add_line("Selected NGL values", values)
+        
+    add_line("Source", f"`{projection.get('source', 'unknown')}`")
+    
+    lines.append("")
+    return lines
+
+
 def _file_sha256(path: Path) -> str | None:
+    """Compute SHA-256 hex digest of a file; return None on any I/O error."""
     try:
         h = hashlib.sha256()
         with path.open("rb") as f:
@@ -569,9 +627,14 @@ def _build_markdown(
         ).fetchone()
 
     camp = dict(campaign_row) if campaign_row else {}
-    from src.trust_identity import load_run_identity, methodology_source_label  # noqa: PLC0415
+    from src.trust_identity import (  # noqa: PLC0415
+        load_run_identity,
+        methodology_source_label,
+        recommendation_projection,
+    )
     trust_identity = load_run_identity(campaign_id, db_path)
     snap = trust_identity.start_snapshot
+    recommendation = recommendation_projection(trust_identity)
 
     # -------------------------------------------------------------------------
     # Title and metadata
@@ -1466,6 +1529,14 @@ def _build_markdown(
             sections.append("- Low TG P10 (<7.0 t/s): hardware limitation for these params")
         sections.append("")
 
+    sections.extend(
+        render_recommendation_projection(
+            recommendation, 
+            as_table=False, 
+            header="## ACPM Recommendation\n"
+        )
+    )
+
     # -------------------------------------------------------------------------
     # Methodology note
     # -------------------------------------------------------------------------
@@ -1610,6 +1681,7 @@ def _build_markdown(
     }
 
     def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
+        """Return a display label for an artifact status string."""
         row = _artifact_rows.get(artifact_type)
         if row:
             status = row.get("status") or _STR_NOT_RECORDED
@@ -1622,7 +1694,15 @@ def _build_markdown(
             if err:
                 parts.append(f"error={str(err)[:80]}")
             return "; ".join(parts)
-        return "file_present" if p.exists() else "not generated"
+        if p.exists():
+            return "file_present"
+        # No DB row and file absent. campaign-summary.md is written first; peer
+        # artifacts may not yet exist at generation time. Use "pending" for
+        # canonical types so the file does not permanently claim "not generated"
+        # for artifacts that will be present moments after this report is written.
+        _CANONICAL = {ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_RUN_REPORTS,
+                      ARTIFACT_METADATA, ARTIFACT_RAW_TELEMETRY}
+        return "pending" if artifact_type in _CANONICAL else "not generated"
 
     sections.append("\n---\n")
     sections.append("## Campaign Artifacts\n")

@@ -75,6 +75,8 @@ class CompareResult:
     winner_a: Optional[Dict[str, Any]] = None
     winner_b: Optional[Dict[str, Any]] = None
     winner_shift_tg_pct: Optional[float] = None
+    recommendation_a: Optional[Dict[str, Any]] = None
+    recommendation_b: Optional[Dict[str, Any]] = None
     
     # Intersection Set (Shared Configs)
     shared_configs: List[ConfigDelta] = field(default_factory=list)
@@ -91,6 +93,7 @@ class CompareResult:
     overall_confidence: str = "medium"
 
     def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable dict representation of this comparison row."""
         return asdict(self)
 
 # ---------------------------------------------------------------------------
@@ -113,6 +116,7 @@ def calculate_significance(delta_pct: float, cv_a: float, cv_b: float) -> str:
     return "low confidence / insufficient evidence"
 
 def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
+    """Fetch campaign metadata from the DB for comparison display."""
     row = conn.execute(
         "SELECT id, name, status, created_at, run_mode FROM campaigns WHERE id=?", 
         (campaign_id,)
@@ -130,6 +134,7 @@ def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
     }
 
 def get_config_scores(conn: Any, campaign_id: str) -> Dict[str, Dict[str, Any]]:
+    """Fetch per-config scores for a campaign from the DB."""
     rows = conn.execute(
         "SELECT * FROM scores WHERE campaign_id=?", (campaign_id,)
     ).fetchall()
@@ -137,16 +142,12 @@ def get_config_scores(conn: Any, campaign_id: str) -> Dict[str, Dict[str, Any]]:
     return {r["config_id"]: dict(r) for r in rows}
 
 def get_eliminations(conn: Any, campaign_id: str) -> Dict[str, str]:
+    """Fetch per-config elimination reasons for a campaign from the DB."""
     rows = conn.execute(
         "SELECT id, elimination_reason FROM configs WHERE campaign_id=? AND status='eliminated'",
         (campaign_id,)
     ).fetchall()
     return {r["id"]: r["elimination_reason"] for r in rows}
-
-def get_start_snapshot(db_path: Path, campaign_id: str) -> Dict[str, Any]:
-    from src.trust_identity import load_run_identity  # noqa: PLC0415
-
-    return load_run_identity(campaign_id, db_path).start_snapshot
 
 def grade_methodology(campaign_a_id: str, campaign_b_id: str, db_path: Path) -> MethodologyResult:
     """Wraps audit_methodology to produce a graded compatibility result."""
@@ -231,8 +232,14 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
         elim_a = get_eliminations(conn, id_a)
         elim_b = get_eliminations(conn, id_b)
         
-    snap_a = get_start_snapshot(db_path, id_a)
-    snap_b = get_start_snapshot(db_path, id_b)
+    from src.trust_identity import load_run_identity, recommendation_projection  # noqa: PLC0415
+
+    identity_a = load_run_identity(id_a, db_path)
+    identity_b = load_run_identity(id_b, db_path)
+    snap_a = identity_a.start_snapshot
+    snap_b = identity_b.start_snapshot
+    recommendation_a = recommendation_projection(identity_a)
+    recommendation_b = recommendation_projection(identity_b)
 
     # 1. Methodology
     meth = grade_methodology(id_a, id_b, db_path)
@@ -357,6 +364,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     gained_in_b = sorted(set(elim_a.keys()) - set(elim_b.keys()))
     
     def count_reasons(elim_dict):
+        """Count elimination reason occurrences across both campaigns."""
         counts = {}
         for r in elim_dict.values():
             counts[r] = counts.get(r, 0) + 1
@@ -378,6 +386,8 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
         winner_a=w_a,
         winner_b=w_b,
         winner_shift_tg_pct=winner_shift_tg_pct,
+        recommendation_a=recommendation_a,
+        recommendation_b=recommendation_b,
         shared_configs=config_deltas,
         median_shared_tg_shift_pct=median_shift,
         lost_in_b=lost_in_b,

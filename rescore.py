@@ -19,14 +19,13 @@ import argparse
 import logging
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv  # type: ignore[import]
 
 load_dotenv()
 
-from src import ui
+from src import ui  # noqa: E402
 
 console = ui.get_console()
 
@@ -55,8 +54,7 @@ def rescore(
     current_input: bool = False,
 ) -> bool:
     """Re-run analysis + scoring + report for one campaign. Returns True on success."""
-    from src.analyze import analyze_campaign
-    from src.score import score_campaign, ELIMINATION_FILTERS
+    from src.score import score_campaign
     from src.report import generate_report
     from src.report_campaign import generate_campaign_report
     from src.db import init_db, get_connection
@@ -202,11 +200,6 @@ def rescore(
         # The score_campaign return dict changed in Phase 3.3/4
         # stats, passing, unrankable, eliminated, scores_df
         stats      = result["stats"]
-        passing    = result["passing"]
-        unrankable = result["unrankable"]
-        eliminated = result["eliminated"]
-        scores_df  = result["scores_df"]
-        winner     = result["winner"]
         
         if not stats:
             logger.error("No stats returned — campaign may not be in database: %s", campaign_id)

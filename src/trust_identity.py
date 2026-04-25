@@ -34,6 +34,7 @@ class MethodologySnapshotError(TrustIdentityError):
 
 
 def _json_loads(raw: str | None, default: Any) -> Any:
+    """Attempt to JSON-decode raw; return default on None, empty, or decode failure."""
     if not raw:
         return default
     try:
@@ -43,6 +44,7 @@ def _json_loads(raw: str | None, default: Any) -> Any:
 
 
 def _fetch_current_methodology(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    """Load the most recent methodology snapshot row for a campaign from the DB."""
     try:
         row = conn.execute(
             """
@@ -132,13 +134,18 @@ class TrustIdentity:
     execution_environment: dict[str, Any]
     sources: dict[str, str]
     filter_policy: dict[str, Any] = None  # type: ignore[assignment]
+    recommendation: dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        """Coerce None fields to empty dicts after dataclass construction."""
         if self.filter_policy is None:
             self.filter_policy = {}
+        if self.recommendation is None:
+            self.recommendation = {}
 
     @property
     def has_snapshot_baseline(self) -> bool:
+        """Return True when the baseline was loaded from a campaign-start snapshot."""
         return self.sources.get("baseline") == "snapshot"
 
 
@@ -185,6 +192,15 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         _ts = filter_policy.get("truth_status", "unknown")
         filter_policy_source = f"legacy_{_ts}"
 
+    recommendation = _json_loads(campaign.get("recommendation_record_json"), {})
+    # Guard: stored JSON may be a non-dict type (list, string, number).
+    # Coerce to {} so subsequent .get() calls do not raise AttributeError.
+    if not isinstance(recommendation, dict):
+        recommendation = {}
+    recommendation_source = (
+        "campaigns.recommendation_record_json" if recommendation else "not_recorded"
+    )
+
     sources = {
         "campaign": "snapshot" if snap.get("campaign_yaml_content") else "legacy_incomplete",
         "baseline": "snapshot" if snap.get("baseline_yaml_content") else (
@@ -196,6 +212,7 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         "telemetry_provider": telemetry_provider.get("source", "unknown"),
         "execution_environment": execution_environment.get("source", "snapshot"),
         "filter_policy": filter_policy_source,
+        "recommendation": recommendation_source,
     }
 
     return TrustIdentity(
@@ -210,7 +227,31 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         execution_environment=execution_environment,
         sources=sources,
         filter_policy=filter_policy,
+        recommendation=recommendation,
     )
+
+
+def recommendation_projection(identity: TrustIdentity) -> dict[str, Any]:
+    """Return the compact consumer projection for persisted recommendation truth."""
+    recommendation = identity.recommendation or {}
+    evidence = recommendation.get("evidence") if isinstance(recommendation, dict) else {}
+    if not isinstance(evidence, dict):
+        evidence = {}
+    available = bool(recommendation)
+    return {
+        "available": available,
+        "status": recommendation.get("status") if available else None,
+        "leading_config_id": recommendation.get("leading_config_id") if available else None,
+        "recommended_config_id": recommendation.get("recommended_config_id") if available else None,
+        "handoff_ready": recommendation.get("handoff_ready") if available else None,
+        "caveat_codes": list(recommendation.get("caveat_codes", [])) if available else [],
+        "coverage_class": evidence.get("coverage_class") if available else None,
+        "scope_authority": evidence.get("scope_authority") if available else None,
+        "selected_ngl_values": list(evidence.get("selected_ngl_values", [])) if available else [],
+        "scoring_profile_name": evidence.get("scoring_profile_name") if available else None,
+        "methodology_snapshot_id": evidence.get("methodology_snapshot_id") if available else None,
+        "source": identity.sources.get("recommendation", "unknown"),
+    }
 
 
 def load_methodology_snapshot(campaign_id: str, db_path: Path) -> dict[str, Any]:
@@ -244,6 +285,7 @@ def methodology_source_label(methodology: dict[str, Any]) -> str:
 
 
 def _registry_from_yaml_content(raw_yaml: str):
+    """Reconstruct a MetricRegistry from a persisted YAML snapshot string."""
     from src import governance  # noqa: PLC0415
 
     raw = yaml.safe_load(raw_yaml) or {}
@@ -256,6 +298,7 @@ def _registry_from_yaml_content(raw_yaml: str):
 
 
 def _profile_from_yaml_content(raw_yaml: str):
+    """Reconstruct an ExperimentProfile from a persisted YAML snapshot string."""
     from src import governance  # noqa: PLC0415
 
     raw = yaml.safe_load(raw_yaml) or {}

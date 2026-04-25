@@ -483,7 +483,7 @@ def list_campaigns() -> None:
     tbl.add_column("Winner", no_wrap=True)
     tbl.add_column("TG (t/s)", justify="right")
     tbl.add_column("Timestamp (UTC)", no_wrap=True)
-    tbl.add_column("Report")
+    tbl.add_column("Report", min_width=20)
 
     status_styles = {
         "complete": "green",
@@ -512,7 +512,9 @@ def list_campaigns() -> None:
         ts_short = (ts or "")[:16].replace("T", " ")  # "2026-03-31 14:22"
         # Prefer canonical new type (campaign_summary_md); fall back to legacy (report_md)
         report_path = report_path_new or report_path_legacy
-        report_display = str(report_path) if report_path else "—"
+        # Show only the filename — full paths overflow the table column width and are
+        # unhelpful at a glance; the filename alone identifies the artifact type.
+        report_display = Path(report_path).name if report_path else "—"
         mode_label = _ML.get(run_mode, run_mode.title()) if run_mode else "—"
         support_tier = "legacy"
         if execution_environment_json:
@@ -537,6 +539,16 @@ def list_campaigns() -> None:
     console.print()
     console.print(tbl)
     console.print()
+
+    from src import ui  # noqa: PLC0415
+    ui.print_next_actions(
+        [
+            "quantmap explain <campaign-id> --evidence",
+            "quantmap compare <campaign-a> <campaign-b>",
+            "quantmap artifacts <campaign-id>",
+        ],
+        target_console=console,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +828,7 @@ def validate_campaign(
     ok = True
 
     def _check(label: str, passed: bool, detail: str = "") -> bool:
+        """Print a pass/fail check line and return the boolean result."""
         status = "[green]PASS[/green]" if passed else "[bold red]FAIL[/bold red]"
         msg = f"  {status}  {label}" + (f"  — {detail}" if detail else "")
         console.print(msg)
@@ -1291,7 +1304,6 @@ def _run_cycle(
                     server_log = speed_short_path.parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
                 # actually srv["log_file"] was defined inside the `with` block, we might not have it.
                 # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
-                pass
             except Exception:
                 pass
             
@@ -1953,9 +1965,12 @@ def run_campaign(
             f"  Requests per cycle:{reqs_per_cycle} (1 cold + {warm_per_cycle} warm){reqs_src}",
             f"  Warm samples/cfg:  {warm_samples}",
             f"  Total requests:    {total_requests}",
+            f"  First value:      {configs[0].get('variable_value') if configs else 'N/A'}",
             f"  Request types:     {', '.join(sorted(request_files.keys()))}",
             f"  Elimination filters: {elimination_filter_summary}",
             "",
+            "  Duration:  estimate unavailable until first request completes.",
+            "  Timing will display after config 1 finishes.",
         ]
         if warm_samples < 20:
             if run_plan.is_custom:
@@ -2821,7 +2836,7 @@ def run_campaign(
 # Logging setup
 # ---------------------------------------------------------------------------
 
-def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: str = "runner") -> None:
+def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: str = "runner", console_logging: bool = True) -> None:
     """Configure logging to both console and file.
 
     log_prefix controls the filename prefix:
@@ -2830,6 +2845,9 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
 
     This makes validate calls distinguishable from real runs by filename
     pattern alone without deleting or collapsing any log files.
+
+    console_logging: when False, the console (StreamHandler) is omitted.
+    Useful for test contexts that want file-only logging.
     """
     # Compatibility: existing callers pass <lab_root>/logs. Derive lab_root from
     # that shape and route to canonical artifacts/logs/... structure.
@@ -2871,12 +2889,13 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
     fh.setFormatter(logging.Formatter(fmt, datefmt))
     root.addHandler(fh)
 
-    # Console handler — INFO and above only
-    ch = logging.StreamHandler()
-    ch.set_name("QuantMap_Console")
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter(fmt, datefmt))
-    root.addHandler(ch)
+    if console_logging:
+        # Console handler — INFO and above only
+        ch = logging.StreamHandler()
+        ch.set_name("QuantMap_Console")
+        ch.setLevel(logging.INFO)
+        ch.setFormatter(logging.Formatter(fmt, datefmt))
+        root.addHandler(ch)
 
     logger.info("Log file: %s", log_file)
 
@@ -2940,6 +2959,7 @@ def _parse_values_arg(raw: str) -> list[int | str]:
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the runner module entry point."""
     parser = argparse.ArgumentParser(
         description="QuantMap campaign runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,

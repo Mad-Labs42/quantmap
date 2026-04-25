@@ -15,14 +15,9 @@ Checks:
 """
 from __future__ import annotations
 
-import io
 import json
-import sqlite3
 import sys
-import tempfile
 import types
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -133,7 +128,6 @@ def test_telemetry_collector_constructor_no_legacy_param(tmp_path):
 def test_telemetry_collector_write_sample_uses_merged_path(tmp_path):
     """_write_sample must write to raw_telemetry_jsonl_path (merged), not a separate file."""
     from src.telemetry import TelemetryCollector, TelemetrySample
-    from dataclasses import asdict
     from datetime import datetime, timezone
 
     db_path = tmp_path / "lab.sqlite"

@@ -22,6 +22,7 @@ logger = logging.getLogger("audit")
 console = ui.get_console()
 
 def get_methodology(campaign_id: str, db_path: Path) -> dict[str, Any] | None:
+    """Load the methodology snapshot for a campaign from the DB."""
     from src.trust_identity import load_run_identity
 
     with get_connection(db_path) as conn:
@@ -43,13 +44,17 @@ def get_methodology(campaign_id: str, db_path: Path) -> dict[str, Any] | None:
     }
 
 def compare_methodologies(id1: str, m1: dict, id2: str, m2: dict) -> bool:
+    """Compare two methodology snapshots and return True if compatible, False if mismatched."""
     ui.print_banner(f"Methodology Audit: {id1} vs {id2}")
     
+    mismatches = 0
+
     v1 = m1.get("version", "unknown")
     v2 = m2.get("version", "unknown")
-    
+
     if v1 != v2:
         console.print(f"[bold red]{ui.SYM_FAIL} Methodology version mismatch:[/bold red] {id1} (v{v1}) vs {id2} (v{v2})")
+        mismatches += 1
     else:
         console.print(f"[bold green]{ui.SYM_OK} Methodology version:[/bold green] v{v1}")
 
@@ -57,7 +62,6 @@ def compare_methodologies(id1: str, m1: dict, id2: str, m2: dict) -> bool:
     refs2 = m2.get("references", {})
     
     all_metrics = sorted(set(refs1.keys()) | set(refs2.keys()))
-    mismatches = 0
     
     from rich.table import Table
     table = Table(box=None if ui.USE_ASCII else None)
@@ -102,6 +106,7 @@ def compare_methodologies(id1: str, m1: dict, id2: str, m2: dict) -> bool:
         return False
 
 def main():
+    """CLI entry point for the audit_methodology tool."""
     parser = argparse.ArgumentParser(description="Audit methodological integrity between two campaigns.")
     parser.add_argument("campaign1", help="First Campaign ID")
     parser.add_argument("campaign2", help="Second Campaign ID")

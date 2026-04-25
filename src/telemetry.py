@@ -687,7 +687,7 @@ def startup_check() -> dict[str, Any]:
         "ABORT: all OK | WARN: %s",
         len(readings),
         "ok" if nvml_ok else "FAIL",
-        {k: v for k, v in report["warn"].items()},
+        dict(report["warn"]),
     )
     return report
 

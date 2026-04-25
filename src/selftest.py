@@ -5,15 +5,15 @@ Deterministic trust suite for toolchain integrity.
 Verifies governance, registry, scoring math, and reporting path.
 """
 
-import sys
+import os
 import tempfile
-import shutil
 import sqlite3
 from pathlib import Path
-from typing import Optional
 
 from src import ui
 from src.diagnostics import Status, CheckResult, DiagnosticReport
+
+_CHECK_SCORING_ENGINE = "Scoring Engine"
 
 def test_registry() -> CheckResult:
     """Verify registry loading and basic definitions."""
@@ -26,23 +26,57 @@ def test_registry() -> CheckResult:
         return CheckResult("Registry Intake", Status.FAIL, f"Registry Load Error: {e}")
 
 def test_scoring_core() -> CheckResult:
-    """Verify scoring logic using hardcoded fixture data."""
+    """Verify scoring logic using hardcoded fixture data produces deterministic output."""
     try:
         from src import score
-        # Dummy data
-        configs = {
-            "c_good": {"warm_tg_median": 20.0, "warm_tg_p10": 18.0, "warm_ttft_p90_ms": 100.0, "success_rate": 1.0, "cv": 0.02, "valid_cycles": 3},
-            "c_bad":  {"warm_tg_median": 5.0,  "warm_tg_p10": 4.5,  "warm_ttft_p90_ms": 800.0, "success_rate": 1.0, "cv": 0.01, "valid_cycles": 3}
+        from src.governance import get_default_profile, get_builtin_registry
+
+        # Minimal fixture: one config with deterministic warm TG and TTFT values.
+        # All required scoring metrics are present so the config is rankable.
+        # Designed for I/O-free, RNG-free determinism.
+        # NOTE: valid_warm_request_count must be >= ELIMINATION_FILTERS["min_valid_warm_count"]
+        # (default 10) or the fixture config is eliminated before compute_scores is reached.
+        fixture_stats: dict = {
+            "fixture_cfg_A": {
+                "warm_tg_median":          10.0,
+                "warm_tg_p10":              9.0,
+                "warm_ttft_median_ms":    150.0,
+                "warm_ttft_p90_ms":       200.0,
+                "cold_ttft_median_ms":   3000.0,
+                "pp_median":              500.0,
+                "warm_tg_cv":             0.02,
+                "thermal_events":            0,
+                "outlier_count":             0,
+                "success_rate":            1.0,
+                "valid_warm_request_count": 10,
+                "requests_total":           11,
+            }
         }
-        
-        # This is a simplified test; real scoring is more involved.
-        # We just want to check if the module is callable and doesn't crash.
-        # Note: real score_campaign needs a DB connection or structured metrics list.
-        # For self-test, we'll just check if we can import and instantiate a basic model.
-        from src.governance import DEFAULT_PROFILE
-        return CheckResult("Scoring Engine", Status.PASS, "Analytical modules imported and ready")
+        profile  = get_default_profile()
+        registry = get_builtin_registry()
+        passing, _elim = score.apply_elimination_filters(fixture_stats)
+        rankable, _ifail, unrankable = score._split_by_rankability(passing, registry)
+        scores_df, _, _, _ = score.compute_scores(
+            rankable, unrankable, fixture_stats, profile, registry, {}
+        )
+        if scores_df.empty or "is_score_winner" not in scores_df.columns:
+            return CheckResult(
+                _CHECK_SCORING_ENGINE,
+                Status.FAIL,
+                "Scoring returned empty DataFrame — scoring pipeline may be broken",
+            )
+        winner_rows = scores_df[scores_df["is_score_winner"] == True]  # noqa: E712
+        winner = winner_rows.index[0] if not winner_rows.empty else None
+        if winner != "fixture_cfg_A":
+            return CheckResult(
+                _CHECK_SCORING_ENGINE,
+                Status.FAIL,
+                f"Scoring regression: expected winner 'fixture_cfg_A', got '{winner}'",
+            )
+        return CheckResult(_CHECK_SCORING_ENGINE, Status.PASS, "Deterministic fixture score verified")
     except Exception as e:
-        return CheckResult("Scoring Engine", Status.FAIL, f"Scoring Logic Error: {e}")
+        return CheckResult(_CHECK_SCORING_ENGINE, Status.FAIL, f"Scoring Logic Error: {e}")
+
 
 def test_persistence_smoke() -> CheckResult:
     """Verify DB write/read path on a temporary database."""
@@ -69,7 +103,6 @@ def test_persistence_smoke() -> CheckResult:
 
 def run_selftest(live: bool = False):
     """Execute the trust suite."""
-    console = ui.get_console()
     ui.print_banner("QuantMap Self-Test — Tool Integrity Suite")
     
     report = DiagnosticReport("Tool Integrity Report")
@@ -89,10 +122,17 @@ def run_selftest(live: bool = False):
     else:
         report.add(CheckResult("Live Path", Status.SKIP, "Live checks disabled (use --live)"))
 
-    report.print_summary()
+    report.print_summary(
+        ready_label="TOOLING READY",
+        warnings_label="TOOLING READY WITH WARNINGS",
+        blocked_label="TOOLING BLOCKED",
+    )
+    ui.print_next_actions([
+        "quantmap doctor",
+        "quantmap run --campaign <ID> --validate",
+    ])
     
     return report.readiness != Status.FAIL
 
-import os
 if __name__ == "__main__":
     run_selftest()

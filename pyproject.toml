@@ -57,8 +57,7 @@ exclude = [
     '(^|[\\/])\.venv([\\/]|$)',
 ]
 
-[tool.pytest.ini_options]
-addopts = "--cov --cov-report=xml:coverage.xml"
+
 
 [tool.coverage.run]
 source = ["src"]
@@ -72,3 +71,13 @@ omit = [
 
 [tool.coverage.report]
 skip_empty = true
+
+[tool.ruff]
+# Exclude non-Python asset directories from ruff's Python linting.
+# configs/ and requests/ contain YAML/JSON files that ruff would
+# otherwise try to parse as Python, generating invalid-syntax errors.
+extend-exclude = [
+    "configs/**/*.yaml",
+    "configs/**/*.yml",
+    "requests/**/*.json",
+]

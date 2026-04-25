@@ -21,6 +21,7 @@ _REPO_ROOT = Path(__file__).parent.parent
 
 
 def _run_git(args: list[str]) -> tuple[str | None, str | None]:
+    """Run a git command and return (stdout, None) on success or (None, error_msg) on failure."""
     try:
         proc = subprocess.run(
             ["git", *args],

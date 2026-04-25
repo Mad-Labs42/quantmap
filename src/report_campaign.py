@@ -47,12 +47,16 @@ _STR_NOT_SET_IN_BASELINE = "not set in baseline"
 _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 _STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
+_TBL_FIELD_VALUE     = "| Field | Value |"
+_TBL_SEP_FIELD_VALUE = "|-------|-------|"
+_TBL_METRIC_VALUE    = "| Metric | Value |"
 _KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
 LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
 
 
 def _file_sha256(path: Path) -> str | None:
+    """Compute SHA-256 hex digest of a file; return None on any I/O error."""
     try:
         h = hashlib.sha256()
         with path.open("rb") as f:
@@ -108,6 +112,7 @@ def _na(val: Any, missing: str = "N/A") -> str:
 
 
 def _quality_label(quality: str | None) -> str:
+    """Map a raw quality token to a human-readable label for reports."""
     return {
         "clean":        "clean",
         "mostly_clean": "mostly clean",
@@ -355,6 +360,7 @@ def _section_header(
     baseline_source: str | None = None,
     trust_identity: Any = None,
 ) -> list[str]:
+    """Render the report title and campaign metadata block."""
     lines: list[str] = []
 
     lines.append(f"# QuantMap Campaign Report — {campaign_id}")
@@ -370,8 +376,8 @@ def _section_header(
     machine  = baseline.get("machine", {})
     model_bl = baseline.get("model",   {})
 
-    lines.append("| Field | Value |")
-    lines.append("|-------|-------|")
+    lines.append(_TBL_FIELD_VALUE)
+    lines.append(_TBL_SEP_FIELD_VALUE)
     lines.append(f"| Campaign ID | `{campaign_id}` |")
     run_mode = camp.get("run_mode") or (
         getattr(run_plan, "run_mode", None) if run_plan else None
@@ -436,6 +442,7 @@ def _section_methodology(
     scores_result: dict[str, Any],
     methodology: dict[str, Any] | None = None,
 ) -> list[str]:
+    """Render the Test Methodology section of the campaign report."""
     lines: list[str] = []
     from src.trust_identity import methodology_source_label  # noqa: PLC0415
     methodology = methodology or {}
@@ -627,6 +634,24 @@ def _section_methodology(
     return lines
 
 
+def _section_recommendation(projection: dict[str, Any]) -> list[str]:
+    """Render the compact ACPM recommendation projection for run-reports.md."""
+    lines: list[str] = [
+        "## Recommendation Authority",
+        "> Type: INTERPRETATION + LIMITATIONS",
+        "",
+    ]
+
+    if not projection:
+        lines.append("_No recommendation projection available._")
+        return lines
+
+    lines.append("```json")
+    lines.append(json.dumps(projection, indent=2, sort_keys=True))
+    lines.append("```")
+    return lines
+
+
 def _section_primary_results(
     scores_result:      dict[str, Any],
     stats:              dict[str, dict[str, Any]],
@@ -635,6 +660,7 @@ def _section_primary_results(
     run_plan:           Any,
     env_agg:            dict[str, Any],
 ) -> list[str]:
+    """Render the Primary Results section with ranking and winner."""
     lines: list[str] = []
     lines.append("## Primary Results\n> Type: Data + Interpretation\n")
 
@@ -942,6 +968,7 @@ def _section_variability(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render the Variability & Reliability section."""
     lines: list[str] = []
     lines.append("## Variability & Reliability\n")
     lines.append(
@@ -1051,6 +1078,7 @@ def _section_environment(
     env_agg:    dict[str, Any],
     stats:      dict[str, dict[str, Any]],
 ) -> list[str]:
+    """Render the Environment Quality section."""
     lines: list[str] = []
     lines.append("## Environment Quality\n> Type: Data + Interpretation\n")
 
@@ -1091,8 +1119,8 @@ def _section_environment(
 
     # Environment overview (always shown when data is available)
     lines.append("### Environment Overview\n")
-    lines.append("| Field | Value |")
-    lines.append("|-------|-------|")
+    lines.append(_TBL_FIELD_VALUE)
+    lines.append(_TBL_SEP_FIELD_VALUE)
     lines.append(f"| Overall assessment confidence | {env_conf_overall.upper()} |")
     lines.append(
         f"| Probe failures (expected but broke at runtime) | "
@@ -1107,7 +1135,7 @@ def _section_environment(
 
     # Campaign-level summary
     lines.append("### Campaign-Level Environment Summary\n")
-    lines.append("| Metric | Value |")
+    lines.append(_TBL_METRIC_VALUE)
     lines.append("|--------|-------|")
     lines.append(f"| Cycles with run_context data | {total_cyc} |")
     lines.append(f"| Clean / mostly clean cycles | {n_clean} ({clean_pct:.0f}%) |")
@@ -1284,13 +1312,17 @@ def _section_concerns_and_warnings(
 
     # ── Section rendering failures (High — report completeness is compromised) ─
     _label_map = {
-        "methodology":     "[METHODOLOGY] Test Protocol",
-        "primary_results": "[DATA] Primary Results",
-        "variability":     "[DATA] Variability & Reliability",
-        "environment":     "[DATA] Environment Quality",
-        "appendix_a":      "Appendix A (Full Config Statistics)",
-        "appendix_b":      "Appendix B (Elimination Details)",
-        "appendix_c":      "Appendix C (Production Commands)",
+        "methodology":          "[METHODOLOGY] Test Protocol",
+        "primary_results":      "[DATA] Primary Results",
+        "recommendation":       "Recommendation Authority",
+        "variability":          "[DATA] Variability & Reliability",
+        "environment":          "[DATA] Environment Quality",
+        "background_interference": "[DATA] Background Process Activity",
+        "appendix_a":           "Appendix A (Full Config Statistics)",
+        "appendix_b":           "Appendix B (Elimination Details)",
+        "appendix_c":           "Appendix C (Production Commands)",
+        "appendix_d":           "Appendix D (Historical & Abandoned Configs)",
+        "supporting_artifacts": "Supporting Evidence",
     }
     for name, err in section_failures:
         label = _label_map.get(name, name)
@@ -1454,6 +1486,7 @@ def _appendix_full_stats(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix A: full per-config statistics table."""
     lines: list[str] = []
     lines.append("## Appendix A: Full Configuration Statistics\n")
     lines.append(
@@ -1530,6 +1563,7 @@ def _appendix_eliminations(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix B: elimination details table."""
     lines: list[str] = []
     lines.append("## Appendix B: Elimination & Forensic Exclusions\n")
 
@@ -1776,7 +1810,6 @@ def _compute_background_interference(
     update_snapshots   = 0
     indexer_snapshots  = 0
     avscan_snapshots   = 0
-    total_high_cpu_proc_count = 0
     total_tracked_rss_mb = 0.0
     total_tracked_cpu_pct = 0.0
 
@@ -1789,7 +1822,6 @@ def _compute_background_interference(
             indexer_snapshots += 1
         if row["antivirus_scan_active"]:
             avscan_snapshots += 1
-        total_high_cpu_proc_count += row["high_cpu_process_count"] or 0
 
         try:
             procs: list[dict] = json.loads(row["all_notable_procs_json"] or "[]")
@@ -2110,7 +2142,7 @@ def _section_background_interference(
 
     # ── F. Hardware Spikes (R5) ──────────────────────────────────────────────
     lines.append("### F. Hardware Conditions\n")
-    lines.append("| Metric | Value |")
+    lines.append(_TBL_METRIC_VALUE)
     lines.append("|--------|-------|")
     cpu_temp_disp = f"{bg['hw_max_cpu_temp']:.1f}°C" if bg["hw_max_cpu_temp"] is not None else "N/A"
     gpu_temp_disp = f"{bg['hw_max_gpu_temp']:.1f}°C" if bg["hw_max_gpu_temp"] is not None else "N/A"
@@ -2185,6 +2217,13 @@ def _section_supporting_artifacts(
     def _artifact_status(artifact_type: str, path: Path) -> str:
         row = artifact_rows.get(artifact_type)
         if not row:
+            if path.exists():
+                return _check(path)
+            # No DB row and file absent. run-reports.md is generated before
+            # metadata.json; show "pending" for canonical types rather than
+            # "missing" which would be stale once the run completes.
+            if artifact_type in _PENDING_TYPES:
+                return "pending"
             return _check(path)
         status = row.get("status") or _STR_NOT_RECORDED
         verification = row.get("verification_source") or _STR_NOT_RECORDED
@@ -2197,11 +2236,19 @@ def _section_supporting_artifacts(
             parts.append(f"error={str(error)[:80]}")
         return "; ".join(parts)
     from src.artifact_paths import (  # noqa: PLC0415
+        ARTIFACT_CAMPAIGN_SUMMARY,
+        ARTIFACT_RUN_REPORTS,
+        ARTIFACT_METADATA,
+        ARTIFACT_RAW_TELEMETRY,
         FILENAME_RAW_TELEMETRY,
         FILENAME_CAMPAIGN_SUMMARY,
         FILENAME_RUN_REPORTS,
         FILENAME_METADATA,
     )
+    _PENDING_TYPES = {
+        ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_RUN_REPORTS,
+        ARTIFACT_METADATA, ARTIFACT_RAW_TELEMETRY,
+    }
     raw_telemetry_jsonl = measurements_dir / FILENAME_RAW_TELEMETRY
     campaign_summary_md = reports_dir / FILENAME_CAMPAIGN_SUMMARY
     run_reports_md      = reports_dir / FILENAME_RUN_REPORTS
@@ -2311,6 +2358,7 @@ def _appendix_production_commands(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix C: production-ready launch commands."""
     lines: list[str] = []
     lines.append("## Appendix C: Resolved Production Commands\n")
     lines.append(
@@ -2400,6 +2448,7 @@ def generate_campaign_report(
     from src.trust_identity import (  # noqa: PLC0415
         load_baseline_for_historical_use,
         load_run_identity,
+        recommendation_projection,
     )
     baseline, baseline_source = load_baseline_for_historical_use(
         campaign_id,
@@ -2408,6 +2457,7 @@ def generate_campaign_report(
         allow_current_input=False,
     )
     trust_identity = load_run_identity(campaign_id, db_path)
+    recommendation = recommendation_projection(trust_identity)
     legacy_results_dir = effective_lab_root / "results" / campaign_id
     model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
     model_identity = infer_model_identity(
@@ -2529,6 +2579,13 @@ def generate_campaign_report(
         logger.warning("report: primary results section failed: %s", exc)
         sections.extend(_section_failure_stub("## Primary Results", exc))
         section_failures.append(("primary_results", str(exc)))
+
+    try:
+        sections.extend(_section_recommendation(recommendation))
+    except Exception as exc:
+        logger.warning("report: recommendation section failed: %s", exc)
+        sections.extend(_section_failure_stub("## Recommendation Authority", exc))
+        section_failures.append(("recommendation", str(exc)))
 
     # Variability & Reliability
     try:

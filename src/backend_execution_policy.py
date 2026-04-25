@@ -28,6 +28,7 @@ class BackendExecutionPolicyError(RuntimeError):
     """Raised when backend execution is blocked by a platform policy boundary."""
 
     def __init__(self, assessment: "BackendExecutionAssessment") -> None:
+        """Initialize the error from a BackendExecutionAssessment, storing it and using assessment.diagnostic as the exception message."""
         self.assessment = assessment
         super().__init__(assessment.diagnostic)
 
@@ -45,9 +46,11 @@ class BackendExecutionAssessment:
 
     @property
     def allowed(self) -> bool:
+        """Return True if the given backend is permitted by this policy."""
         return self.decision == DECISION_ALLOWED
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable dict representation of this policy."""
         return asdict(self)
 
 

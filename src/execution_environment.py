@@ -34,13 +34,16 @@ class ExecutionEnvironment:
     evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable dict of this environment snapshot."""
         return asdict(self)
 
     def to_json(self) -> str:
+        """Serialize this environment snapshot to a JSON string."""
         return json.dumps(self.to_dict(), sort_keys=True)
 
 
 def _read_text(path: str) -> str:
+    """Read a text file; return empty string on any I/O error."""
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
     except Exception:
@@ -145,6 +148,7 @@ def classify_execution_environment() -> ExecutionEnvironment:
 
 
 def execution_environment_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct an ExecutionEnvironment from a DB snapshot dict."""
     raw = snapshot.get("execution_environment_json")
     if raw:
         try:
@@ -166,6 +170,7 @@ def execution_environment_from_snapshot(snapshot: dict[str, Any]) -> dict[str, A
 
 
 def execution_environment_summary_lines(snapshot: dict[str, Any]) -> list[str]:
+    """Return a compact list of summary strings for operator display."""
     env = execution_environment_from_snapshot(snapshot)
     reasons = env.get("degraded_reasons") or []
     reason_text = ", ".join(str(item) for item in reasons) if reasons else "none"
