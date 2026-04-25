@@ -83,9 +83,9 @@ def test_export_recommendation_projection_preserves_authority_fields():
 
 
 def test_campaign_summary_recommendation_lines_keep_leader_and_recommendation_separate():
-    from src.report import _recommendation_projection_lines
+    from src.report import render_recommendation_projection
 
-    lines = _recommendation_projection_lines(
+    lines = render_recommendation_projection(
         {
             "available": True,
             "status": "needs_deeper_validation",
@@ -115,7 +115,7 @@ def test_run_reports_recommendation_section_handles_missing_record_without_fabri
     joined = "\n".join(lines)
 
     assert "Recommendation Authority" in joined
-    assert "not recorded" in joined.lower()
+    assert "not_recorded" in joined.lower()
     assert "best_validated_config" not in joined
 
 

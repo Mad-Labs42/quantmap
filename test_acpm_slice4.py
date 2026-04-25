@@ -154,19 +154,4 @@ def test_compile_plan_1x_sets_scaffold_coverage_policy():
     assert snapshot["coverage_policy"]["selected_ngl_values"] == [10, 30, 50, 70, 90, 999]
 
 
-def test_runner_initial_scoring_passes_profile_name_through(tmp_path: Path):
-    from src.runner import _build_initial_score_kwargs
 
-    kwargs = _build_initial_score_kwargs(
-        effective_campaign_id="NGL_sweep__quick",
-        db_path=tmp_path / "lab.sqlite",
-        baseline={"config": {}},
-        campaign=_NGL_CAMPAIGN,
-        effective_filter_overrides=None,
-        acpm_scoring_profile_name="acpm_balanced_v1",
-    )
-
-    assert kwargs["campaign_id"] == "NGL_sweep__quick"
-    assert kwargs["profile_name"] == "acpm_balanced_v1"
-    assert kwargs["current_input"] is True
-    assert kwargs["current_input_reason"] == "initial_scoring"

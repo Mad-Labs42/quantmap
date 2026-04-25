@@ -72,7 +72,7 @@ def test_new_db_has_effective_filter_policy_json_column(tmp_path: Path) -> None:
 
         version = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
         assert version["version"] == SCHEMA_VERSION
-        assert SCHEMA_VERSION == 14
+        assert SCHEMA_VERSION == 15
 
 
 def test_new_db_effective_filter_policy_json_is_nullable(tmp_path: Path) -> None:
