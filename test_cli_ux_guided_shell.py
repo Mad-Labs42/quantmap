@@ -7,12 +7,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import os
 from rich.console import Console
 
-import src.runner as runner
-
-
 REPO_ROOT = Path(__file__).resolve().parent
+os.environ.setdefault("QUANTMAP_LAB_ROOT", str(REPO_ROOT))
+
+import src.runner as runner
 
 
 def _run_cli(*args: str) -> str:
