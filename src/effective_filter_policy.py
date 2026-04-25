@@ -332,7 +332,7 @@ def _project_inferred_legacy(run_mode: str) -> dict[str, Any]:
         "effective_filters_sha256": None,
         "changed_filter_keys": [],
         "rankability_affecting_keys": [],
-        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "scoring_confirmation": dict(_UNAVAILABLE_SCORING_CONFIRMATION),
         "legacy_reader": {
             "label": "legacy_inferred_limited",
             "inferred_from": [f"campaigns.run_mode={run_mode}"],
@@ -351,7 +351,7 @@ def _project_unknown_legacy() -> dict[str, Any]:
         "effective_filters_sha256": None,
         "changed_filter_keys": [],
         "rankability_affecting_keys": [],
-        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "scoring_confirmation": dict(_UNAVAILABLE_SCORING_CONFIRMATION),
         "legacy_reader": {
             "label": _POL_LEGACY_UNKNOWN,
             "inferred_from": [],
@@ -397,7 +397,7 @@ def _project_reconstructed_legacy(
         "effective_filters_sha256": canonical_json_sha256(effective) if effective else None,
         "changed_filter_keys": changed,
         "rankability_affecting_keys": rankability,
-        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "scoring_confirmation": dict(_UNAVAILABLE_SCORING_CONFIRMATION),
         "legacy_reader": {
             "label": _POL_LEGACY_RECONSTRUCTED,
             "inferred_from": [
