@@ -1,10 +1,8 @@
-import sys
 import pytest
-
-print('Starting deterministic test (waiting for pandas to load...)', flush=True)
 
 from src.score import rank_overall
 
+print('Starting deterministic test (waiting for pandas to load...)', flush=True)
 print('\nImports complete! Testing Tie Breakers for Determinism...', flush=True)
 
 def _run_case(desc, passing_dict):

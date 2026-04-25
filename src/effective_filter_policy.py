@@ -26,22 +26,43 @@ from typing import Any, Mapping
 SCHEMA_ID = "quantmap.effective_filter_policy"
 SCHEMA_VERSION = 1
 
+_AUTH_CAMPAIGN_YAML = "campaign_yaml"
+_AUTH_EXECUTION_MODE = "execution_mode"
+_AUTH_METHODOLOGY_PROFILE = "methodology_profile"
+_AUTH_LEGACY_READER = "legacy_reader"
+
+_MOD_CAMPAIGN_OVERRIDE = "campaign_override"
+
+_POL_USER_DIRECTED_CUSTOM = "user_directed_sparse_custom"
+_POL_DEPTH_RELAXATION = "depth_required_relaxation"
+_POL_PROFILE_DEFAULT = "profile_default"
+_POL_LEGACY_UNKNOWN = "legacy_unknown"
+_POL_LEGACY_RECONSTRUCTED = "legacy_reconstructed"
+
+_KEY_MIN_VALID_WARM_COUNT = "min_valid_warm_count"
+
+_UNAVAILABLE_SCORING_CONFIRMATION: dict[str, Any] = {
+    "status": "unavailable",
+    "score_effective_filters_sha256": None,
+    "confirmed_at_utc": None,
+}
+
 VALID_TRUTH_STATUS = frozenset({"explicit", "reconstructed", "inferred_limited", "unknown"})
 VALID_POLICY_ID = frozenset({
-    "profile_default",
-    "user_directed_sparse_custom",
-    "depth_required_relaxation",
+    _POL_PROFILE_DEFAULT,
+    _POL_USER_DIRECTED_CUSTOM,
+    _POL_DEPTH_RELAXATION,
     "acpm_exception",
-    "legacy_reconstructed",
-    "legacy_unknown",
+    _POL_LEGACY_RECONSTRUCTED,
+    _POL_LEGACY_UNKNOWN,
 })
-VALID_POLICY_MODIFIERS = frozenset({"campaign_override", "acpm_exception_reference"})
+VALID_POLICY_MODIFIERS = frozenset({_MOD_CAMPAIGN_OVERRIDE, "acpm_exception_reference"})
 VALID_FINAL_AUTHORITY = frozenset({
-    "methodology_profile",
-    "execution_mode",
-    "campaign_yaml",
+    _AUTH_METHODOLOGY_PROFILE,
+    _AUTH_EXECUTION_MODE,
+    _AUTH_CAMPAIGN_YAML,
     "acpm_governed_exception",
-    "legacy_reader",
+    _AUTH_LEGACY_READER,
     "unknown",
 })
 VALID_SCORING_CONFIRMATION_STATUS = frozenset({"not_confirmed", "confirmed", "mismatch", "unavailable"})
@@ -95,20 +116,20 @@ def build_override_layers(
     if mode_overrides:
         if run_mode == "custom":
             layer_id = "mode_custom_sparse_floor"
-            policy_effect = "user_directed_sparse_custom"
+            policy_effect = _POL_USER_DIRECTED_CUSTOM
             reason = "legacy custom user-directed sparse subset compatibility"
         elif run_mode == "quick":
             layer_id = "mode_quick_depth_floor"
-            policy_effect = "depth_required_relaxation"
+            policy_effect = _POL_DEPTH_RELAXATION
             reason = "quick mode single-cycle depth requires relaxed sample floor"
         else:
             layer_id = f"mode_{run_mode}_filter"
-            policy_effect = "depth_required_relaxation"
+            policy_effect = _POL_DEPTH_RELAXATION
             reason = f"{run_mode} mode filter override"
 
         layers.append({
             "layer_id": layer_id,
-            "authority": "execution_mode",
+            "authority": _AUTH_EXECUTION_MODE,
             "source": "run_plan.filter_overrides",
             "source_id": run_mode,
             "policy_effect": policy_effect,
@@ -120,10 +141,10 @@ def build_override_layers(
     if yaml_overrides:
         layers.append({
             "layer_id": "campaign_yaml_override",
-            "authority": "campaign_yaml",
+            "authority": _AUTH_CAMPAIGN_YAML,
             "source": "campaign.elimination_overrides",
             "source_id": "campaign_yaml",
-            "policy_effect": "campaign_override",
+            "policy_effect": _MOD_CAMPAIGN_OVERRIDE,
             "overrides": yaml_overrides,
             "reason": "campaign YAML elimination_overrides",
         })
@@ -135,6 +156,26 @@ def build_override_layers(
 # Policy classification helpers
 # ---------------------------------------------------------------------------
 
+def _get_yaml_changes(
+    override_layers: list[dict[str, Any]],
+    base_gates: Mapping[str, Any],
+) -> dict[str, Any]:
+    yaml_layer = next(
+        (lay for lay in override_layers if lay["authority"] == _AUTH_CAMPAIGN_YAML),
+        None,
+    )
+    if not yaml_layer:
+        return {}
+    return {
+        k: v
+        for k, v in (yaml_layer.get("overrides") or {}).items()
+        if base_gates.get(k) != v or any(
+            lay.get("overrides", {}).get(k) != v
+            for lay in override_layers
+            if lay["authority"] == _AUTH_EXECUTION_MODE
+        )
+    }
+
 def _classify_policy(
     override_layers: list[dict[str, Any]],
     base_gates: Mapping[str, Any],
@@ -142,60 +183,42 @@ def _classify_policy(
 ) -> tuple[str, list[str], str, list[str]]:
     """Return (policy_id, policy_modifiers, final_authority, authority_chain)."""
     authorities = [layer["authority"] for layer in override_layers]
-    has_execution_mode = "execution_mode" in authorities
-    has_campaign_yaml = "campaign_yaml" in authorities
+    has_execution_mode = _AUTH_EXECUTION_MODE in authorities
+    has_campaign_yaml = _AUTH_CAMPAIGN_YAML in authorities
 
     # Determine primary policy_id from the first (lowest-precedence) non-YAML layer.
     mode_layer = next(
-        (lay for lay in override_layers if lay["authority"] == "execution_mode"),
+        (lay for lay in override_layers if lay["authority"] == _AUTH_EXECUTION_MODE),
         None,
     )
     if mode_layer is None:
-        policy_id = "profile_default"
+        policy_id = _POL_PROFILE_DEFAULT
     else:
         effect = mode_layer.get("policy_effect", "")
-        if effect == "user_directed_sparse_custom":
-            policy_id = "user_directed_sparse_custom"
+        if effect == _POL_USER_DIRECTED_CUSTOM:
+            policy_id = _POL_USER_DIRECTED_CUSTOM
         else:
-            policy_id = "depth_required_relaxation"
+            policy_id = _POL_DEPTH_RELAXATION
 
     policy_modifiers: list[str] = []
     if has_campaign_yaml:
-        policy_modifiers.append("campaign_override")
+        policy_modifiers.append(_MOD_CAMPAIGN_OVERRIDE)
 
     # Authority chain: always starts with methodology_profile
-    authority_chain: list[str] = ["methodology_profile"]
+    authority_chain: list[str] = [_AUTH_METHODOLOGY_PROFILE]
     if has_execution_mode:
-        authority_chain.append("execution_mode")
+        authority_chain.append(_AUTH_EXECUTION_MODE)
     if has_campaign_yaml:
-        authority_chain.append("campaign_yaml")
+        authority_chain.append(_AUTH_CAMPAIGN_YAML)
 
     # Final authority is the highest-precedence layer that actually changed a key,
     # or methodology_profile if no layer changed anything.
-    if has_campaign_yaml:
-        yaml_layer = next(
-            (lay for lay in override_layers if lay["authority"] == "campaign_yaml"),
-            None,
-        )
-        yaml_changes = {
-            k: v
-            for k, v in (yaml_layer.get("overrides") or {}).items()
-            if base_gates.get(k) != v or any(
-                lay.get("overrides", {}).get(k) != v
-                for lay in override_layers
-                if lay["authority"] == "execution_mode"
-            )
-        }
-        if yaml_changes:
-            final_authority = "campaign_yaml"
-        elif has_execution_mode:
-            final_authority = "execution_mode"
-        else:
-            final_authority = "methodology_profile"
+    if has_campaign_yaml and _get_yaml_changes(override_layers, base_gates):
+        final_authority = _AUTH_CAMPAIGN_YAML
     elif has_execution_mode:
-        final_authority = "execution_mode"
+        final_authority = _AUTH_EXECUTION_MODE
     else:
-        final_authority = "methodology_profile"
+        final_authority = _AUTH_METHODOLOGY_PROFILE
 
     return policy_id, policy_modifiers, final_authority, authority_chain
 
@@ -289,6 +312,100 @@ def build_effective_filter_policy(
 # Legacy projection (trust_identity seam for null rows)
 # ---------------------------------------------------------------------------
 
+def _project_inferred_legacy(run_mode: str) -> dict[str, Any]:
+    if run_mode == "custom":
+        inferred: dict[str, float] = {_KEY_MIN_VALID_WARM_COUNT: 1}
+        notes = ["Inferred from legacy run_mode=custom convention; min_valid_warm_count likely 1"]
+    else:
+        inferred = {_KEY_MIN_VALID_WARM_COUNT: 3}
+        notes = ["Inferred from legacy run_mode=quick convention; min_valid_warm_count likely 3"]
+        
+    return {
+        "truth_status": "inferred_limited",
+        "policy_id": _POL_LEGACY_UNKNOWN,
+        "policy_modifiers": [],
+        "final_policy_authority": _AUTH_LEGACY_READER,
+        "authority_chain": [_AUTH_LEGACY_READER],
+        "effective_filters": inferred,
+        "effective_filters_sha256": None,
+        "changed_filter_keys": [],
+        "rankability_affecting_keys": [],
+        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "legacy_reader": {
+            "label": "legacy_inferred_limited",
+            "inferred_from": [f"campaigns.run_mode={run_mode}"],
+            "notes": notes,
+        },
+    }
+
+def _project_unknown_legacy() -> dict[str, Any]:
+    return {
+        "truth_status": "unknown",
+        "policy_id": _POL_LEGACY_UNKNOWN,
+        "policy_modifiers": [],
+        "final_policy_authority": "unknown",
+        "authority_chain": ["unknown"],
+        "effective_filters": None,
+        "effective_filters_sha256": None,
+        "changed_filter_keys": [],
+        "rankability_affecting_keys": [],
+        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "legacy_reader": {
+            "label": _POL_LEGACY_UNKNOWN,
+            "inferred_from": [],
+            "notes": ["No persisted methodology gates or run-plan override evidence"],
+        },
+    }
+
+def _project_reconstructed_legacy(
+    gates: dict[str, float],
+    filter_overrides: dict[str, float],
+    yaml_overrides: dict[str, float],
+    cap_quality: str,
+) -> dict[str, Any]:
+    effective: dict[str, float] = dict(gates)
+    effective.update(filter_overrides)
+    effective.update(yaml_overrides)
+    has_yaml = bool(yaml_overrides)
+
+    if gates and cap_quality in ("complete",):
+        truth_status = "reconstructed"
+    else:
+        truth_status = "inferred_limited"
+
+    changed = [k for k, v in effective.items() if gates.get(k) != v]
+    rankability = [k for k in changed if k in ELIMINATION_KEY_SET]
+
+    notes: list[str] = ["Reconstructed from persisted methodology gates and run_plan.filter_overrides"]
+    if has_yaml:
+        notes.append("campaign YAML elimination_overrides applied")
+    if cap_quality not in ("complete",):
+        notes.append(f"methodology capture quality: {cap_quality}")
+
+    return {
+        "truth_status": truth_status,
+        "policy_id": _POL_LEGACY_RECONSTRUCTED,
+        "policy_modifiers": [_MOD_CAMPAIGN_OVERRIDE] if has_yaml else [],
+        "final_policy_authority": _AUTH_CAMPAIGN_YAML if has_yaml else _AUTH_LEGACY_READER,
+        "authority_chain": (
+            [_AUTH_METHODOLOGY_PROFILE, _AUTH_LEGACY_READER]
+            + ([_AUTH_CAMPAIGN_YAML] if has_yaml else [])
+        ),
+        "effective_filters": effective,
+        "effective_filters_sha256": canonical_json_sha256(effective) if effective else None,
+        "changed_filter_keys": changed,
+        "rankability_affecting_keys": rankability,
+        "scoring_confirmation": _UNAVAILABLE_SCORING_CONFIRMATION,
+        "legacy_reader": {
+            "label": _POL_LEGACY_RECONSTRUCTED,
+            "inferred_from": [
+                "methodology_snapshots.gates_json",
+                "run_plan_json.filter_overrides",
+            ],
+            "notes": notes,
+        },
+    }
+
 def project_legacy_filter_policy(
     methodology: Mapping[str, Any],
     run_plan: Mapping[str, Any],
@@ -312,88 +429,7 @@ def project_legacy_filter_policy(
     # No persisted evidence — can we infer from run_mode convention?
     if no_gates and no_overrides:
         if run_mode in ("custom", "quick"):
-            if run_mode == "custom":
-                inferred: dict[str, float] = {"min_valid_warm_count": 1}
-                notes = ["Inferred from legacy run_mode=custom convention; min_valid_warm_count likely 1"]
-            else:
-                inferred = {"min_valid_warm_count": 3}
-                notes = ["Inferred from legacy run_mode=quick convention; min_valid_warm_count likely 3"]
-            return {
-                "truth_status": "inferred_limited",
-                "policy_id": "legacy_unknown",
-                "policy_modifiers": [],
-                "final_policy_authority": "legacy_reader",
-                "authority_chain": ["legacy_reader"],
-                "effective_filters": inferred,
-                "effective_filters_sha256": None,
-                "changed_filter_keys": [],
-                "rankability_affecting_keys": [],
-                "scoring_confirmation": {"status": "unavailable", "score_effective_filters_sha256": None, "confirmed_at_utc": None},
-                "legacy_reader": {
-                    "label": "legacy_inferred_limited",
-                    "inferred_from": [f"campaigns.run_mode={run_mode}"],
-                    "notes": notes,
-                },
-            }
-        return {
-            "truth_status": "unknown",
-            "policy_id": "legacy_unknown",
-            "policy_modifiers": [],
-            "final_policy_authority": "unknown",
-            "authority_chain": ["unknown"],
-            "effective_filters": None,
-            "effective_filters_sha256": None,
-            "changed_filter_keys": [],
-            "rankability_affecting_keys": [],
-            "scoring_confirmation": {"status": "unavailable", "score_effective_filters_sha256": None, "confirmed_at_utc": None},
-            "legacy_reader": {
-                "label": "legacy_unknown",
-                "inferred_from": [],
-                "notes": ["No persisted methodology gates or run-plan override evidence"],
-            },
-        }
+            return _project_inferred_legacy(run_mode)
+        return _project_unknown_legacy()
 
-    # Reconstruct from available persisted evidence
-    effective: dict[str, float] = dict(gates)
-    effective.update(filter_overrides)
-    effective.update(yaml_overrides)
-    has_yaml = bool(yaml_overrides)
-
-    # truth_status: reconstructed only when gates quality is sufficient
-    if gates and cap_quality in ("complete",):
-        truth_status = "reconstructed"
-    else:
-        truth_status = "inferred_limited"
-
-    changed = [k for k, v in effective.items() if gates.get(k) != v]
-    rankability = [k for k in changed if k in ELIMINATION_KEY_SET]
-
-    notes: list[str] = ["Reconstructed from persisted methodology gates and run_plan.filter_overrides"]
-    if has_yaml:
-        notes.append("campaign YAML elimination_overrides applied")
-    if cap_quality not in ("complete",):
-        notes.append(f"methodology capture quality: {cap_quality}")
-
-    return {
-        "truth_status": truth_status,
-        "policy_id": "legacy_reconstructed",
-        "policy_modifiers": ["campaign_override"] if has_yaml else [],
-        "final_policy_authority": "campaign_yaml" if has_yaml else "legacy_reader",
-        "authority_chain": (
-            ["methodology_profile", "legacy_reader"]
-            + (["campaign_yaml"] if has_yaml else [])
-        ),
-        "effective_filters": effective,
-        "effective_filters_sha256": canonical_json_sha256(effective) if effective else None,
-        "changed_filter_keys": changed,
-        "rankability_affecting_keys": rankability,
-        "scoring_confirmation": {"status": "unavailable", "score_effective_filters_sha256": None, "confirmed_at_utc": None},
-        "legacy_reader": {
-            "label": "legacy_reconstructed",
-            "inferred_from": [
-                "methodology_snapshots.gates_json",
-                "run_plan_json.filter_overrides",
-            ],
-            "notes": notes,
-        },
-    }
+    return _project_reconstructed_legacy(gates, filter_overrides, yaml_overrides, cap_quality)
