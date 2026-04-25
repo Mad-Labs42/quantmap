@@ -12,6 +12,15 @@ import src.runner as runner
 
 
 def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
+    import sys
+    import types
+
+    fake_server = types.SimpleNamespace(
+        SERVER_BIN="fake-server",
+        MODEL_PATH="fake-model"
+    )
+    monkeypatch.setitem(sys.modules, "src.server", fake_server)
+
     buf = io.StringIO()
     test_console = Console(file=buf, force_terminal=False, no_color=True, width=200)
 
