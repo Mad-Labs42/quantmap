@@ -3,11 +3,7 @@ import pytest
 
 print('Starting deterministic test (waiting for pandas to load...)', flush=True)
 
-try:
-    from src.score import rank_overall
-except Exception as e:
-    print(f"Error importing: {e}", flush=True)
-    sys.exit(1)
+from src.score import rank_overall
 
 print('\nImports complete! Testing Tie Breakers for Determinism...', flush=True)
 

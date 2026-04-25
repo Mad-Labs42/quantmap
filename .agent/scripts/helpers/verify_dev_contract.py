@@ -205,7 +205,7 @@ def check_pytest_config_collect(root: Path) -> CheckResult:
     classification = classify_pytest_failure(result)
     raise ContractError(
         f"{classification} during pytest collection with coverage disabled. "
-        f"Exit code: {result.returncode}. stderr tail: {tail(result.stderr)}"
+        f"Exit code: {result.returncode}.\nstdout tail: {tail(result.stdout)}\nstderr tail: {tail(result.stderr)}"
     )
 
 
