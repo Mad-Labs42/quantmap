@@ -119,6 +119,48 @@ def _check_scaffold_overlap(
     )
 
 
+def _run_acpm_validate_checks(
+    *,
+    campaign_id: str,
+    profile_id: str,
+    repeat_tier: str,
+    applicability: "ACPMApplicabilityResult",  # noqa: F821
+    profile_info: "dict | None",
+    tier_ok: bool,
+    profile_ok: bool,
+    campaign_exists: bool,
+    check_fn: "Any",
+    console: "Console",
+) -> bool:
+    """Run all ACPM pre-flight check lines and return True if all pass."""
+    ok = True
+    ok = check_fn(campaign_exists, "campaign YAML exists", campaign_id) and ok
+    ok = check_fn(profile_ok, "profile valid", profile_id) and ok
+    if profile_info:
+        ok = check_fn(True, "profile loads", profile_info.get("display_label", profile_id)) and ok
+    ok = check_fn(tier_ok, "repeat tier valid", repeat_tier) and ok
+    if applicability.applicable:
+        ok = check_fn(
+            True,
+            "ACPM-applicable",
+            f"variable={applicability.variable}, {len(applicability.all_values)} values",
+        ) and ok
+        ok = _check_scaffold_overlap(applicability, repeat_tier, check_fn) and ok
+    else:
+        ok = check_fn(
+            False,
+            "ACPM-applicable",
+            f"not applicable: {applicability.reason or 'unknown'}",
+        ) and ok
+    console.print("")
+    if ok:
+        console.print("[green]All ACPM pre-flight checks passed.[/green]")
+    else:
+        console.print("[red]ACPM pre-flight checks failed — fix errors above.[/red]")
+    console.print("")
+    return ok
+
+
 def render_acpm_validate_result(
     campaign_id: str,
     profile_id: str,
@@ -157,31 +199,18 @@ def render_acpm_validate_result(
 
     console.print(f"[bold]ACPM Validate: {campaign_id}[/bold]")
     console.print("=" * 60)
-    ok = True
-    ok = _check(campaign_exists, "campaign YAML exists", campaign_id) and ok
-    ok = _check(profile_ok, "profile valid", profile_id) and ok
-    if profile_info:
-        ok = _check(True, "profile loads", profile_info.get("display_label", profile_id)) and ok
-    ok = _check(tier_ok, "repeat tier valid", repeat_tier) and ok
-    if applicability.applicable:
-        ok = _check(
-            True,
-            "ACPM-applicable",
-            f"variable={applicability.variable}, {len(applicability.all_values)} values",
-        ) and ok
-        ok = _check_scaffold_overlap(applicability, repeat_tier, _check) and ok
-    else:
-        ok = _check(
-            False,
-            "ACPM-applicable",
-            f"not applicable: {applicability.reason or 'unknown'}",
-        ) and ok
-    console.print("")
-    if ok:
-        console.print("[green]All ACPM pre-flight checks passed.[/green]")
-    else:
-        console.print("[red]ACPM pre-flight checks failed — fix errors above.[/red]")
-    console.print("")
+    _run_acpm_validate_checks(
+        campaign_id=campaign_id,
+        profile_id=profile_id,
+        repeat_tier=repeat_tier,
+        applicability=applicability,
+        profile_info=profile_info,
+        tier_ok=tier_ok,
+        profile_ok=profile_ok,
+        campaign_exists=campaign_exists,
+        check_fn=_check,
+        console=console,
+    )
 
 # ---------------------------------------------------------------------------
 # Unified Console

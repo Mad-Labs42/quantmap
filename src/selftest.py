@@ -13,6 +13,8 @@ from pathlib import Path
 from src import ui
 from src.diagnostics import Status, CheckResult, DiagnosticReport
 
+_CHECK_SCORING_ENGINE = "Scoring Engine"
+
 def test_registry() -> CheckResult:
     """Verify registry loading and basic definitions."""
     try:
@@ -59,7 +61,7 @@ def test_scoring_core() -> CheckResult:
         )
         if scores_df.empty or "is_score_winner" not in scores_df.columns:
             return CheckResult(
-                "Scoring Engine",
+                _CHECK_SCORING_ENGINE,
                 Status.FAIL,
                 "Scoring returned empty DataFrame — scoring pipeline may be broken",
             )
@@ -67,13 +69,13 @@ def test_scoring_core() -> CheckResult:
         winner = winner_rows.index[0] if not winner_rows.empty else None
         if winner != "fixture_cfg_A":
             return CheckResult(
-                "Scoring Engine",
+                _CHECK_SCORING_ENGINE,
                 Status.FAIL,
                 f"Scoring regression: expected winner 'fixture_cfg_A', got '{winner}'",
             )
-        return CheckResult("Scoring Engine", Status.PASS, "Deterministic fixture score verified")
+        return CheckResult(_CHECK_SCORING_ENGINE, Status.PASS, "Deterministic fixture score verified")
     except Exception as e:
-        return CheckResult("Scoring Engine", Status.FAIL, f"Scoring Logic Error: {e}")
+        return CheckResult(_CHECK_SCORING_ENGINE, Status.FAIL, f"Scoring Logic Error: {e}")
 
 
 def test_persistence_smoke() -> CheckResult:

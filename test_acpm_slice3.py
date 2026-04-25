@@ -112,8 +112,9 @@ def test_gates_match_shared_floor():
 def test_warm_ttft_p90_weight_is_zero():
     for yaml_name in _ACPM_YAML_NAMES.values():
         profile = load_profile(yaml_name)
-        assert profile.weights["warm_ttft_p90_ms"] == 0.0, (
-            f"{yaml_name}: warm_ttft_p90_ms weight is {profile.weights['warm_ttft_p90_ms']}, expected 0.0"
+        weight = profile.weights["warm_ttft_p90_ms"]
+        assert abs(weight) < 1e-9, (
+            f"{yaml_name}: warm_ttft_p90_ms weight is {weight}, expected 0.0"
         )
 
 

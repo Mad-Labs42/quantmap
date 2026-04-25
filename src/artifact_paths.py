@@ -261,6 +261,28 @@ def _load_artifact_db_rows(db_path: "Path | None", campaign_id: str) -> dict:
         return {}
 
 
+
+def _resolve_artifact_path(
+    row: dict,
+    base_dir: "Path | None",
+    fname: str,
+) -> "tuple[Path | None, bool]":
+    """Resolve a single artifact path from a DB row or filesystem fallback.
+
+    Prefers the DB-registered path (row['path']) when present and non-empty,
+    avoiding model-slug ambiguity when the same campaign_id exists under
+    multiple model directories. Falls back to base_dir / fname when no DB path
+    is available.
+
+    Returns (path, exists) tuple.
+    """
+    db_path_str = row.get("path") if row else None
+    if db_path_str:
+        resolved: "Path | None" = Path(db_path_str)
+        return resolved, resolved.exists()
+    fallback = (base_dir / fname) if base_dir is not None else None
+    return fallback, (fallback.exists() if fallback is not None else False)
+
 def get_campaign_artifact_paths(
     lab_root: Path,
     campaign_id: str,
@@ -296,17 +318,7 @@ def get_campaign_artifact_paths(
     entries: list[dict] = []
     for atype, fname, base_dir in _CANONICAL:
         row = db_rows.get(atype, {})
-        # Prefer DB-registered path when available and non-empty: it identifies
-        # the exact file that was produced, avoiding model-slug ambiguity when
-        # the same campaign_id exists under multiple model directories.
-        db_path_str = row.get("path") if row else None
-        if db_path_str:
-            path: "Path | None" = Path(db_path_str)
-            exists = path.exists()
-        else:
-            # Fallback: construct from filesystem discovery
-            path = (base_dir / fname) if base_dir is not None else None
-            exists = path.exists() if path is not None else False
+        path, exists = _resolve_artifact_path(row, base_dir, fname)
         entries.append({
             "artifact_type": atype,
             "filename":      fname,

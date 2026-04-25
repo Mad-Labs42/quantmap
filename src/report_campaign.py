@@ -47,6 +47,10 @@ _STR_NOT_SET_IN_BASELINE = "not set in baseline"
 _STR_NOT_RECORDED = "not recorded"
 _STR_NOT_CAPTURED = "not captured"
 _STR_NOT_IN_METHODOLOGY = "not in methodology snapshot"
+_TBL_FIELD_VALUE     = "| Field | Value |"
+_TBL_SEP_FIELD_VALUE = "|-------|-------|"
+_COL_METRIC          = "| Metric |"
+_TBL_METRIC_VALUE    = "| Metric | Value |"
 _KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
 LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
@@ -373,8 +377,8 @@ def _section_header(
     machine  = baseline.get("machine", {})
     model_bl = baseline.get("model",   {})
 
-    lines.append("| Field | Value |")
-    lines.append("|-------|-------|")
+    lines.append(_TBL_FIELD_VALUE)
+    lines.append(_TBL_SEP_FIELD_VALUE)
     lines.append(f"| Campaign ID | `{campaign_id}` |")
     run_mode = camp.get("run_mode") or (
         getattr(run_plan, "run_mode", None) if run_plan else None
@@ -641,8 +645,8 @@ def _section_recommendation(projection: dict[str, Any]) -> list[str]:
         )
         return lines
 
-    lines.append("| Field | Value |")
-    lines.append("|-------|-------|")
+    lines.append(_TBL_FIELD_VALUE)
+    lines.append(_TBL_SEP_FIELD_VALUE)
     lines.append(f"| Recommendation status | `{projection.get('status')}` |")
     lines.append(f"| Leading config | `{projection.get('leading_config_id') or 'none'}` |")
     recommended_config_id = projection.get("recommended_config_id")
@@ -1133,8 +1137,8 @@ def _section_environment(
 
     # Environment overview (always shown when data is available)
     lines.append("### Environment Overview\n")
-    lines.append("| Field | Value |")
-    lines.append("|-------|-------|")
+    lines.append(_TBL_FIELD_VALUE)
+    lines.append(_TBL_SEP_FIELD_VALUE)
     lines.append(f"| Overall assessment confidence | {env_conf_overall.upper()} |")
     lines.append(
         f"| Probe failures (expected but broke at runtime) | "
@@ -1149,7 +1153,7 @@ def _section_environment(
 
     # Campaign-level summary
     lines.append("### Campaign-Level Environment Summary\n")
-    lines.append("| Metric | Value |")
+    lines.append(_TBL_METRIC_VALUE)
     lines.append("|--------|-------|")
     lines.append(f"| Cycles with run_context data | {total_cyc} |")
     lines.append(f"| Clean / mostly clean cycles | {n_clean} ({clean_pct:.0f}%) |")
@@ -2158,7 +2162,7 @@ def _section_background_interference(
 
     # ── F. Hardware Spikes (R5) ──────────────────────────────────────────────
     lines.append("### F. Hardware Conditions\n")
-    lines.append("| Metric | Value |")
+    lines.append(_TBL_METRIC_VALUE)
     lines.append("|--------|-------|")
     cpu_temp_disp = f"{bg['hw_max_cpu_temp']:.1f}°C" if bg["hw_max_cpu_temp"] is not None else "N/A"
     gpu_temp_disp = f"{bg['hw_max_gpu_temp']:.1f}°C" if bg["hw_max_gpu_temp"] is not None else "N/A"

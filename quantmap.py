@@ -178,6 +178,13 @@ def _print_path_resolution_error(context: str, exc: Exception) -> None:
 def _blocked_label(value: EnvPath) -> str:
     return f"blocked ({value.message})"
 
+# ---------------------------------------------------------------------------
+# Shared CLI string constants (SonarCloud: avoid duplicated literals)
+# ---------------------------------------------------------------------------
+_CLI_NEXT_VALIDATE    = "quantmap run --campaign <ID> --validate"
+_CLI_ARG_CAMPAIGN_ID  = "Campaign ID"
+_CLI_ARG_ACPM_PROFILE = "ACPM profile (Balanced, T/S, TTFT)"
+
 def cmd_run(args):
     """Execute a benchmark campaign."""
     # Maps to src.runner.run_campaign or src.runner.validate_campaign
@@ -330,20 +337,20 @@ def cmd_status(args):
     if final == Readiness.READY:
         console.print(f"  [green]{ui.SYM_OK} Environment Ready[/green]")
         ui.print_next_actions([
-            "quantmap run --campaign <ID> --validate",
+            _CLI_NEXT_VALIDATE,
             "quantmap list",
         ])
     elif final == Readiness.WARNINGS:
         console.print(f"  [yellow]{ui.SYM_WARN} Ready with Warnings (run 'quantmap doctor' for details)[/yellow]")
         ui.print_next_actions([
             "quantmap doctor",
-            "quantmap run --campaign <ID> --validate",
+            _CLI_NEXT_VALIDATE,
         ])
     else:
         console.print(f"  [red]{ui.SYM_FAIL} BLOCKED (run 'quantmap doctor' to diagnose)[/red]")
         ui.print_next_actions([
             "quantmap doctor",
-            "quantmap run --campaign <ID> --validate",
+            _CLI_NEXT_VALIDATE,
         ])
 
     console.print("")
@@ -957,7 +964,7 @@ def main():
         epilog=ARTIFACTS_EPILOG,
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    artifacts_parser.add_argument("campaign", help="Campaign ID")
+    artifacts_parser.add_argument("campaign", help=_CLI_ARG_CAMPAIGN_ID)
     artifacts_parser.add_argument("--db", type=Path, help="Path to lab.sqlite override")
     artifacts_parser.set_defaults(func=cmd_artifacts)
 
@@ -984,8 +991,8 @@ def main():
         help="Preview an ACPM run plan without executing",
         description="Compile and preview the effective ACPM plan for a campaign/profile/tier combination without running it.",
     )
-    acpm_plan_parser.add_argument("--campaign", required=True, help="Campaign ID")
-    acpm_plan_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_plan_parser.add_argument("--campaign", required=True, help=_CLI_ARG_CAMPAIGN_ID)
+    acpm_plan_parser.add_argument("--profile", required=True, help=_CLI_ARG_ACPM_PROFILE)
     acpm_plan_parser.add_argument(
         "--tier",
         default="1x",
@@ -998,8 +1005,8 @@ def main():
         help="Validate ACPM inputs without executing",
         description="Check that a campaign, profile, and repeat tier combination is valid for ACPM planning.",
     )
-    acpm_validate_parser.add_argument("--campaign", required=True, help="Campaign ID")
-    acpm_validate_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_validate_parser.add_argument("--campaign", required=True, help=_CLI_ARG_CAMPAIGN_ID)
+    acpm_validate_parser.add_argument("--profile", required=True, help=_CLI_ARG_ACPM_PROFILE)
     acpm_validate_parser.add_argument(
         "--tier",
         default="1x",
@@ -1012,8 +1019,8 @@ def main():
         help="Execute an ACPM-guided campaign",
         description="Compile an ACPM plan and execute it via the runner.",
     )
-    acpm_run_parser.add_argument("--campaign", required=True, help="Campaign ID")
-    acpm_run_parser.add_argument("--profile", required=True, help="ACPM profile (Balanced, T/S, TTFT)")
+    acpm_run_parser.add_argument("--campaign", required=True, help=_CLI_ARG_CAMPAIGN_ID)
+    acpm_run_parser.add_argument("--profile", required=True, help=_CLI_ARG_ACPM_PROFILE)
     acpm_run_parser.add_argument(
         "--tier",
         default="1x",
