@@ -636,12 +636,20 @@ def _section_methodology(
 
 def _section_recommendation(projection: dict[str, Any]) -> list[str]:
     """Render the compact ACPM recommendation projection for run-reports.md."""
-    from src.report import render_recommendation_projection  # noqa: PLC0415
-    return render_recommendation_projection(
-        projection,
-        as_table=True,
-        header="## Recommendation Authority\n> Type: INTERPRETATION + LIMITATIONS\n"
-    )
+    lines: list[str] = [
+        "## Recommendation Authority",
+        "> Type: INTERPRETATION + LIMITATIONS",
+        "",
+    ]
+
+    if not projection:
+        lines.append("_No recommendation projection available._")
+        return lines
+
+    lines.append("```json")
+    lines.append(json.dumps(projection, indent=2, sort_keys=True))
+    lines.append("```")
+    return lines
 
 
 def _section_primary_results(
