@@ -316,9 +316,11 @@ def _project_inferred_legacy(run_mode: str) -> dict[str, Any]:
     if run_mode == "custom":
         inferred: dict[str, float] = {_KEY_MIN_VALID_WARM_COUNT: 1}
         notes = ["Inferred from legacy run_mode=custom convention; min_valid_warm_count likely 1"]
-    else:
+    elif run_mode == "quick":
         inferred = {_KEY_MIN_VALID_WARM_COUNT: 3}
         notes = ["Inferred from legacy run_mode=quick convention; min_valid_warm_count likely 3"]
+    else:
+        raise ValueError(f"Unsupported legacy inferred run_mode: {run_mode!r}")
         
     return {
         "truth_status": "inferred_limited",
