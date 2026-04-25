@@ -24,13 +24,55 @@ def test_registry() -> CheckResult:
         return CheckResult("Registry Intake", Status.FAIL, f"Registry Load Error: {e}")
 
 def test_scoring_core() -> CheckResult:
-    """Verify scoring logic using hardcoded fixture data."""
+    """Verify scoring logic using hardcoded fixture data produces deterministic output."""
     try:
-        from src import score  # noqa: F401
-        from src.governance import DEFAULT_PROFILE  # noqa: F401
-        return CheckResult("Scoring Engine", Status.PASS, "Analytical modules imported and ready")
+        from src import score
+        from src.governance import get_default_profile, get_builtin_registry
+
+        # Minimal fixture: one config with deterministic warm TG and TTFT values.
+        # All required scoring metrics are present so the config is rankable.
+        # Designed for I/O-free, RNG-free determinism.
+        fixture_stats: dict = {
+            "fixture_cfg_A": {
+                "warm_tg_median":          10.0,
+                "warm_tg_p10":              9.0,
+                "warm_ttft_median_ms":    150.0,
+                "warm_ttft_p90_ms":       200.0,
+                "cold_ttft_median_ms":   3000.0,
+                "pp_median":              500.0,
+                "warm_tg_cv":             0.02,
+                "thermal_events":            0,
+                "outlier_count":             0,
+                "success_rate":            1.0,
+                "valid_warm_request_count":  5,
+                "requests_total":            6,
+            }
+        }
+        profile  = get_default_profile()
+        registry = get_builtin_registry()
+        passing, _elim = score.apply_elimination_filters(fixture_stats)
+        rankable, _ifail, unrankable = score._split_by_rankability(passing, registry)
+        scores_df, _, _, _ = score.compute_scores(
+            rankable, unrankable, fixture_stats, profile, registry, {}
+        )
+        if scores_df.empty or "is_score_winner" not in scores_df.columns:
+            return CheckResult(
+                "Scoring Engine",
+                Status.FAIL,
+                "Scoring returned empty DataFrame — scoring pipeline may be broken",
+            )
+        winner_rows = scores_df[scores_df["is_score_winner"] == True]  # noqa: E712
+        winner = winner_rows.index[0] if not winner_rows.empty else None
+        if winner != "fixture_cfg_A":
+            return CheckResult(
+                "Scoring Engine",
+                Status.FAIL,
+                f"Scoring regression: expected winner 'fixture_cfg_A', got '{winner}'",
+            )
+        return CheckResult("Scoring Engine", Status.PASS, "Deterministic fixture score verified")
     except Exception as e:
         return CheckResult("Scoring Engine", Status.FAIL, f"Scoring Logic Error: {e}")
+
 
 def test_persistence_smoke() -> CheckResult:
     """Verify DB write/read path on a temporary database."""

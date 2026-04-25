@@ -273,6 +273,7 @@ def _write_manifest(
     }
 
     def _manifest_value(val: object) -> str:
+        """Normalize a manifest field value for export."""
         text = str(val)
         if stripped and redaction_root is not None:
             lab_path = str(redaction_root)
@@ -595,6 +596,7 @@ def _register_metadata_artifact(
     from src.artifact_paths import ARTIFACT_METADATA  # noqa: PLC0415
 
     def _sha256(p: Path) -> str | None:
+        """Compute SHA-256 hex digest of a file path."""
         try:
             h = hashlib.sha256()
             h.update(p.read_bytes())

@@ -80,6 +80,7 @@ _ACPM_PROFILE_REGISTRY: dict[str, dict[str, str]] = {
 
 
 def get_acpm_profile_info(profile_id: str) -> dict[str, str]:
+    """Return registry entry for an ACPM profile ID; raise ValueError if unknown."""
     if profile_id not in _ACPM_PROFILE_REGISTRY:
         raise ValueError(
             f"Unknown ACPM profile ID {profile_id!r}. "
@@ -92,6 +93,7 @@ def load_acpm_scoring_profile(
     profile_id: str,
     profiles_dir: Path | None = None,
 ) -> Any:
+    """Load and validate the governance ExperimentProfile for an ACPM profile ID."""
     from src.governance import load_profile, load_registry, validate_profile_against_registry
 
     info = get_acpm_profile_info(profile_id)
@@ -102,6 +104,7 @@ def load_acpm_scoring_profile(
 
 
 def _reject_shadow_truth_fields(value: Any) -> None:
+    """Recursively raise ValueError if any dict key is a forbidden shadow-truth field."""
     if isinstance(value, dict):
         for key, child in value.items():
             key_text = str(key)
@@ -127,6 +130,7 @@ class ACPMApplicabilityResult:
 
 
 def _validate_int_values(values: list[Any]) -> list[int]:
+    """Validate campaign values as a list of positive ints; raise ValueError if invalid."""
     if len(values) < 2:
         raise ValueError("ACPM applicability requires at least two campaign values")
     normalized: list[int] = []
@@ -140,6 +144,7 @@ def _validate_int_values(values: list[Any]) -> list[int]:
 
 
 def _config_id_for_value(campaign_id: str, value: int) -> str:
+    """Derive a deterministic config ID from a campaign ID and a single integer value."""
     value_text = (
         str(value)
         .replace(".", "p")
@@ -294,6 +299,7 @@ class ACPMSelectedScope:
     selected_config_ids: list[str]
 
     def __post_init__(self) -> None:
+        """Validate that variable is non-empty after construction."""
         if not self.variable:
             raise ValueError("selected scope requires a variable")
 
@@ -344,6 +350,7 @@ class ACPMPlanningMetadata:
         _reject_shadow_truth_fields(self.coverage_policy)
 
     def to_snapshot_dict(self) -> dict[str, Any]:
+        """Return a serialisable dict representation for DB persistence."""
         return {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
@@ -372,6 +379,7 @@ class ACPMPlannerOutput:
     scope_authority: str = SCOPE_AUTHORITY_PLANNER
 
     def __post_init__(self) -> None:
+        """Validate run_mode, scope_authority, and cross-field consistency."""
         if self.run_mode not in _ALLOWED_RUN_MODES:
             raise ValueError(
                 f"run_mode must be one of {sorted(_ALLOWED_RUN_MODES)}, got {self.run_mode!r}"
@@ -388,6 +396,7 @@ class ACPMPlannerOutput:
             )
 
     def to_execution_inputs(self) -> dict[str, Any]:
+        """Return the compact execution-layer input dict derived from this plan."""
         return {
             "run_mode": self.run_mode,
             "scope_authority": self.scope_authority,
@@ -399,4 +408,5 @@ class ACPMPlannerOutput:
         }
 
     def to_planning_metadata_snapshot(self) -> dict[str, Any]:
+        """Return the planning metadata as a snapshot dict for DB persistence."""
         return self.planning_metadata.to_snapshot_dict()

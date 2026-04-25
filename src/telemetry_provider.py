@@ -62,13 +62,16 @@ class TelemetryProviderEvidence:
     notes: list[str] = field(default_factory=list)
 
     def provider_identity_json(self) -> str:
+        """Return the provider identity as a JSON string."""
         return json.dumps([asdict(item) for item in self.provider_identity], sort_keys=True)
 
     def capabilities_json(self) -> str:
+        """Return provider capabilities as a JSON string."""
         return json.dumps([asdict(item) for item in self.capabilities], sort_keys=True)
 
 
 def _provider_status(available: bool, *, platform_name: str, provider_id: str) -> str:
+    """Return a status string for the provider evidence block."""
     if available:
         return STATUS_AVAILABLE
     if provider_id == "hwinfo" and platform_name != "win32":
@@ -188,6 +191,7 @@ def build_provider_evidence(
 
 
 def _loads_json_list(raw: Any) -> list[dict[str, Any]]:
+    """Decode a JSON string to a list; return [] on failure."""
     if not raw:
         return []
     if isinstance(raw, list):
@@ -238,6 +242,7 @@ def provider_evidence_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def provider_evidence_label(snapshot: dict[str, Any]) -> str:
+    """Return a short display label for provider evidence source."""
     evidence = provider_evidence_from_snapshot(snapshot)
     quality = evidence.get("capture_quality") or QUALITY_UNKNOWN
     source = evidence.get("source")

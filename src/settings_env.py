@@ -27,6 +27,7 @@ class EnvPath:
 
     @property
     def available(self) -> bool:
+        """Return True if the environment is properly configured."""
         return self.path is not None and self.status == "available"
 
 
@@ -40,6 +41,7 @@ class LabPaths:
 
     @property
     def db_path(self) -> Path:
+        """Return the resolved database path from environment config."""
         return self.db_dir / "lab.sqlite"
 
 

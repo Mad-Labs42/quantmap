@@ -89,6 +89,7 @@ def _recommendation_projection_lines(projection: dict[str, Any]) -> list[str]:
 
 
 def _file_sha256(path: Path) -> str | None:
+    """Compute SHA-256 hex digest of a file; return None on any I/O error."""
     try:
         h = hashlib.sha256()
         with path.open("rb") as f:
@@ -1650,6 +1651,7 @@ def _build_markdown(
     }
 
     def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
+        """Return a display label for an artifact status string."""
         row = _artifact_rows.get(artifact_type)
         if row:
             status = row.get("status") or _STR_NOT_RECORDED

@@ -137,6 +137,7 @@ def get_campaign_briefing(campaign_id: str, db_path: Path, evidence_mode: bool =
         logger.debug("Could not load trust methodology context for briefing: %s", exc)
 
     def _attach_trust_context(briefing: Briefing) -> Briefing:
+        """Attach trust identity context to an explain output dict."""
         briefing.watchlist.append(f"Methodology evidence: {methodology_label}")
         briefing.evidence_lines.extend(trust_evidence_lines)
         if methodology_label != "snapshot_complete":

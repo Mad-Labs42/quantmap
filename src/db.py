@@ -814,6 +814,7 @@ class ClosingConnection(sqlite3.Connection):
     file descriptors and Windows file locks during long multi-step pipelines.
     """
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """Commit or rollback the connection context manager on exit."""
         try:
             super().__exit__(exc_type, exc_val, exc_tb)
         finally:

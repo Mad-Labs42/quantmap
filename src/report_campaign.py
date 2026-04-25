@@ -53,6 +53,7 @@ LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().paren
 
 
 def _file_sha256(path: Path) -> str | None:
+    """Compute SHA-256 hex digest of a file; return None on any I/O error."""
     try:
         h = hashlib.sha256()
         with path.open("rb") as f:
@@ -108,6 +109,7 @@ def _na(val: Any, missing: str = "N/A") -> str:
 
 
 def _quality_label(quality: str | None) -> str:
+    """Map a raw quality token to a human-readable label for reports."""
     return {
         "clean":        "clean",
         "mostly_clean": "mostly clean",
@@ -355,6 +357,7 @@ def _section_header(
     baseline_source: str | None = None,
     trust_identity: Any = None,
 ) -> list[str]:
+    """Render the report title and campaign metadata block."""
     lines: list[str] = []
 
     lines.append(f"# QuantMap Campaign Report — {campaign_id}")
@@ -436,6 +439,7 @@ def _section_methodology(
     scores_result: dict[str, Any],
     methodology: dict[str, Any] | None = None,
 ) -> list[str]:
+    """Render the Test Methodology section of the campaign report."""
     lines: list[str] = []
     from src.trust_identity import methodology_source_label  # noqa: PLC0415
     methodology = methodology or {}
@@ -670,6 +674,7 @@ def _section_primary_results(
     run_plan:           Any,
     env_agg:            dict[str, Any],
 ) -> list[str]:
+    """Render the Primary Results section with ranking and winner."""
     lines: list[str] = []
     lines.append("## Primary Results\n> Type: Data + Interpretation\n")
 
@@ -977,6 +982,7 @@ def _section_variability(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render the Variability & Reliability section."""
     lines: list[str] = []
     lines.append("## Variability & Reliability\n")
     lines.append(
@@ -1086,6 +1092,7 @@ def _section_environment(
     env_agg:    dict[str, Any],
     stats:      dict[str, dict[str, Any]],
 ) -> list[str]:
+    """Render the Environment Quality section."""
     lines: list[str] = []
     lines.append("## Environment Quality\n> Type: Data + Interpretation\n")
 
@@ -1319,13 +1326,17 @@ def _section_concerns_and_warnings(
 
     # ── Section rendering failures (High — report completeness is compromised) ─
     _label_map = {
-        "methodology":     "[METHODOLOGY] Test Protocol",
-        "primary_results": "[DATA] Primary Results",
-        "variability":     "[DATA] Variability & Reliability",
-        "environment":     "[DATA] Environment Quality",
-        "appendix_a":      "Appendix A (Full Config Statistics)",
-        "appendix_b":      "Appendix B (Elimination Details)",
-        "appendix_c":      "Appendix C (Production Commands)",
+        "methodology":          "[METHODOLOGY] Test Protocol",
+        "primary_results":      "[DATA] Primary Results",
+        "recommendation":       "Recommendation Authority",
+        "variability":          "[DATA] Variability & Reliability",
+        "environment":          "[DATA] Environment Quality",
+        "background_interference": "[DATA] Background Process Activity",
+        "appendix_a":           "Appendix A (Full Config Statistics)",
+        "appendix_b":           "Appendix B (Elimination Details)",
+        "appendix_c":           "Appendix C (Production Commands)",
+        "appendix_d":           "Appendix D (Historical & Abandoned Configs)",
+        "supporting_artifacts": "Supporting Evidence",
     }
     for name, err in section_failures:
         label = _label_map.get(name, name)
@@ -1489,6 +1500,7 @@ def _appendix_full_stats(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix A: full per-config statistics table."""
     lines: list[str] = []
     lines.append("## Appendix A: Full Configuration Statistics\n")
     lines.append(
@@ -1565,6 +1577,7 @@ def _appendix_eliminations(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix B: elimination details table."""
     lines: list[str] = []
     lines.append("## Appendix B: Elimination & Forensic Exclusions\n")
 
@@ -2361,6 +2374,7 @@ def _appendix_production_commands(
     config_variable_map: dict[str, Any],
     variable_name:       str,
 ) -> list[str]:
+    """Render Appendix C: production-ready launch commands."""
     lines: list[str] = []
     lines.append("## Appendix C: Resolved Production Commands\n")
     lines.append(

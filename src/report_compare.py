@@ -20,11 +20,13 @@ _L_DATA = "DATA"
 _L_INT  = "INTERPRETATION"
 
 def _fmt(val: float | None, spec: str, missing: str = "—") -> str:
+    """Format a float value for comparison report display."""
     if val is None:
         return missing
     return format(val, spec)
 
 def _delta_symbol(pct: float, significance: str) -> str:
+    """Return an arrow symbol indicating improvement or regression direction."""
     if significance == "inside noise band":
         return "≈"
     if pct > 0.5:

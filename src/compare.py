@@ -93,6 +93,7 @@ class CompareResult:
     overall_confidence: str = "medium"
 
     def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serialisable dict representation of this comparison row."""
         return asdict(self)
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ def calculate_significance(delta_pct: float, cv_a: float, cv_b: float) -> str:
     return "low confidence / insufficient evidence"
 
 def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
+    """Fetch campaign metadata from the DB for comparison display."""
     row = conn.execute(
         "SELECT id, name, status, created_at, run_mode FROM campaigns WHERE id=?", 
         (campaign_id,)
@@ -132,6 +134,7 @@ def get_campaign_meta(conn: Any, campaign_id: str) -> CampaignMeta:
     }
 
 def get_config_scores(conn: Any, campaign_id: str) -> Dict[str, Dict[str, Any]]:
+    """Fetch per-config scores for a campaign from the DB."""
     rows = conn.execute(
         "SELECT * FROM scores WHERE campaign_id=?", (campaign_id,)
     ).fetchall()
@@ -139,6 +142,7 @@ def get_config_scores(conn: Any, campaign_id: str) -> Dict[str, Dict[str, Any]]:
     return {r["config_id"]: dict(r) for r in rows}
 
 def get_eliminations(conn: Any, campaign_id: str) -> Dict[str, str]:
+    """Fetch per-config elimination reasons for a campaign from the DB."""
     rows = conn.execute(
         "SELECT id, elimination_reason FROM configs WHERE campaign_id=? AND status='eliminated'",
         (campaign_id,)
@@ -360,6 +364,7 @@ def generate_compare_result(id_a: str, id_b: str, db_path: Path) -> CompareResul
     gained_in_b = sorted(set(elim_a.keys()) - set(elim_b.keys()))
     
     def count_reasons(elim_dict):
+        """Count elimination reason occurrences across both campaigns."""
         counts = {}
         for r in elim_dict.values():
             counts[r] = counts.get(r, 0) + 1

@@ -828,6 +828,7 @@ def validate_campaign(
     ok = True
 
     def _check(label: str, passed: bool, detail: str = "") -> bool:
+        """Print a pass/fail check line and return the boolean result."""
         status = "[green]PASS[/green]" if passed else "[bold red]FAIL[/bold red]"
         msg = f"  {status}  {label}" + (f"  — {detail}" if detail else "")
         console.print(msg)
@@ -2959,6 +2960,7 @@ def _parse_values_arg(raw: str) -> list[int | str]:
 
 
 def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the runner module entry point."""
     parser = argparse.ArgumentParser(
         description="QuantMap campaign runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,

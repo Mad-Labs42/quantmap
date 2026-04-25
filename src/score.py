@@ -77,21 +77,27 @@ class _LazyGovernanceMapping(Mapping[str, float]):
     """Mapping proxy that loads current governance only when values are used."""
 
     def __init__(self, loader: Callable[[], dict[str, float]]) -> None:
+        """Initialize the lazy set from a callable returning a frozenset."""
         self._loader = loader
 
     def _data(self) -> dict[str, float]:
+        """Load and cache the underlying frozenset on first access."""
         return self._loader()
 
     def __getitem__(self, key: str) -> float:
+        """Not supported; raises TypeError."""
         return self._data()[key]
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the metric names in the lazy set."""
         return iter(self._data())
 
     def __len__(self) -> int:
+        """Return the number of metrics in the lazy set."""
         return len(self._data())
 
     def __repr__(self) -> str:
+        """Return a short debug representation."""
         return repr(self._data())
 
 
@@ -99,21 +105,27 @@ class _LazyGovernanceSet:
     """Set-like proxy for legacy metric constants without import-time loading."""
 
     def __init__(self, loader: Callable[[], frozenset[str]]) -> None:
+        """Initialize the lazy tuple from a callable returning a tuple."""
         self._loader = loader
 
     def _data(self) -> frozenset[str]:
+        """Load and cache the underlying tuple on first access."""
         return self._loader()
 
     def __contains__(self, value: object) -> bool:
+        """Return True if the metric name is in the tuple."""
         return value in self._data()
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the metric names in the lazy tuple."""
         return iter(self._data())
 
     def __len__(self) -> int:
+        """Return the number of metrics in the lazy tuple."""
         return len(self._data())
 
     def __repr__(self) -> str:
+        """Return a short debug representation."""
         return repr(self._data())
 
 
@@ -121,24 +133,31 @@ class _LazyGovernanceTuple:
     """Tuple-like proxy for legacy metric constants without import-time loading."""
 
     def __init__(self, loader: Callable[[], tuple[str, ...]]) -> None:
+        """Initialize the lazy governance set from a callable."""
         self._loader = loader
 
     def _data(self) -> tuple[str, ...]:
+        """Load and cache the underlying set on first access."""
         return self._loader()
 
     def __contains__(self, value: object) -> bool:
+        """Return True if the metric name is in the set."""
         return value in self._data()
 
     def __iter__(self) -> Iterator[str]:
+        """Iterate over the metric names in the lazy governance set."""
         return iter(self._data())
 
     def __len__(self) -> int:
+        """Return the number of metrics in the lazy governance set."""
         return len(self._data())
 
     def __getitem__(self, index: int) -> str:
+        """Return the metric definition for the given name."""
         return self._data()[index]
 
     def __repr__(self) -> str:
+        """Return a short debug representation."""
         return repr(self._data())
 
 
@@ -431,12 +450,16 @@ def _apply_utility_transform(
             x_zero = params.get("x_zero", 2500.0 if "cold" in metric_name else 500.0)
             
             if direction == governance.ObjectiveDirection.minimize:
-                if value <= x_sat: return 1.0
-                if value >= x_zero: return 0.0
+                if value <= x_sat:
+                    return 1.0
+                if value >= x_zero:
+                    return 0.0
                 return float(1.0 - (value - x_sat) / (x_zero - x_sat))
             else:
-                if value >= x_sat: return 1.0
-                if value <= x_zero: return 0.0
+                if value >= x_sat:
+                    return 1.0
+                if value <= x_zero:
+                    return 0.0
                 return float((value - x_zero) / (x_sat - x_zero))
 
     # Warning: No specific transform matched. 
@@ -584,7 +607,8 @@ def compute_scores(
     total_configs = len(df_rankable)
 
     for metric in profile.weights.keys():
-        if metric not in df_rankable.columns: continue
+        if metric not in df_rankable.columns:
+            continue
         nan_count = df_rankable[metric].isnull().sum()
         
         # Collapse rule: 100% NaN AND reaching minimum config sample size
@@ -1047,12 +1071,14 @@ def _persist_methodology_snapshot(
     registry_path = Path(getattr(governance, "_METRICS_YAML"))
 
     def _read_text(path: Path) -> str | None:
+        """Read a text file; return empty string on any error."""
         try:
             return path.read_text(encoding="utf-8")
         except Exception:
             return None
 
     def _hash_text(text: str | None) -> str | None:
+        """Return the SHA-256 hex digest of a UTF-8-encoded string."""
         if text is None:
             return None
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1277,7 +1303,7 @@ def _log_summary(campaign_id: str, result: dict[str, Any]) -> None:
     passing    = result["passing"]     # rankable only
     eliminated = result["eliminated"]
     unrankable = result.get("unrankable", {})
-    scores_df  = result["scores_df"]
+    _scores_df = result["scores_df"]  # retained for future log expansion
 
     logger.info("=== SCORING SUMMARY: %s ===", campaign_id)
     logger.info("Total configs:  %d", len(stats))
@@ -1394,10 +1420,10 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
         logger.info("  %s winner: %s = %s", campaign_id, var_name, var_value)
 
     if missing:
-        print(f"ERROR: The following campaigns are not yet complete (no score winner):")
+        print("ERROR: The following campaigns are not yet complete (no score winner):")
         for m in missing:
             print(f"  - {m}")
-        print(f"\nComplete these campaigns first, then re-run --generate-c08.")
+        print("\nComplete these campaigns first, then re-run --generate-c08.")
         return False
 
     # Build the combined interaction config value
@@ -1409,7 +1435,7 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
     # Build the output YAML
     c08_data = {
         "campaign_id": "C08_interaction",
-        "description": f"Interaction validation: winners from C01-C07 combined",
+        "description": "Interaction validation: winners from C01-C07 combined",
         "variable": "interaction",
         "values": [interaction_value],
         "type": "interaction",
@@ -1433,11 +1459,11 @@ def generate_c08(db_path: Path, output_path: Path) -> bool:
         yaml.dump(c08_data, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     print(f"Generated {output_path}")
-    print(f"\nWinners combined into interaction config:")
+    print("\nWinners combined into interaction config:")
     for var_name, var_value in sorted(winners.items()):
         print(f"  {var_name}: {var_value}")
-    print(f"\nTotal configs: 1 (combined winner)")
-    print(f"Validate with: python -m src.runner --validate C08_interaction")
+    print("\nTotal configs: 1 (combined winner)")
+    print("Validate with: python -m src.runner --validate C08_interaction")
     return True
 
 
@@ -1511,8 +1537,8 @@ def generate_finalist(db_path: Path, output_path: Path) -> bool:
 
     print(f"Generated {output_path}")
     print(f"\nChampion config from C08: {winner_config_id}")
-    print(f"Cycles: 10 (exhaustive validation)")
-    print(f"Validate with: python -m src.runner --validate Finalist")
+    print("Cycles: 10 (exhaustive validation)")
+    print("Validate with: python -m src.runner --validate Finalist")
     return True
 
 
@@ -1521,6 +1547,7 @@ def generate_finalist(db_path: Path, output_path: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the score module entry point."""
     parser = argparse.ArgumentParser(
         description="QuantMap scoring utilities",
         formatter_class=argparse.RawDescriptionHelpFormatter,

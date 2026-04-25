@@ -34,6 +34,7 @@ class MethodologySnapshotError(TrustIdentityError):
 
 
 def _json_loads(raw: str | None, default: Any) -> Any:
+    """Attempt to JSON-decode raw; return default on None, empty, or decode failure."""
     if not raw:
         return default
     try:
@@ -43,6 +44,7 @@ def _json_loads(raw: str | None, default: Any) -> Any:
 
 
 def _fetch_current_methodology(conn: sqlite3.Connection, campaign_id: str) -> dict[str, Any]:
+    """Load the most recent methodology snapshot row for a campaign from the DB."""
     try:
         row = conn.execute(
             """
@@ -135,6 +137,7 @@ class TrustIdentity:
     recommendation: dict[str, Any] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        """Coerce None fields to empty dicts after dataclass construction."""
         if self.filter_policy is None:
             self.filter_policy = {}
         if self.recommendation is None:
@@ -142,6 +145,7 @@ class TrustIdentity:
 
     @property
     def has_snapshot_baseline(self) -> bool:
+        """Return True when the baseline was loaded from a campaign-start snapshot."""
         return self.sources.get("baseline") == "snapshot"
 
 
@@ -189,6 +193,10 @@ def load_run_identity(campaign_id: str, db_path: Path) -> TrustIdentity:
         filter_policy_source = f"legacy_{_ts}"
 
     recommendation = _json_loads(campaign.get("recommendation_record_json"), {})
+    # Guard: stored JSON may be a non-dict type (list, string, number).
+    # Coerce to {} so subsequent .get() calls do not raise AttributeError.
+    if not isinstance(recommendation, dict):
+        recommendation = {}
     recommendation_source = (
         "campaigns.recommendation_record_json" if recommendation else "not_recorded"
     )
@@ -277,6 +285,7 @@ def methodology_source_label(methodology: dict[str, Any]) -> str:
 
 
 def _registry_from_yaml_content(raw_yaml: str):
+    """Reconstruct a MetricRegistry from a persisted YAML snapshot string."""
     from src import governance  # noqa: PLC0415
 
     raw = yaml.safe_load(raw_yaml) or {}
@@ -289,6 +298,7 @@ def _registry_from_yaml_content(raw_yaml: str):
 
 
 def _profile_from_yaml_content(raw_yaml: str):
+    """Reconstruct an ExperimentProfile from a persisted YAML snapshot string."""
     from src import governance  # noqa: PLC0415
 
     raw = yaml.safe_load(raw_yaml) or {}

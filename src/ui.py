@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from typing import Any
 
 from rich.console import Console
 from rich.theme import Theme
@@ -83,6 +84,41 @@ def render_acpm_plan_preview(
     console.print("")
 
 
+def _check_scaffold_overlap(
+    applicability: "ACPMApplicabilityResult",  # noqa: F821
+    repeat_tier: str,
+    check_fn: Any,
+) -> bool:
+    """Check NGL scaffold overlap for 1x repeat-tier campaigns.
+
+    Imports NGL_SCAFFOLD_1X from acpm_planning on demand to avoid pulling
+    in the full planning machinery at module level.
+
+    Args:
+        applicability: ACPMApplicabilityResult from acpm_planning.
+        repeat_tier:   Requested repeat tier string (e.g. '1x').
+        check_fn:      The _check callable from render_acpm_validate_result
+                       that prints a pass/fail line and returns a bool.
+
+    Returns True if scaffold check passes or is skipped (non-1x tier).
+    """
+    if repeat_tier != "1x":
+        return True
+    from src.acpm_planning import NGL_SCAFFOLD_1X  # noqa: PLC0415
+    scaffold = [v for v in NGL_SCAFFOLD_1X if v in applicability.all_values]
+    if scaffold:
+        return check_fn(
+            True,
+            "scaffold overlap",
+            f"{len(scaffold)} scaffold values found: {scaffold}",
+        )
+    return check_fn(
+        False,
+        "scaffold overlap",
+        "no scaffold values found in campaign",
+    )
+
+
 def render_acpm_validate_result(
     campaign_id: str,
     profile_id: str,
@@ -110,6 +146,7 @@ def render_acpm_validate_result(
     console = target_console or get_console()
 
     def _check(passed: bool, label: str, detail: str = "") -> bool:
+        """Print a formatted pass/fail status line and return the pass/fail bool."""
         sym = SYM_OK if passed else SYM_FAIL
         color = "green" if passed else "red"
         msg = f"  [{color}]{sym}[/{color}]  {label}"
@@ -132,23 +169,7 @@ def render_acpm_validate_result(
             "ACPM-applicable",
             f"variable={applicability.variable}, {len(applicability.all_values)} values",
         ) and ok
-        if repeat_tier == "1x":
-            from src.acpm_planning import (  # noqa: PLC0415
-                NGL_SCAFFOLD_1X,
-            )
-            scaffold = [v for v in NGL_SCAFFOLD_1X if v in applicability.all_values]
-            if scaffold:
-                ok = _check(
-                    True,
-                    "scaffold overlap",
-                    f"{len(scaffold)} scaffold values found: {scaffold}",
-                ) and ok
-            else:
-                ok = _check(
-                    False,
-                    "scaffold overlap",
-                    "no scaffold values found in campaign",
-                ) and ok
+        ok = _check_scaffold_overlap(applicability, repeat_tier, _check) and ok
     else:
         ok = _check(
             False,
@@ -215,7 +236,7 @@ def get_console(force_new: bool = False, force_utf8_if_bootstrap: bool = False) 
         _GLOBAL_CONSOLE = console
     return console
 
-def print_banner(text: str, style: str = "bold cyan"):
+def print_banner(text: str, style: str = "bold cyan") -> None:
     """Unified banner printer."""
     console = get_console()
     console.print()
@@ -285,4 +306,3 @@ def render_artifact_block(
             f"\n    {path_str}  [{color}]({label})[/{color}]"
         )
     console.print("")
-

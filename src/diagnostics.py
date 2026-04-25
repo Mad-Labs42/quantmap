@@ -58,10 +58,12 @@ class DiagnosticReport:
     """A collection of CheckResults that collapses into a final Readiness state."""
     
     def __init__(self, title: str):
+        """Initialize an empty diagnostics collector."""
         self.title = title
         self.results: List[CheckResult] = []
 
     def add(self, result: CheckResult):
+        """Append a diagnostic message to this collector."""
         self.results.append(result)
 
     @property

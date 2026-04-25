@@ -653,6 +653,7 @@ def _build_result(
 
 
 def _int(v: Any) -> int | None:
+    """Safely cast a value to int; return None on failure."""
     if v is None:
         return None
     try:
@@ -662,6 +663,7 @@ def _int(v: Any) -> int | None:
 
 
 def _float(v: Any) -> float | None:
+    """Safely cast a value to float; return None on failure."""
     if v is None:
         return None
     try:

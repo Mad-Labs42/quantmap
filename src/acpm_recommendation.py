@@ -31,6 +31,7 @@ class ACPMRecommendationRecord:
     schema_version: int = RECOMMENDATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        """Validate status value and handoff_ready consistency after construction."""
         if self.status not in _VALID_STATUSES:
             raise ValueError(f"Unsupported ACPM recommendation status: {self.status}")
         if self.handoff_ready:
@@ -40,6 +41,7 @@ class ACPMRecommendationRecord:
                 raise ValueError("handoff_ready requires recommended_config_id")
 
     def to_snapshot_dict(self) -> dict[str, Any]:
+        """Return a JSON-serialisable dict for DB persistence of this recommendation."""
         return {
             "schema_id": self.schema_id,
             "schema_version": self.schema_version,
@@ -53,11 +55,13 @@ class ACPMRecommendationRecord:
 
 
 def _scoring_profile_name(scores: dict[str, Any]) -> str | None:
+    """Extract the scoring profile name string from a scores result dict."""
     scoring_profile = scores.get("scoring_profile")
     return getattr(scoring_profile, "name", None)
 
 
 def _coverage_class(acpm_planning_metadata: dict[str, Any] | None) -> str | None:
+    """Extract the NGL coverage class string from ACPM planning metadata."""
     if not acpm_planning_metadata:
         return None
     coverage_policy = acpm_planning_metadata.get("coverage_policy") or {}
@@ -66,6 +70,7 @@ def _coverage_class(acpm_planning_metadata: dict[str, Any] | None) -> str | None
 
 
 def _selected_ngl_values(acpm_planning_metadata: dict[str, Any] | None) -> list[int]:
+    """Extract the selected NGL integer values from ACPM planning metadata."""
     if not acpm_planning_metadata:
         return []
     coverage_policy = acpm_planning_metadata.get("coverage_policy") or {}
@@ -81,6 +86,7 @@ def _derive_caveat_codes(
     run_mode: str,
     coverage_class: str | None,
 ) -> list[str]:
+    """Derive caveat codes for a recommendation given winner, run_mode, and scope."""
     caveats: list[str] = []
     if winner is None:
         caveats.append("no_valid_winner")
@@ -99,6 +105,7 @@ def _derive_caveat_codes(
 
 
 def _derive_status(*, winner: str | None, run_mode: str, coverage_class: str | None) -> str:
+    """Derive the recommendation status token from scoring outcome and run context."""
     if winner is None:
         return STATUS_INSUFFICIENT_EVIDENCE
     if coverage_class != "full":
@@ -118,6 +125,7 @@ def evaluate_acpm_recommendation(
     scores: dict[str, Any],
     acpm_planning_metadata: dict[str, Any] | None,
 ) -> ACPMRecommendationRecord:
+    """Evaluate and return an ACPM recommendation record from campaign scoring outputs."""
     winner = scores.get("winner")
     winner_id = winner if isinstance(winner, str) else None
     coverage_class = _coverage_class(acpm_planning_metadata)
