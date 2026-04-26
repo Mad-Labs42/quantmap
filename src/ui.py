@@ -395,11 +395,13 @@ def render_post_run_review(
         )
 
     # Outcome language
+    failure_cause_stripped = failure_cause.strip() if failure_cause is not None else ""
+
     if report_ok:
         con.print("\n[bold green]All requested campaigns ran successfully.[/bold green]")
     else:
         con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
-        if failure_cause:
+        if failure_cause_stripped:
             def _norm(text: str) -> str:
                 text = text.strip()
                 if not text:
@@ -407,7 +409,7 @@ def render_post_run_review(
                 return text if text[-1] in (".", "!", "?") else f"{text}."
 
             con.print("We identified the following blocker(s):\n")
-            con.print(f"- Cause: {_norm(failure_cause)}")
+            con.print(f"- Cause: {_norm(failure_cause_stripped)}")
             if failure_remediation and failure_remediation.strip():
                 con.print(f"  Suggested fix: {_norm(failure_remediation)}")
         else:
@@ -441,7 +443,7 @@ def render_post_run_review(
                 f"{safe_path}[/dim]"
             )
         else:
-            if failure_cause:
+            if failure_cause_stripped:
                 con.print(f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]")
             else:
                 con.print(f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]")
