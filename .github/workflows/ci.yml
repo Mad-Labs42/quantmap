@@ -71,7 +71,7 @@ jobs:
 
       - name: Upload coverage artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage.xml
           path: coverage.xml
@@ -85,7 +85,7 @@ jobs:
 
       - name: Upload review bot digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-review-bot.json
           path: digest-review-bot.json
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload CI summary digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-ci-summary.json
           path: digest-ci-summary.json
@@ -113,7 +113,7 @@ jobs:
 
       - name: Upload Sonar digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-sonar.json
           path: digest-sonar.json
@@ -127,7 +127,7 @@ jobs:
 
       - name: Upload CodeQL digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-codeql.json
           path: digest-codeql.json
@@ -142,7 +142,7 @@ jobs:
 
       - name: Upload pip-audit digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-pip-audit.json
           path: digest-pip-audit.json
@@ -156,7 +156,7 @@ jobs:
 
       - name: Upload mypy digest artifact
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digest-mypy.json
           path: digest-mypy.json
