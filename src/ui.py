@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.acpm_planning import ACPMPlannerOutput, ACPMApplicabilityResult
 
 from rich.console import Console
 from rich.theme import Theme
@@ -340,9 +343,74 @@ def render_artifact_block(
         else:
             sym, color, label = SYM_FAIL, "red",    "not found"
 
-        path_str = str(path) if path else "[dim]path unknown[/dim]"
+        from rich.markup import escape
+        path_str = escape(str(path)) if path else "[dim]path unknown[/dim]"
         console.print(
             f"  [{color}]{sym}[/{color}] [dim]{atype}[/dim]"
             f"\n    {path_str}  [{color}]({label})[/{color}]"
         )
     console.print("")
+
+
+def render_post_run_review(
+    campaign_id: str,
+    report_ok: bool,
+    artifacts: list[dict] | None = None,
+    diagnostics_path: str | None = None,
+    yolo_mode: bool = False,
+    target_console: Console | None = None,
+) -> None:
+    """Render the post-run campaign review screen.
+
+    Presentation-only: no sys.exit, no DB I/O, no filesystem writes.
+    All state is passed in by the caller (runner.py).
+
+    Args:
+        campaign_id:      Effective campaign ID used for the run.
+        report_ok:        True if the primary report was generated successfully.
+        artifacts:        Optional list of artifact dicts from
+                          artifact_paths.get_campaign_artifact_paths().
+                          If provided, render_artifact_block is called.
+        diagnostics_path: Optional path string for the internal diagnostics
+                          folder.  None → diagnostics block is omitted.
+        yolo_mode:        If True, show the YOLO active reminder.  Must only
+                          be True when the caller explicitly passed yolo_mode
+                          to run_campaign().  Normal runs always pass False.
+        target_console:   Console to render to (defaults to global console).
+    """
+    con = target_console or get_console()
+
+    # YOLO active notice — shown above the review when explicitly activated.
+    if yolo_mode:
+        con.print("\n[bold yellow]YOLO Mode Active[/bold yellow]")
+        con.print(
+            "[yellow]Validation requirements were relaxed because the user "
+            "chose to continue after a trust warning.[/yellow]"
+        )
+
+    # Artifact block — only when artifact data is available.
+    if artifacts is not None:
+        render_artifact_block(campaign_id, artifacts, target_console=con)
+
+    # Next actions — show only when the run succeeded.
+    if report_ok:
+        print_next_actions(
+            [
+                f"quantmap explain {campaign_id} --evidence",
+                f"quantmap artifacts {campaign_id}",
+                "quantmap list",
+            ],
+            title="Next actions",
+            target_console=con,
+        )
+
+    # Internal diagnostics notice — always shown when path is known.
+    if diagnostics_path is not None:
+        from rich.markup import escape  # noqa: PLC0415
+        safe_path = escape(str(diagnostics_path))
+        con.print(
+            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
+            f"By default, they are not included in the user-facing artifact list.\n"
+            f"If you would like to view them, you may do so at:\n"
+            f"{safe_path}[/dim]"
+        )

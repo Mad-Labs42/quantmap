@@ -84,6 +84,7 @@ from src.artifact_paths import (  # noqa: E402
     FILENAME_RAW_TELEMETRY,
     FILENAME_RUN_REPORTS,
     artifact_dir,
+    get_campaign_artifact_paths,
     infer_model_identity,
     report_paths,
 )
@@ -802,7 +803,8 @@ def validate_campaign(
     logger.info("Validating campaign: %s  (baseline=%s)", _eff_cid_val, baseline_path)
     if baseline_path != BASELINE_YAML:
         logger.info("INFO: --baseline override active: %s", baseline_path)
-        console.print(f"[dim]Active baseline: {baseline_path}[/dim]")
+        from rich.markup import escape
+        console.print(f"[dim]Active baseline: {escape(str(baseline_path))}[/dim]")
 
     if _eff_cid_val != campaign_id:
         if mode_flag == "quick":
@@ -2569,10 +2571,6 @@ def run_campaign(
     console.print(f"\n[bold green]Campaign {effective_campaign_id} complete.[/bold green]")
     logger.info("Campaign %s complete.", effective_campaign_id)
 
-    if yolo_mode:
-        console.print("\n[bold yellow]YOLO Mode Active[/bold yellow]")
-        console.print("[yellow]Validation requirements were relaxed because the user chose to continue after a trust warning.[/yellow]")
-
     # Run analysis + scoring + report
     # Failure here does NOT mean data was lost — raw.jsonl and lab.sqlite are
     # intact and rescore.py can replay the pipeline at any time. However, the
@@ -2706,7 +2704,8 @@ def run_campaign(
             lab_root=_effective_lab_root,
             run_plan=run_plan,
         )
-        console.print(f"[green]Report written:[/green] {report_path}")
+        from rich.markup import escape
+        console.print(f"[green]Report written:[/green] {escape(str(report_path))}")
         report_ok = True
 
         # Generate the evidence-first campaign report (new philosophy).
@@ -2719,7 +2718,8 @@ def run_campaign(
                 campaign=campaign,
                 lab_root=_effective_lab_root,
             )
-            console.print(f"[green]Run reports written:[/green] {v2_path}")
+            from rich.markup import escape
+            console.print(f"[green]Run reports written:[/green] {escape(str(v2_path))}")
         except Exception as _v2_exc:
             v2_ok = False
             logger.warning(
@@ -2771,7 +2771,8 @@ def run_campaign(
                 stats=stats,
                 lab_root=_effective_lab_root,
             )
-            console.print(f"[green]Metadata written:[/green] {meta_path}")
+            from rich.markup import escape
+            console.print(f"[green]Metadata written:[/green] {escape(str(meta_path))}")
         except Exception as _meta_exc:
             logger.warning("metadata.json generation failed (non-fatal): %s", _meta_exc)
 
@@ -2833,22 +2834,40 @@ def run_campaign(
                 )
             _status_conn.commit()
 
+    # -------------------------------------------------------------------------
+    # Post-run review screen
+    # -------------------------------------------------------------------------
+    _diagnostics_path: str | None = None
     try:
         _eff_diagnostics_folder = artifact_dir(
             _effective_lab_root,
             "logs",
             model_identity,
             effective_campaign_id,
-            create=False
+            create=False,
         )
-        console.print(
-            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
-            f"By default, they are not included in the user-facing artifact list.\n"
-            f"If you would like to view them, you may do so at:\n"
-            f"{_eff_diagnostics_folder}[/dim]"
+        _diagnostics_path = str(_eff_diagnostics_folder)
+    except Exception as _diag_exc:
+        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
+
+    # Collect canonical artifact paths for the review screen.
+    # get_campaign_artifact_paths is read-only: DB + filesystem discovery, no writes.
+    # Called after all artifact writers finish so DB rows are present.
+    _artifact_list: list[dict] | None = None
+    try:
+        _artifact_list = get_campaign_artifact_paths(
+            _effective_lab_root, effective_campaign_id, db_path=_eff_db_path
         )
-    except Exception as e:
-        logger.warning("Could not print diagnostics path: %s", e)
+    except Exception as _art_list_exc:
+        logger.warning("Could not retrieve artifact paths for review screen: %s", _art_list_exc)
+
+    ui.render_post_run_review(
+        campaign_id=effective_campaign_id,
+        report_ok=report_ok,
+        artifacts=_artifact_list,
+        diagnostics_path=_diagnostics_path,
+        yolo_mode=yolo_mode,
+    )
 
     if not report_ok:
         sys.exit(1)

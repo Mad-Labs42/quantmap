@@ -278,7 +278,7 @@ def _resolve_artifact_path(
     """
     db_path_str = row.get("path") if row else None
     if db_path_str:
-        resolved: "Path | None" = Path(db_path_str)
+        resolved: Path = Path(db_path_str)
         return resolved, resolved.exists()
     fallback = (base_dir / fname) if base_dir is not None else None
     return fallback, (fallback.exists() if fallback is not None else False)

@@ -210,7 +210,7 @@ def compile_repeat_tier(
         selected_values = [value for value in NGL_SCAFFOLD_1X if value in normalized_values]
         if not selected_values:
             raise ValueError("ACPM 1x scaffold produced an empty selected value set")
-        coverage_policy = {
+        coverage_policy: dict[str, Any] = {
             "ngl_coverage_class": NGL_COVERAGE_CLASS_SCAFFOLDED_1X,
             "scaffold_policy_id": NGL_SCAFFOLD_POLICY_ID,
             "selected_ngl_values": selected_values,

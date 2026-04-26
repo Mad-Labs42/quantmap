@@ -8,6 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 import src.runner as runner
+import src.ui as ui
 
 
 def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
@@ -24,14 +25,37 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     test_console = Console(file=buf, force_terminal=False, no_color=True, width=200)
 
     monkeypatch.setattr(runner, "console", test_console)
+
+    # Route render_post_run_review through the test console so its output is captured.
+    # Capture the real function before monkeypatching to avoid recursive dispatch.
+    _real_render = ui.render_post_run_review
+
+    def _fake_render_post_run_review(**kwargs):
+        kwargs.pop("target_console", None)
+        _real_render(**kwargs, target_console=test_console)
+
+    monkeypatch.setattr(runner.ui, "render_post_run_review", _fake_render_post_run_review)
+
     monkeypatch.setattr(runner, "_derive_lab_root", lambda _: tmp_path)
     monkeypatch.setattr(runner, "infer_model_identity", lambda *args, **kwargs: "test_model")
-    
+
     # Mock all the heavy lifting
     monkeypatch.setattr(runner, "_setup_logging", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_run_preflight_checks", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.telemetry_policy.enforce_current_run_readiness", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "artifact_dir", lambda *args, **kwargs: tmp_path / "artifacts" / "logs" / "test_model" / "test_camp")
+    # Return a fixed artifact list so the review screen's artifact block is exercised.
+    _fake_artifacts = [
+        {
+            "artifact_type": "campaign_summary_md",
+            "filename": "campaign-summary.md",
+            "path": tmp_path / "artifacts" / "reports" / "test_model" / "test_camp" / "campaign-summary.md",
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+    ]
+    monkeypatch.setattr(runner, "get_campaign_artifact_paths", lambda *args, **kwargs: _fake_artifacts)
     monkeypatch.setattr(runner, "_run_config", lambda *args, **kwargs: True)
     monkeypatch.setattr(runner, "_hash_file", lambda *args, **kwargs: "abc")
     monkeypatch.setattr("src.score.score_campaign", lambda *args, **kwargs: {"winner": None, "effective_filters": {}, "stats": {}})
@@ -41,27 +65,27 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     monkeypatch.setattr("src.trust_identity.summarize_report_artifact_status", lambda *args, **kwargs: "complete")
     monkeypatch.setattr("src.db.write_jsonl_marker", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.telemetry.shutdown", lambda: None)
-    
+
     # Needs a valid campaign and baseline
     campaign = {"id": "test_camp", "variable": "n_gpu_layers", "values": [10]}
     baseline = {"requests": {"a": "a.json"}, "lab": {"cycles_per_config": 1, "requests_per_cycle": 1}}
-    
+
     monkeypatch.setattr(runner, "load_campaign", lambda _: campaign)
     monkeypatch.setattr(runner, "load_baseline", lambda _: baseline)
     monkeypatch.setattr(runner, "validate_campaign_purity", lambda *args: "n_gpu_layers")
     monkeypatch.setattr(runner, "build_config_list", lambda *args: [{"config_id": "test_10", "variable_name": "n_gpu_layers", "variable_value": 10, "full_config": {}}])
-    
+
     # We need a dummy request file
     (tmp_path / "a.json").touch()
     monkeypatch.setattr(runner, "_REPO_ROOT", tmp_path)
-    
+
     import sqlite3
     db_path = tmp_path / "db" / "lab.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     from src.db import init_db
     init_db(db_path)
-    
+
     # Create required DB tables so updates don't crash
     with sqlite3.connect(db_path) as conn:
         conn.execute("INSERT INTO campaigns (id, name, created_at) VALUES ('test_camp', 'test_camp', '2026-04-25T12:00:00Z')")
@@ -72,16 +96,16 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
         yolo_mode=yolo_mode,
         baseline_path=tmp_path / "baseline.yaml",
     )
-    
+
     return buf.getvalue()
 
 
 def test_normal_run_does_not_contain_yolo_wording(tmp_path: Path, monkeypatch):
     output = _run_mocked_campaign(tmp_path, monkeypatch, yolo_mode=False)
-    
+
     assert "YOLO Mode Active" not in output
     assert "Validation requirements were relaxed" not in output
-    
+
     assert "Internal diagnostic files were retained for debugging." in output
     assert "By default, they are not included in the user-facing artifact list." in output
     assert "logs\\test_model\\test_camp" in output.replace("/", "\\")
@@ -89,10 +113,17 @@ def test_normal_run_does_not_contain_yolo_wording(tmp_path: Path, monkeypatch):
 
 def test_yolo_run_contains_yolo_wording(tmp_path: Path, monkeypatch):
     output = _run_mocked_campaign(tmp_path, monkeypatch, yolo_mode=True)
-    
+
     assert "YOLO Mode Active" in output
     assert "Validation requirements were relaxed because the user chose to continue after a trust warning." in output
-    
+
     assert "Internal diagnostic files were retained for debugging." in output
     assert "By default, they are not included in the user-facing artifact list." in output
     assert "logs\\test_model\\test_camp" in output.replace("/", "\\")
+
+
+def test_artifact_block_populated_in_post_run_review(tmp_path: Path, monkeypatch):
+    """Artifact block appears in final review when artifact discovery succeeds."""
+    output = _run_mocked_campaign(tmp_path, monkeypatch, yolo_mode=False)
+    assert "campaign_summary_md" in output
+    assert "Artifacts" in output
