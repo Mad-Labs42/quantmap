@@ -25,23 +25,27 @@
 ### Exact Wording Contract Validated
 
 **Success:**
-```
+
+```text
 All requested campaigns ran successfully.
 ```
 
 **Known failure:**
-```
+
+```text
 Error: QuantMap could not execute the requested campaigns.
 
 We identified the following blocker(s):
 
 - Cause: <known cause>.
-  Suggested fix: <specific remediation advice>
+  Suggested fix: <specific remediation advice>.
 ```
+
 *(Followed by diagnostics path)*
 
 **Unknown failure:**
-```
+
+```text
 Error: QuantMap could not execute the requested campaigns.
 
 Cause: Unknown.
@@ -145,4 +149,49 @@ A regex scan for `Quantmap|Report written:|Run reports written:|Metadata written
 
 **Remaining Risks:**
 
-None. All changes were presentation-only strings, docstrings, and historical disclaimers.
+Mixed/partial multi-campaign post-run outcome aggregation is intentionally deferred.
+`runner.py` currently processes one `campaign_id` per invocation and does not expose a
+trustworthy per-requested-campaign success/failure list. This has no impact on current
+single-campaign Slice 2 behavior, but any future bundle that introduces multi-campaign
+execution will need explicit aggregation semantics before the partial-outcome wording
+contract can be implemented.
+
+---
+
+## Final Blocker Cleanup Pass
+
+**Exact Files Changed:**
+
+- `src/ui.py`
+- `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-Slice-2-Validation.md`
+
+**Exact Blockers Fixed:**
+
+1. **Rich Markup Escaping:** Added `from rich.markup import escape as _escape` inside the
+   `failure_cause_stripped` branch of `render_post_run_review`. Dynamic `failure_cause`
+   and `failure_remediation` text is now escaped before interpolation, preventing any
+   brackets in caller-supplied strings from being interpreted as Rich markup tags. Static
+   markup strings (`[bold red]`, `[dim]`) are unchanged.
+2. **Validation doc — fenced block language:** Changed bare fences to ` ```text ` and
+   added blank lines before and after each block (MD031/MD022).
+3. **Validation doc — Known failure period:** Added the missing trailing period to the
+   `Suggested fix: <specific remediation advice>.` example line.
+4. **Validation doc — Remaining Risks:** Replaced "None" with a factual note that
+   multi-campaign outcome aggregation is intentionally deferred.
+
+**Validation Commands & Results:**
+
+- `ruff check src/ui.py test_cli_ux_post_run_review.py`: All checks passed.
+- `mypy quantmap.py`: Success, no issues found in 1 source file.
+- Targeted `pytest` (post-run review + yolo): 18 passed in 1.45s.
+- Full `pytest`: 149 passed in 17.28s.
+- `git diff --check`: Clean.
+
+**Final String Scan:**
+
+Scan for `Quantmap|Report written:|Run reports written:|Metadata written:|Failure reason unavailable|Raw data is safe` returned 0 banned-string matches.
+
+**Agent Files Used:**
+
+- `.agent/policies/project.md`
+- `.agent/policies/testing.md`

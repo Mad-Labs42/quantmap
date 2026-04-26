@@ -402,6 +402,8 @@ def render_post_run_review(
     else:
         con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
         if failure_cause_stripped:
+            from rich.markup import escape as _escape  # noqa: PLC0415
+
             def _norm(text: str) -> str:
                 text = text.strip()
                 if not text:
@@ -409,9 +411,9 @@ def render_post_run_review(
                 return text if text[-1] in (".", "!", "?") else f"{text}."
 
             con.print("We identified the following blocker(s):\n")
-            con.print(f"- Cause: {_norm(failure_cause_stripped)}")
+            con.print(f"- Cause: {_norm(_escape(failure_cause_stripped))}")
             if failure_remediation and failure_remediation.strip():
-                con.print(f"  Suggested fix: {_norm(failure_remediation)}")
+                con.print(f"  Suggested fix: {_norm(_escape(failure_remediation))}")
         else:
             con.print("Cause: Unknown.")
 
