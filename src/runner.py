@@ -1679,6 +1679,7 @@ def run_campaign(
     mode_flag: str | None = None,
     scope_authority: str | None = None,
     acpm_planning_metadata: dict[str, Any] | None = None,
+    yolo_mode: bool = False,
 ) -> None:
     """
     Run a complete campaign from start to finish (or resume if interrupted).
@@ -2288,7 +2289,7 @@ def run_campaign(
             [c.get("variable_value") for c in configs],
             lab_config.get("cycles_per_config", 5),
             lab_config.get("requests_per_cycle", 6),
-            snap.get("campaign_yaml_sha256", "unknown")[:12],
+            str(snap.get("campaign_yaml_sha256") or "unknown")[:12],
         )
 
         console.print(
@@ -2568,6 +2569,10 @@ def run_campaign(
     console.print(f"\n[bold green]Campaign {effective_campaign_id} complete.[/bold green]")
     logger.info("Campaign %s complete.", effective_campaign_id)
 
+    if yolo_mode:
+        console.print("\n[bold yellow]YOLO Mode Active[/bold yellow]")
+        console.print("[yellow]Validation requirements were relaxed because the user chose to continue after a trust warning.[/yellow]")
+
     # Run analysis + scoring + report
     # Failure here does NOT mean data was lost — raw.jsonl and lab.sqlite are
     # intact and rescore.py can replay the pipeline at any time. However, the
@@ -2827,6 +2832,23 @@ def run_campaign(
                     (now_status, str(exc), effective_campaign_id),
                 )
             _status_conn.commit()
+
+    try:
+        _eff_diagnostics_folder = artifact_dir(
+            _effective_lab_root,
+            "logs",
+            model_identity,
+            effective_campaign_id,
+            create=False
+        )
+        console.print(
+            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
+            f"By default, they are not included in the user-facing artifact list.\n"
+            f"If you would like to view them, you may do so at:\n"
+            f"{_eff_diagnostics_folder}[/dim]"
+        )
+    except Exception as e:
+        logger.warning("Could not print diagnostics path: %s", e)
 
     if not report_ok:
         sys.exit(1)

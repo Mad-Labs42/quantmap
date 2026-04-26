@@ -13,7 +13,7 @@ from rich.console import Console
 REPO_ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("QUANTMAP_LAB_ROOT", str(REPO_ROOT))
 
-import src.runner as runner
+import src.runner as runner  # noqa: E402
 
 
 def _run_cli(*args: str) -> str:

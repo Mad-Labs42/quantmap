@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
-
 _NGL_CAMPAIGN = {
     "campaign_id": "NGL_sweep",
     "variable": "n_gpu_layers",
