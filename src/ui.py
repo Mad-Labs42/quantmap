@@ -358,6 +358,8 @@ def render_post_run_review(
     artifacts: list[dict] | None = None,
     diagnostics_path: str | None = None,
     yolo_mode: bool = False,
+    failure_cause: str | None = None,
+    failure_remediation: str | None = None,
     target_console: Console | None = None,
 ) -> None:
     """Render the post-run campaign review screen.
@@ -388,6 +390,19 @@ def render_post_run_review(
             "chose to continue after a trust warning.[/yellow]"
         )
 
+    # Outcome language
+    if report_ok:
+        con.print("\n[bold green]All requested campaigns ran successfully.[/bold green]")
+    else:
+        con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
+        if failure_cause:
+            con.print("We identified the following blocker(s):\n")
+            con.print(f"- Cause: {failure_cause}.")
+            if failure_remediation:
+                con.print(f"  Suggested fix: {failure_remediation}.")
+        else:
+            con.print("Cause: Unknown.")
+
     # Artifact block — only when artifact data is available.
     if artifacts is not None:
         render_artifact_block(campaign_id, artifacts, target_console=con)
@@ -404,13 +419,19 @@ def render_post_run_review(
             target_console=con,
         )
 
-    # Internal diagnostics notice — always shown when path is known.
+    # Internal diagnostics notice
     if diagnostics_path is not None:
         from rich.markup import escape  # noqa: PLC0415
         safe_path = escape(str(diagnostics_path))
-        con.print(
-            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
-            f"By default, they are not included in the user-facing artifact list.\n"
-            f"If you would like to view them, you may do so at:\n"
-            f"{safe_path}[/dim]"
-        )
+        if report_ok:
+            con.print(
+                f"\n[dim]Internal diagnostic files were retained for debugging.\n"
+                f"By default, they are not included in the user-facing artifact list.\n"
+                f"If you would like to view them, you may do so at:\n"
+                f"{safe_path}[/dim]"
+            )
+        else:
+            if failure_cause:
+                con.print(f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]")
+            else:
+                con.print(f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]")
