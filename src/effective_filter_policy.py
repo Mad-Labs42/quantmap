@@ -166,14 +166,20 @@ def _get_yaml_changes(
     )
     if not yaml_layer:
         return {}
+    # Build the merged value for each key *before* YAML is applied:
+    # execution-mode layer wins over base_gates if present.
+    exec_mode_layer = next(
+        (lay for lay in override_layers if lay["authority"] == _AUTH_EXECUTION_MODE),
+        None,
+    )
+    pre_yaml: dict[str, Any] = dict(base_gates)
+    if exec_mode_layer:
+        pre_yaml.update(exec_mode_layer.get("overrides") or {})
+    # A YAML key is a genuine change only when it differs from the pre-YAML merged value.
     return {
         k: v
         for k, v in (yaml_layer.get("overrides") or {}).items()
-        if base_gates.get(k) != v or any(
-            lay.get("overrides", {}).get(k) != v
-            for lay in override_layers
-            if lay["authority"] == _AUTH_EXECUTION_MODE
-        )
+        if pre_yaml.get(k) != v
     }
 
 def _classify_policy(
@@ -368,7 +374,12 @@ def _project_reconstructed_legacy(
     effective: dict[str, float] = dict(gates)
     effective.update(filter_overrides)
     effective.update(yaml_overrides)
-    has_yaml = bool(yaml_overrides)
+    # yaml_changed is True only when YAML actually changes the merged result
+    # (i.e., at least one YAML key differs from the pre-YAML merged value).
+    pre_yaml_merged: dict[str, float] = {**gates, **filter_overrides}
+    yaml_changed = any(
+        pre_yaml_merged.get(k) != v for k, v in yaml_overrides.items()
+    )
 
     if gates and cap_quality in ("complete",):
         truth_status = "reconstructed"
@@ -379,7 +390,7 @@ def _project_reconstructed_legacy(
     rankability = [k for k in changed if k in ELIMINATION_KEY_SET]
 
     notes: list[str] = ["Reconstructed from persisted methodology gates and run_plan.filter_overrides"]
-    if has_yaml:
+    if yaml_changed:
         notes.append("campaign YAML elimination_overrides applied")
     if cap_quality not in ("complete",):
         notes.append(f"methodology capture quality: {cap_quality}")
@@ -387,11 +398,11 @@ def _project_reconstructed_legacy(
     return {
         "truth_status": truth_status,
         "policy_id": _POL_LEGACY_RECONSTRUCTED,
-        "policy_modifiers": [_MOD_CAMPAIGN_OVERRIDE] if has_yaml else [],
-        "final_policy_authority": _AUTH_CAMPAIGN_YAML if has_yaml else _AUTH_LEGACY_READER,
+        "policy_modifiers": [_MOD_CAMPAIGN_OVERRIDE] if yaml_changed else [],
+        "final_policy_authority": _AUTH_CAMPAIGN_YAML if yaml_changed else _AUTH_LEGACY_READER,
         "authority_chain": (
             [_AUTH_METHODOLOGY_PROFILE, _AUTH_LEGACY_READER]
-            + ([_AUTH_CAMPAIGN_YAML] if has_yaml else [])
+            + ([_AUTH_CAMPAIGN_YAML] if yaml_changed else [])
         ),
         "effective_filters": effective,
         "effective_filters_sha256": canonical_json_sha256(effective) if effective else None,
