@@ -90,8 +90,8 @@ returned 0 instances of improper product capitalization, and 0 matches for legac
 → Success: no issues found in 1 source file
 
 # Targeted tests
-.\.venv\Scripts\python.exe -m pytest -q test_cli_ux_post_run_review.py test_cli_ux_yolo_review.py test_cli_ux_artifact_discovery.py
-→ 24 passed in 1.26s
+.\.venv\Scripts\python.exe -m pytest -q test_cli_ux_post_run_review.py test_cli_ux_yolo_review.py
+→ 18 passed in 1.07s
 
 # Full test suite
 .\.venv\Scripts\python.exe -m pytest -q
@@ -134,7 +134,7 @@ The SonarCloud new issue was addressed by correctly documenting the new paramete
 
 - `ruff check`: All checks passed.
 - `mypy quantmap.py`: Success, no issues found.
-- Targeted `pytest`: 24 passed in 1.26s.
+- Targeted `pytest`: 18 passed in 1.07s.
 - Full `pytest`: 149 passed cleanly.
 - `git diff --check`: Clean.
 

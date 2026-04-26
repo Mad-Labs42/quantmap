@@ -98,6 +98,7 @@ I recommend the following "Smallest Safe Slice 2":
 - Update `test_cli_ux_yolo_review.py` to ensure the overall terminal output matches the new deduped flow (i.e., verifying the inline prints are gone).
 
 **Validation Commands:**
+
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check src/ui.py src/runner.py
 .\.venv\Scripts\python.exe -m mypy src/ui.py src/runner.py
@@ -111,5 +112,6 @@ Before implementation begins, the product owner must decide:
 2. **Outcome Explicitness:** Is stating `Outcome: Winner is {X}` sufficient, or do we prefer strict minimalism ("nothing beyond success/failure and artifact status")?
 
 ## 10. Agent Files Used
+
 - Implicitly relied on `.agent/policies/project.md` (for understanding constraints around trust and reporting).
 - Implicitly relied on `.agent/policies/testing.md` (for framing the validation plan).
