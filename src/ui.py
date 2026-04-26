@@ -378,6 +378,10 @@ def render_post_run_review(
         yolo_mode:        If True, show the YOLO active reminder.  Must only
                           be True when the caller explicitly passed yolo_mode
                           to run_campaign().  Normal runs always pass False.
+        failure_cause:    Optional short failure cause shown in the final review
+                          when report_ok is false.
+        failure_remediation: Optional user-facing remediation guidance shown only
+                             when a known actionable fix exists.
         target_console:   Console to render to (defaults to global console).
     """
     con = target_console or get_console()
@@ -396,10 +400,16 @@ def render_post_run_review(
     else:
         con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
         if failure_cause:
+            def _norm(text: str) -> str:
+                text = text.strip()
+                if not text:
+                    return text
+                return text if text[-1] in (".", "!", "?") else f"{text}."
+
             con.print("We identified the following blocker(s):\n")
-            con.print(f"- Cause: {failure_cause}.")
-            if failure_remediation:
-                con.print(f"  Suggested fix: {failure_remediation}.")
+            con.print(f"- Cause: {_norm(failure_cause)}")
+            if failure_remediation and failure_remediation.strip():
+                con.print(f"  Suggested fix: {_norm(failure_remediation)}")
         else:
             con.print("Cause: Unknown.")
 

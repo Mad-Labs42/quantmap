@@ -1,5 +1,11 @@
 # Post-Run Review UX Slice 2 — Blast-Radius Audit
 
+> [!WARNING]
+> **HISTORICAL / PRE-IMPLEMENTATION AUDIT**
+> This audit documents pre-implementation findings and blast-radius analysis. It has been superseded by the final implemented behavior.
+> - Current behavior authority is `src/runner.py`, `src/ui.py`, and `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-Slice-2-Validation.md`.
+> - **Stale Content Warning:** Sections below discussing "winner lines" or retaining inline "written" prints are stale. The actual implementation replaced inline prints with a spinner and used strict Success/Failure phrasing without a winner line.
+
 **Branch:** feat/post-run-review-ux-slice-2
 **Date:** 2026-04-26
 **Scope:** Determining the safest next UX improvement for the final post-run review screen without violating production constraints.
