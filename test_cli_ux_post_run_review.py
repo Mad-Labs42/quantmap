@@ -128,7 +128,7 @@ def test_artifact_block_shows_missing_status():
 
 def test_renderer_is_idempotent():
     """Calling render_post_run_review twice with same args must produce same output."""
-    kwargs = dict(campaign_id="Idem_test", report_ok=True, diagnostics_path="/tmp/diag")
+    kwargs = {"campaign_id": "Idem_test", "report_ok": True, "diagnostics_path": "/lab/diag"}
     out1 = _render(**kwargs)
     out2 = _render(**kwargs)
     assert out1 == out2

@@ -81,8 +81,7 @@ The following files **must not be modified** for this bundle. Any desired change
 | `src/db.py` | Database schema and I/O — structural change |
 | `src/telemetry.py` | Measurement infrastructure |
 | `src/telemetry_policy.py` | Run readiness enforcement |
-| `src/artifact_paths.py` | Canonical artifact contracts — do not rename |
-| `src/acpm_planning.py` | ACPM planning semantics |
+
 | `src/acpm_recommendation.py` | Recommendation authority |
 | `src/governance.py` | Governance contracts |
 | `src/run_plan.py` | Run plan data model |
@@ -266,7 +265,7 @@ The existing diagnostics path block uses f-string interpolation with `[dim]...[/
 
 ---
 
-## Appendix A — Read-Only Commands Run During Audit
+## Appendix A — Commands Run During Audit
 
 ```powershell
 Select-String -Path quantmap.py -Pattern "run_campaign" | Select-Object LineNumber, Line

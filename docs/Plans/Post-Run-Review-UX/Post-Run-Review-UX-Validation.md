@@ -14,12 +14,12 @@
 | `src/ui.py` | Added `render_post_run_review()` (from prior pass — unchanged in this pass) |
 | `test_cli_ux_yolo_review.py` | Added `get_campaign_artifact_paths` monkeypatch; added `test_artifact_block_populated_in_post_run_review` |
 | `test_cli_ux_post_run_review.py` | New (from prior pass — unchanged in this pass); 11 unit tests for the renderer in isolation |
-| `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-Validation.md` | This file — moved from incorrect location; replaces `docs/audits/CLI-audit/post-run-review-ux-validation.md` |
-| `docs/Audits/Post-Run-Review-UX/Post-Run-Review-UX-Blast-Radius-Audit.md` | Moved from `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-PRE-Implementation-Blast-Radius.md` |
+| `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-Validation.md` | This file — moved from incorrect location; replaces `docs/AUDITS/CLI-audit/post-run-review-ux-validation.md` |
+| `docs/AUDITS/Post-Run-Review-UX/Post-Run-Review-UX-Blast-Radius-Audit.md` | Moved from `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-PRE-Implementation-Blast-Radius.md` |
 
 ### Files deleted
-- `docs/audits/CLI-audit/post-run-review-ux-validation.md` (incorrect location — replaced by this file)
-- `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-PRE-Implementation-Blast-Radius.md` (incorrect location — moved to Audits)
+- `docs/AUDITS/CLI-audit/post-run-review-ux-validation.md` (incorrect location — replaced by this file)
+- `docs/Plans/Post-Run-Review-UX/Post-Run-Review-UX-PRE-Implementation-Blast-Radius.md` (incorrect location — moved to AUDITS)
 
 ---
 

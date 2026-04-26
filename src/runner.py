@@ -79,6 +79,7 @@ from src.score import ELIMINATION_FILTERS  # noqa: E402 — used in dry-run summ
 from src.artifact_paths import (  # noqa: E402
     ARTIFACT_CAMPAIGN_SUMMARY,
     ARTIFACT_LEGACY_REPORT,
+    ARTIFACT_METADATA,
     ARTIFACT_RAW_TELEMETRY,
     ARTIFACT_RUN_REPORTS,
     FILENAME_RAW_TELEMETRY,
@@ -2579,6 +2580,8 @@ def run_campaign(
     # falsification from the caller's perspective. (L5 fix)
     console.print("[bold]Running analysis and scoring...[/bold]")
     report_ok = False
+    v2_ok = False
+    meta_ok = False
     analysis_ok = False
     try:
         from src.score import score_campaign
@@ -2773,6 +2776,7 @@ def run_campaign(
             )
             from rich.markup import escape
             console.print(f"[green]Metadata written:[/green] {escape(str(meta_path))}")
+            meta_ok = True
         except Exception as _meta_exc:
             logger.warning("metadata.json generation failed (non-fatal): %s", _meta_exc)
 
@@ -2858,6 +2862,17 @@ def run_campaign(
         _artifact_list = get_campaign_artifact_paths(
             _effective_lab_root, effective_campaign_id, db_path=_eff_db_path
         )
+        if _artifact_list is not None:
+            for _art in _artifact_list:
+                if _art["artifact_type"] == ARTIFACT_CAMPAIGN_SUMMARY and not report_ok:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
+                elif _art["artifact_type"] == ARTIFACT_RUN_REPORTS and not v2_ok:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
+                elif _art["artifact_type"] == ARTIFACT_METADATA and not meta_ok:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
     except Exception as _art_list_exc:
         logger.warning("Could not retrieve artifact paths for review screen: %s", _art_list_exc)
 
