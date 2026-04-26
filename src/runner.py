@@ -2863,14 +2863,14 @@ def run_campaign(
             _effective_lab_root, effective_campaign_id, db_path=_eff_db_path
         )
         if _artifact_list is not None:
+            _art_ok_map = {
+                ARTIFACT_CAMPAIGN_SUMMARY: report_ok,
+                ARTIFACT_RUN_REPORTS: v2_ok,
+                ARTIFACT_METADATA: meta_ok,
+            }
             for _art in _artifact_list:
-                if _art["artifact_type"] == ARTIFACT_CAMPAIGN_SUMMARY and not report_ok:
-                    _art["db_status"] = "failed"
-                    _art["exists"] = False
-                elif _art["artifact_type"] == ARTIFACT_RUN_REPORTS and not v2_ok:
-                    _art["db_status"] = "failed"
-                    _art["exists"] = False
-                elif _art["artifact_type"] == ARTIFACT_METADATA and not meta_ok:
+                _mapped_ok = _art_ok_map.get(_art["artifact_type"])
+                if _mapped_ok is False:
                     _art["db_status"] = "failed"
                     _art["exists"] = False
     except Exception as _art_list_exc:

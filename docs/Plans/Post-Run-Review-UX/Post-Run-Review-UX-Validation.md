@@ -66,6 +66,13 @@ Yes. `runner.py` calls `get_campaign_artifact_paths(_effective_lab_root, effecti
 
 ---
 
+## PR Review Fixes
+
+- consolidated duplicate artifact-status override branches into an artifact-type/ok-flag map
+- no behavior change intended
+
+---
+
 ## Validation Commands and Results
 
 ```
