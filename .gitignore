@@ -87,8 +87,6 @@ docs/*
 !docs/playbooks/**
 !docs/system/
 !docs/system/**
-!docs/Plans/
-!docs/Plans/**
 
 # Private/generated agent infrastructure and personal tracking
 .agent/artifacts/
@@ -96,7 +94,6 @@ docs/*
 .copilot/*
 !.copilot/instructions/
 !.copilot/instructions/quantmap-agent.instructions.md
-docs/K.I.T.-&-ToDo/
 
 # Permanently excluded from version control
 scratch_mock_run.py
@@ -105,18 +102,16 @@ scratch_mock_run.py
 docs/AUDITS/
 docs/BUGHUNT-4-18-26/
 docs/CHECKPOINTS-HANDOFFS/
+docs/CHECKPOINTS!/
 docs/Design Memo's/
 docs/K.I.T.-&-ToDo/
 docs/MVP/
+docs/Plans/
 docs/ROADMAPS/
 docs/decisions/
 docs/superpowers/
-docs/CHECKPOINTS!/
 docs/QuantMap MVP Audit Tracker.md
 docs/quantmap_mvp_decisions_and_reporting_contract.md
 
-
-
 .agent/scripts/helpers/fix_*.py
 CLAUDE.md
-docs/Plans/
