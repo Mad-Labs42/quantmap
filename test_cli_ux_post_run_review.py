@@ -11,6 +11,7 @@ from pathlib import Path
 from rich.console import Console
 
 import src.ui as ui
+from src.ui import PostRunReviewMetrics
 
 
 def _render(**kwargs) -> str:
@@ -121,7 +122,24 @@ def test_artifact_block_shows_missing_status():
     assert "not found" in out
 
 
-def test_artifact_block_human_label_unknown_type_falls_back_to_raw():
+def test_artifact_block_shows_raw_type_as_dim_secondary():
+    """Known artifact types include both friendly label and dimmed raw type."""
+    artifacts = [
+        {
+            "artifact_type": "metadata_json",
+            "filename": "metadata.json",
+            "path": Path("/lab/metadata.json"),
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+    ]
+    out = _render(campaign_id="TestCamp_01", report_ok=True, artifacts=artifacts)
+    assert "Metadata" in out
+    assert "metadata_json" in out
+
+
+def test_artifact_block_unknown_type_falls_back_to_raw():
     artifacts = [
         {
             "artifact_type": "some_future_type",
@@ -211,20 +229,22 @@ def test_failure_uses_singular_campaign_wording():
 
 
 # ---------------------------------------------------------------------------
-# Config summary
+# Config summary via PostRunReviewMetrics
 # ---------------------------------------------------------------------------
 
 def test_config_summary_full_success():
     out = _render(
         campaign_id="FullRun",
         report_ok=True,
-        configs_total=6,
-        configs_valid=4,
-        configs_eliminated=2,
-        winner_config_id="FullRun_30",
-        winner_tg=245.12,
-        run_mode="full",
-        elapsed_seconds=754.0,
+        metrics=PostRunReviewMetrics(
+            configs_total=6,
+            configs_valid=4,
+            configs_eliminated=2,
+            winner_config_id="FullRun_30",
+            winner_tg=245.12,
+            run_mode="full",
+            elapsed_seconds=754.0,
+        ),
     )
     assert "Configs:  6 tested" in out
     assert "4 valid" in out
@@ -239,11 +259,13 @@ def test_config_summary_no_eliminated():
     out = _render(
         campaign_id="CleanRun",
         report_ok=True,
-        configs_total=3,
-        configs_valid=3,
-        configs_eliminated=0,
-        winner_config_id="CleanRun_10",
-        winner_tg=180.0,
+        metrics=PostRunReviewMetrics(
+            configs_total=3,
+            configs_valid=3,
+            configs_eliminated=0,
+            winner_config_id="CleanRun_10",
+            winner_tg=180.0,
+        ),
     )
     assert "3 tested" in out
     assert "3 valid" in out
@@ -256,9 +278,11 @@ def test_config_summary_no_winner():
     out = _render(
         campaign_id="AllElim",
         report_ok=True,
-        configs_total=5,
-        configs_valid=0,
-        configs_eliminated=5,
+        metrics=PostRunReviewMetrics(
+            configs_total=5,
+            configs_valid=0,
+            configs_eliminated=5,
+        ),
     )
     assert "No valid configs produced a score." in out
 
@@ -268,19 +292,21 @@ def test_config_summary_winner_without_tg():
     out = _render(
         campaign_id="Weird",
         report_ok=True,
-        configs_total=2,
-        configs_valid=1,
-        configs_eliminated=1,
-        winner_config_id="Weird_99",
-        winner_tg=None,
+        metrics=PostRunReviewMetrics(
+            configs_total=2,
+            configs_valid=1,
+            configs_eliminated=1,
+            winner_config_id="Weird_99",
+            winner_tg=None,
+        ),
     )
     assert "Best observed config: Weird_99" in out
     assert "t/s" not in out  # no TG means no t/s suffix
 
 
 def test_config_summary_fields_omitted_safely():
-    """When config_summary data is absent, no config line appears."""
-    out = _render(campaign_id="NoSummary", report_ok=True)
+    """When metrics is None, no config line appears."""
+    out = _render(campaign_id="NoSummary", report_ok=True, metrics=None)
     assert "Configs:" not in out
     assert "Best observed config" not in out
 
@@ -290,12 +316,20 @@ def test_config_summary_fields_omitted_safely():
 # ---------------------------------------------------------------------------
 
 def test_run_mode_display():
-    out = _render(campaign_id="M", report_ok=True, configs_total=1, configs_valid=1, run_mode="quick")
+    out = _render(
+        campaign_id="M",
+        report_ok=True,
+        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, run_mode="quick"),
+    )
     assert "Mode: Quick" in out
 
 
 def test_run_mode_custom_label():
-    out = _render(campaign_id="M", report_ok=True, configs_total=1, configs_valid=1, run_mode="custom")
+    out = _render(
+        campaign_id="M",
+        report_ok=True,
+        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, run_mode="custom"),
+    )
     assert "Mode: Custom" in out
 
 
@@ -307,17 +341,25 @@ def test_elapsed_seconds_format():
 
 
 def test_elapsed_appears_when_provided():
-    out = _render(campaign_id="T", report_ok=True, configs_total=1, configs_valid=1, elapsed_seconds=90)
+    out = _render(
+        campaign_id="T",
+        report_ok=True,
+        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, elapsed_seconds=90),
+    )
     assert "1m 30s" in out
 
 
 def test_elapsed_not_shown_when_none():
-    out = _render(campaign_id="T", report_ok=True, configs_total=1, configs_valid=1, elapsed_seconds=None)
+    out = _render(
+        campaign_id="T",
+        report_ok=True,
+        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, elapsed_seconds=None),
+    )
     assert "Elapsed:" not in out
 
 
 def test_meta_line_omitted_when_no_data():
     """Neither mode nor elapsed produces no meta line."""
-    out = _render(campaign_id="T", report_ok=True, run_mode=None, elapsed_seconds=None)
+    out = _render(campaign_id="T", report_ok=True, metrics=None)
     assert "Mode:" not in out
     assert "Elapsed:" not in out

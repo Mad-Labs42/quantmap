@@ -2898,13 +2898,15 @@ def run_campaign(
         yolo_mode=yolo_mode,
         failure_cause=failure_cause,
         failure_remediation=failure_remediation,
-        winner_config_id=_winner_config_id,
-        winner_tg=_winner_tg,
-        configs_total=_configs_total,
-        configs_valid=_configs_valid,
-        configs_eliminated=_configs_eliminated,
-        run_mode=run_plan.run_mode if run_plan else None,
-        elapsed_seconds=time.monotonic() - _run_start_time if _run_start_time else None,
+        metrics=ui.PostRunReviewMetrics(
+            winner_config_id=_winner_config_id,
+            winner_tg=_winner_tg,
+            configs_total=_configs_total,
+            configs_valid=_configs_valid,
+            configs_eliminated=_configs_eliminated,
+            run_mode=run_plan.run_mode if run_plan else None,
+            elapsed_seconds=time.monotonic() - _run_start_time if _run_start_time is not None else None,
+        ),
     )
 
     if not report_ok:

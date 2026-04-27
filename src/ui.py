@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -17,6 +18,13 @@ if TYPE_CHECKING:
 
 from rich.console import Console
 from rich.theme import Theme
+
+from src.artifact_paths import (
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_METADATA,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_RUN_REPORTS,
+)
 
 # ---------------------------------------------------------------------------
 # Capability Detection Logic
@@ -54,6 +62,27 @@ SYM_FAIL: str = "✗" if not USE_ASCII else "[FAIL]"
 SYM_INFO: str = "ℹ " if not USE_ASCII else "[i]"
 SYM_RETRY: str = "↺" if not USE_ASCII else "[RETRY]"
 SYM_DIVIDER: str = "━" if not USE_ASCII else "-"
+
+
+# ---------------------------------------------------------------------------
+# Post-run review presentation DTO
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PostRunReviewMetrics:
+    """Lightweight presentation DTO for config summary metadata.
+
+    Grouped to keep render_post_run_review parameter count under Sonar's
+    13-parameter limit.  All fields are optional — the renderer silently
+    omits any section for which data is absent.
+    """
+    winner_config_id: str | None = None
+    winner_tg: float | None = None
+    configs_total: int | None = None
+    configs_valid: int | None = None
+    configs_eliminated: int | None = None
+    run_mode: str | None = None
+    elapsed_seconds: float | None = None
 
 
 def render_acpm_plan_preview(
@@ -327,10 +356,10 @@ def render_artifact_block(
     Each entry: artifact_type, filename, path, exists, db_status, sha256.
     """
     _ARTIFACT_LABELS: dict[str, str] = {
-        "campaign_summary_md":   "Campaign Summary",
-        "run_reports_md":        "Run Reports",
-        "metadata_json":         "Metadata",
-        "raw_telemetry_jsonl":   "Raw Telemetry",
+        ARTIFACT_CAMPAIGN_SUMMARY: "Campaign Summary",
+        ARTIFACT_RUN_REPORTS:      "Run Reports",
+        ARTIFACT_METADATA:         "Metadata",
+        ARTIFACT_RAW_TELEMETRY:    "Raw Telemetry",
     }
 
     console = target_console or get_console()
@@ -352,7 +381,12 @@ def render_artifact_block(
 
         from rich.markup import escape
         path_str = escape(str(path)) if path else "[dim]path unknown[/dim]"
-        display_name = _ARTIFACT_LABELS.get(atype, escape(atype))
+        raw_type = escape(atype)
+        label_name = _ARTIFACT_LABELS.get(atype)
+        if label_name:
+            display_name = f"{label_name} [dim]({raw_type})[/dim]"
+        else:
+            display_name = raw_type
         console.print(
             f"  [{color}]{sym}[/{color}] {display_name}"
             f"\n    {path_str}  [{color}]({label})[/{color}]"
@@ -368,13 +402,7 @@ def render_post_run_review(
     yolo_mode: bool = False,
     failure_cause: str | None = None,
     failure_remediation: str | None = None,
-    winner_config_id: str | None = None,
-    winner_tg: float | None = None,
-    configs_total: int | None = None,
-    configs_valid: int | None = None,
-    configs_eliminated: int | None = None,
-    run_mode: str | None = None,
-    elapsed_seconds: float | None = None,
+    metrics: PostRunReviewMetrics | None = None,
     target_console: Console | None = None,
 ) -> None:
     """Render the post-run campaign review screen.
@@ -393,13 +421,9 @@ def render_post_run_review(
         yolo_mode:           If True, show the YOLO active reminder.
         failure_cause:       Optional short failure cause.
         failure_remediation: Optional user-facing remediation guidance.
-        winner_config_id:    Optional config ID of the score winner.
-        winner_tg:           Optional warm TG median of the score winner (t/s).
-        configs_total:       Total config count (tested).
-        configs_valid:       Number of rankable (passed-filters) configs.
-        configs_eliminated:  Number of eliminated configs.
-        run_mode:            Run mode label (full/quick/standard/custom).
-        elapsed_seconds:     Approximate campaign wall-clock elapsed time.
+        metrics:             Optional PostRunReviewMetrics with winner/config/run
+                             metadata.  When None the entire config summary,
+                             mode, and elapsed sections are silently omitted.
         target_console:      Console to render to (defaults to global console).
     """
     con = target_console or get_console()
@@ -426,32 +450,33 @@ def render_post_run_review(
         con.print("Status:  [bold red]Failed[/bold red]")
 
     # Config summary
-    _has_config_summary = configs_total is not None and configs_total > 0
-    if _has_config_summary:
-        _parts: list[str] = [f"{configs_total} tested"]
-        if configs_valid is not None:
-            _parts.append(f"[green]{configs_valid} valid[/green]")
-        if configs_eliminated is not None and configs_eliminated > 0:
-            _parts.append(f"[yellow]{configs_eliminated} eliminated[/yellow]")
+    _has_config_summary = False
+    if metrics is not None and metrics.configs_total is not None and metrics.configs_total > 0:
+        _has_config_summary = True
+        _parts: list[str] = [f"{metrics.configs_total} tested"]
+        if metrics.configs_valid is not None:
+            _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
+        if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
+            _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
         con.print(f"Configs:  {' · '.join(_parts)}")
 
-        if winner_config_id is not None and winner_tg is not None:
+        if metrics.winner_config_id is not None and metrics.winner_tg is not None:
             con.print(
-                f"Best observed config: [bold]{winner_config_id}[/bold] "
-                f"· TG [bold green]{winner_tg:.2f}[/bold green] t/s"
+                f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
+                f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
             )
-        elif winner_config_id is not None:
-            con.print(f"Best observed config: [bold]{winner_config_id}[/bold]")
-        elif configs_valid is not None and configs_valid == 0:
+        elif metrics.winner_config_id is not None:
+            con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
+        elif metrics.configs_valid is not None and metrics.configs_valid == 0:
             con.print("[dim]No valid configs produced a score.[/dim]")
 
     # Mode and elapsed time
     _meta_parts: list[str] = []
-    if run_mode is not None:
-        _mode_label = _MODE_LABELS.get(run_mode, run_mode.title())
+    if metrics is not None and metrics.run_mode is not None:
+        _mode_label = _MODE_LABELS.get(metrics.run_mode, metrics.run_mode.title())
         _meta_parts.append(f"Mode: [dim]{_mode_label}[/dim]")
-    if elapsed_seconds is not None:
-        _elapsed_str = _format_elapsed(elapsed_seconds)
+    if metrics is not None and metrics.elapsed_seconds is not None:
+        _elapsed_str = _format_elapsed(metrics.elapsed_seconds)
         _meta_parts.append(f"Elapsed: [dim]{_elapsed_str}[/dim]")
     if _meta_parts:
         con.print("  ".join(_meta_parts))
