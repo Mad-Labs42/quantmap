@@ -2905,7 +2905,7 @@ def run_campaign(
             configs_valid=_configs_valid,
             configs_eliminated=_configs_eliminated,
             run_mode=run_plan.run_mode if run_plan else None,
-            elapsed_seconds=time.monotonic() - _run_start_time if _run_start_time is not None else None,
+            elapsed_seconds=time.monotonic() - _run_start_time,
         ),
     )
 
