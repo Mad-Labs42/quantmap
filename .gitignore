@@ -101,12 +101,17 @@ docs/K.I.T.-&-ToDo/
 # Permanently excluded from version control
 scratch_mock_run.py
 
-# Internal-only docs
+# Internal-only docs — never commit, never push
 docs/AUDITS/
+docs/BUGHUNT-4-18-26/
+docs/CHECKPOINTS-HANDOFFS/
+docs/Design Memo's/
+docs/K.I.T.-&-ToDo/
+docs/MVP/
+docs/ROADMAPS/
 docs/decisions/
 docs/superpowers/
 docs/CHECKPOINTS!/
-docs/Design Memo's/
 docs/QuantMap MVP Audit Tracker.md
 docs/quantmap_mvp_decisions_and_reporting_contract.md
 
