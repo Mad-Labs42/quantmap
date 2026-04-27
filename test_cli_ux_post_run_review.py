@@ -132,3 +132,29 @@ def test_renderer_is_idempotent():
     out1 = _render(**kwargs)
     out2 = _render(**kwargs)
     assert out1 == out2
+
+# ---------------------------------------------------------------------------
+# Outcome Language
+# ---------------------------------------------------------------------------
+
+def test_outcome_success():
+    out = _render(campaign_id='X_test', report_ok=True)
+    assert 'All requested campaigns ran successfully.' in out
+
+def test_outcome_failure_unknown_cause():
+    out = _render(campaign_id='X_test', report_ok=False, diagnostics_path='/lab/diag')
+    assert 'Error: QuantMap could not execute the requested campaigns.' in out
+    assert 'Cause: Unknown.' in out
+    assert 'Internal diagnostics may help diagnose the issue' in out
+
+def test_outcome_failure_known_cause():
+    out = _render(campaign_id='X_test', report_ok=False, failure_cause='Disk full', diagnostics_path='/lab/diag')
+    assert 'Error: QuantMap could not execute the requested campaigns.' in out
+    assert 'Cause: Disk full.' in out
+    assert 'Suggested fix:' not in out
+    assert 'Internal diagnostics may provide more information: /lab/diag' in out
+
+def test_outcome_failure_remediation():
+    out = _render(campaign_id='X_test', report_ok=False, failure_cause='Timeout', failure_remediation='Try increasing timeout')
+    assert 'Cause: Timeout.' in out
+    assert 'Suggested fix: Try increasing timeout.' in out

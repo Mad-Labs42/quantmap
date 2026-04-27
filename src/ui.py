@@ -358,6 +358,8 @@ def render_post_run_review(
     artifacts: list[dict] | None = None,
     diagnostics_path: str | None = None,
     yolo_mode: bool = False,
+    failure_cause: str | None = None,
+    failure_remediation: str | None = None,
     target_console: Console | None = None,
 ) -> None:
     """Render the post-run campaign review screen.
@@ -376,6 +378,10 @@ def render_post_run_review(
         yolo_mode:        If True, show the YOLO active reminder.  Must only
                           be True when the caller explicitly passed yolo_mode
                           to run_campaign().  Normal runs always pass False.
+        failure_cause:    Optional short failure cause shown in the final review
+                          when report_ok is false.
+        failure_remediation: Optional user-facing remediation guidance shown only
+                             when a known actionable fix exists.
         target_console:   Console to render to (defaults to global console).
     """
     con = target_console or get_console()
@@ -387,6 +393,29 @@ def render_post_run_review(
             "[yellow]Validation requirements were relaxed because the user "
             "chose to continue after a trust warning.[/yellow]"
         )
+
+    # Outcome language
+    failure_cause_stripped = failure_cause.strip() if failure_cause is not None else ""
+
+    if report_ok:
+        con.print("\n[bold green]All requested campaigns ran successfully.[/bold green]")
+    else:
+        con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
+        if failure_cause_stripped:
+            from rich.markup import escape as _escape  # noqa: PLC0415
+
+            def _norm(text: str) -> str:
+                text = text.strip()
+                if not text:
+                    return text
+                return text if text[-1] in (".", "!", "?") else f"{text}."
+
+            con.print("We identified the following blocker(s):\n")
+            con.print(f"- Cause: {_norm(_escape(failure_cause_stripped))}")
+            if failure_remediation and failure_remediation.strip():
+                con.print(f"  Suggested fix: {_norm(_escape(failure_remediation))}")
+        else:
+            con.print("Cause: Unknown.")
 
     # Artifact block — only when artifact data is available.
     if artifacts is not None:
@@ -404,13 +433,19 @@ def render_post_run_review(
             target_console=con,
         )
 
-    # Internal diagnostics notice — always shown when path is known.
+    # Internal diagnostics notice
     if diagnostics_path is not None:
         from rich.markup import escape  # noqa: PLC0415
         safe_path = escape(str(diagnostics_path))
-        con.print(
-            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
-            f"By default, they are not included in the user-facing artifact list.\n"
-            f"If you would like to view them, you may do so at:\n"
-            f"{safe_path}[/dim]"
-        )
+        if report_ok:
+            con.print(
+                f"\n[dim]Internal diagnostic files were retained for debugging.\n"
+                f"By default, they are not included in the user-facing artifact list.\n"
+                f"If you would like to view them, you may do so at:\n"
+                f"{safe_path}[/dim]"
+            )
+        else:
+            if failure_cause_stripped:
+                con.print(f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]")
+            else:
+                con.print(f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]")

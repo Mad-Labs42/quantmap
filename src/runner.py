@@ -2569,7 +2569,6 @@ def run_campaign(
 
     _clear_progress(_eff_state_file)
 
-    console.print(f"\n[bold green]Campaign {effective_campaign_id} complete.[/bold green]")
     logger.info("Campaign %s complete.", effective_campaign_id)
 
     # Run analysis + scoring + report
@@ -2578,7 +2577,8 @@ def run_campaign(
     # runner MUST exit non-zero so automation (CI pipelines, batch scripts) can
     # detect the failure. Exiting 0 when the report failed to generate is data
     # falsification from the caller's perspective. (L5 fix)
-    console.print("[bold]Running analysis and scoring...[/bold]")
+    failure_cause = None
+    failure_remediation = None
     report_ok = False
     v2_ok = False
     meta_ok = False
@@ -2701,14 +2701,13 @@ def run_campaign(
                 effective_campaign_id, _efp_exc,
             )
 
-        report_path = generate_report(
-            effective_campaign_id, _eff_db_path, baseline, scores, stats,
-            campaign=campaign,
-            lab_root=_effective_lab_root,
-            run_plan=run_plan,
-        )
-        from rich.markup import escape
-        console.print(f"[green]Report written:[/green] {escape(str(report_path))}")
+        with console.status("Generating artifacts..."):
+            generate_report(
+                effective_campaign_id, _eff_db_path, baseline, scores, stats,
+                campaign=campaign,
+                lab_root=_effective_lab_root,
+                run_plan=run_plan,
+            )
         report_ok = True
 
         # Generate the evidence-first campaign report (new philosophy).
@@ -2716,13 +2715,11 @@ def run_campaign(
         v2_ok = True
         try:
             from src.report_campaign import generate_campaign_report  # noqa: PLC0415
-            v2_path = generate_campaign_report(
+            generate_campaign_report(
                 effective_campaign_id, _eff_db_path, baseline, scores, stats,
                 campaign=campaign,
                 lab_root=_effective_lab_root,
             )
-            from rich.markup import escape
-            console.print(f"[green]Run reports written:[/green] {escape(str(v2_path))}")
         except Exception as _v2_exc:
             v2_ok = False
             logger.warning(
@@ -2767,15 +2764,13 @@ def run_campaign(
         # Non-fatal — failures are logged and registered in DB as failed status.
         try:
             from src.export import generate_metadata_json  # noqa: PLC0415
-            meta_path = generate_metadata_json(
+            generate_metadata_json(
                 effective_campaign_id,
                 _eff_db_path,
                 scores_result=scores,
                 stats=stats,
                 lab_root=_effective_lab_root,
             )
-            from rich.markup import escape
-            console.print(f"[green]Metadata written:[/green] {escape(str(meta_path))}")
             meta_ok = True
         except Exception as _meta_exc:
             logger.warning("metadata.json generation failed (non-fatal): %s", _meta_exc)
@@ -2806,9 +2801,8 @@ def run_campaign(
 
     except Exception as exc:
         logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
-        console.print(
-            f"[bold red]Analysis failed (raw data is safe — run rescore.py to retry):[/bold red]\n{exc}"
-        )
+        failure_cause = "Post-campaign analysis failed."
+        failure_remediation = "Run 'quantmap rescore' to retry analysis."
         with get_connection(_eff_db_path) as _status_conn:
             now_status = datetime.now(timezone.utc).isoformat()
             if analysis_ok:
@@ -2882,6 +2876,8 @@ def run_campaign(
         artifacts=_artifact_list,
         diagnostics_path=_diagnostics_path,
         yolo_mode=yolo_mode,
+        failure_cause=failure_cause,
+        failure_remediation=failure_remediation,
     )
 
     if not report_ok:
