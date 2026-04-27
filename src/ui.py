@@ -326,6 +326,13 @@ def render_artifact_block(
     artifacts: list of dicts from artifact_paths.get_campaign_artifact_paths().
     Each entry: artifact_type, filename, path, exists, db_status, sha256.
     """
+    _ARTIFACT_LABELS: dict[str, str] = {
+        "campaign_summary_md":   "Campaign Summary",
+        "run_reports_md":        "Run Reports",
+        "metadata_json":         "Metadata",
+        "raw_telemetry_jsonl":   "Raw Telemetry",
+    }
+
     console = target_console or get_console()
     console.print(f"\n[bold]Artifacts — {campaign_id}[/bold]")
     for a in artifacts:
@@ -345,8 +352,9 @@ def render_artifact_block(
 
         from rich.markup import escape
         path_str = escape(str(path)) if path else "[dim]path unknown[/dim]"
+        display_name = _ARTIFACT_LABELS.get(atype, escape(atype))
         console.print(
-            f"  [{color}]{sym}[/{color}] [dim]{atype}[/dim]"
+            f"  [{color}]{sym}[/{color}] {display_name}"
             f"\n    {path_str}  [{color}]({label})[/{color}]"
         )
     console.print("")
@@ -360,6 +368,13 @@ def render_post_run_review(
     yolo_mode: bool = False,
     failure_cause: str | None = None,
     failure_remediation: str | None = None,
+    winner_config_id: str | None = None,
+    winner_tg: float | None = None,
+    configs_total: int | None = None,
+    configs_valid: int | None = None,
+    configs_eliminated: int | None = None,
+    run_mode: str | None = None,
+    elapsed_seconds: float | None = None,
     target_console: Console | None = None,
 ) -> None:
     """Render the post-run campaign review screen.
@@ -368,39 +383,85 @@ def render_post_run_review(
     All state is passed in by the caller (runner.py).
 
     Args:
-        campaign_id:      Effective campaign ID used for the run.
-        report_ok:        True if the primary report was generated successfully.
-        artifacts:        Optional list of artifact dicts from
-                          artifact_paths.get_campaign_artifact_paths().
-                          If provided, render_artifact_block is called.
-        diagnostics_path: Optional path string for the internal diagnostics
-                          folder.  None → diagnostics block is omitted.
-        yolo_mode:        If True, show the YOLO active reminder.  Must only
-                          be True when the caller explicitly passed yolo_mode
-                          to run_campaign().  Normal runs always pass False.
-        failure_cause:    Optional short failure cause shown in the final review
-                          when report_ok is false.
-        failure_remediation: Optional user-facing remediation guidance shown only
-                             when a known actionable fix exists.
-        target_console:   Console to render to (defaults to global console).
+        campaign_id:         Effective campaign ID used for the run.
+        report_ok:           True if the primary report was generated successfully.
+        artifacts:           Optional list of artifact dicts from
+                             artifact_paths.get_campaign_artifact_paths().
+                             If provided, render_artifact_block is called.
+        diagnostics_path:    Optional path string for the internal diagnostics
+                             folder.  None -> diagnostics block is omitted.
+        yolo_mode:           If True, show the YOLO active reminder.
+        failure_cause:       Optional short failure cause.
+        failure_remediation: Optional user-facing remediation guidance.
+        winner_config_id:    Optional config ID of the score winner.
+        winner_tg:           Optional warm TG median of the score winner (t/s).
+        configs_total:       Total config count (tested).
+        configs_valid:       Number of rankable (passed-filters) configs.
+        configs_eliminated:  Number of eliminated configs.
+        run_mode:            Run mode label (full/quick/standard/custom).
+        elapsed_seconds:     Approximate campaign wall-clock elapsed time.
+        target_console:      Console to render to (defaults to global console).
     """
     con = target_console or get_console()
 
+    _MODE_LABELS: dict[str, str] = {
+        "full": "Full", "quick": "Quick", "standard": "Standard", "custom": "Custom",
+    }
+
+    # Campaign review header
+    con.print(f"\n[bold]Campaign review — {campaign_id}[/bold]")
+
     # YOLO active notice — shown above the review when explicitly activated.
     if yolo_mode:
-        con.print("\n[bold yellow]YOLO Mode Active[/bold yellow]")
+        con.print("[bold yellow]YOLO Mode Active[/bold yellow]")
         con.print(
             "[yellow]Validation requirements were relaxed because the user "
             "chose to continue after a trust warning.[/yellow]"
         )
 
-    # Outcome language
-    failure_cause_stripped = failure_cause.strip() if failure_cause is not None else ""
-
+    # Status line
     if report_ok:
-        con.print("\n[bold green]All requested campaigns ran successfully.[/bold green]")
+        con.print("Status:  [bold green]Success[/bold green]")
     else:
-        con.print("\n[bold red]Error: QuantMap could not execute the requested campaigns.[/bold red]\n")
+        con.print("Status:  [bold red]Failed[/bold red]")
+
+    # Config summary
+    _has_config_summary = configs_total is not None and configs_total > 0
+    if _has_config_summary:
+        _parts: list[str] = [f"{configs_total} tested"]
+        if configs_valid is not None:
+            _parts.append(f"[green]{configs_valid} valid[/green]")
+        if configs_eliminated is not None and configs_eliminated > 0:
+            _parts.append(f"[yellow]{configs_eliminated} eliminated[/yellow]")
+        con.print(f"Configs:  {' · '.join(_parts)}")
+
+        if winner_config_id is not None and winner_tg is not None:
+            con.print(
+                f"Best observed config: [bold]{winner_config_id}[/bold] "
+                f"· TG [bold green]{winner_tg:.2f}[/bold green] t/s"
+            )
+        elif winner_config_id is not None:
+            con.print(f"Best observed config: [bold]{winner_config_id}[/bold]")
+        elif configs_valid is not None and configs_valid == 0:
+            con.print("[dim]No valid configs produced a score.[/dim]")
+
+    # Mode and elapsed time
+    _meta_parts: list[str] = []
+    if run_mode is not None:
+        _mode_label = _MODE_LABELS.get(run_mode, run_mode.title())
+        _meta_parts.append(f"Mode: [dim]{_mode_label}[/dim]")
+    if elapsed_seconds is not None:
+        _elapsed_str = _format_elapsed(elapsed_seconds)
+        _meta_parts.append(f"Elapsed: [dim]{_elapsed_str}[/dim]")
+    if _meta_parts:
+        con.print("  ".join(_meta_parts))
+    elif _has_config_summary:
+        con.print("")  # blank line after config summary when no meta line
+
+    # Failure detail block
+    failure_cause_stripped = failure_cause.strip() if failure_cause is not None else ""
+    if not report_ok:
+        con.print("")
         if failure_cause_stripped:
             from rich.markup import escape as _escape  # noqa: PLC0415
 
@@ -410,7 +471,7 @@ def render_post_run_review(
                     return text
                 return text if text[-1] in (".", "!", "?") else f"{text}."
 
-            con.print("We identified the following blocker(s):\n")
+            con.print("The following blocker was identified:\n")
             con.print(f"- Cause: {_norm(_escape(failure_cause_stripped))}")
             if failure_remediation and failure_remediation.strip():
                 con.print(f"  Suggested fix: {_norm(_escape(failure_remediation))}")
@@ -449,3 +510,16 @@ def render_post_run_review(
                 con.print(f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]")
             else:
                 con.print(f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]")
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format elapsed seconds as a human-readable duration string."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m"

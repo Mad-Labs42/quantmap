@@ -1705,6 +1705,8 @@ def run_campaign(
 
     effective_campaign_id = _derive_effective_campaign_id(campaign_id, values_override, mode_flag)
 
+    _run_start_time = time.monotonic()
+
     _setup_logging(effective_campaign_id, logs_dir=_eff_logs_dir)
     logger.info("=" * 70)
     logger.info(
@@ -2583,6 +2585,11 @@ def run_campaign(
     v2_ok = False
     meta_ok = False
     analysis_ok = False
+    _winner_config_id: str | None = None
+    _winner_tg: float | None = None
+    _configs_total: int | None = None
+    _configs_valid: int | None = None
+    _configs_eliminated: int | None = None
     try:
         from src.score import score_campaign
         from src.report import generate_report
@@ -2631,6 +2638,19 @@ def run_campaign(
         )
         stats = scores["stats"]
         analysis_ok = True
+
+        _winner_config_id = scores.get("winner")
+        _winner_tg = None
+        if _winner_config_id is not None:
+            _passing = scores.get("passing", {})
+            _winner_stats = _passing.get(_winner_config_id, {}) if isinstance(_passing, dict) else {}
+            _winner_tg_raw = _winner_stats.get("warm_tg_median")
+            if isinstance(_winner_tg_raw, (int, float)):
+                _winner_tg = float(_winner_tg_raw)
+
+        _configs_total = len(stats)
+        _configs_valid = len(scores.get("passing", {}))
+        _configs_eliminated = len(scores.get("eliminated", {}))
         with get_connection(_eff_db_path) as _status_conn:
             now_status = datetime.now(timezone.utc).isoformat()
             _status_conn.execute(
@@ -2878,6 +2898,13 @@ def run_campaign(
         yolo_mode=yolo_mode,
         failure_cause=failure_cause,
         failure_remediation=failure_remediation,
+        winner_config_id=_winner_config_id,
+        winner_tg=_winner_tg,
+        configs_total=_configs_total,
+        configs_valid=_configs_valid,
+        configs_eliminated=_configs_eliminated,
+        run_mode=run_plan.run_mode if run_plan else None,
+        elapsed_seconds=time.monotonic() - _run_start_time if _run_start_time else None,
     )
 
     if not report_ok:

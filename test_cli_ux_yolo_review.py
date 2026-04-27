@@ -125,5 +125,5 @@ def test_yolo_run_contains_yolo_wording(tmp_path: Path, monkeypatch):
 def test_artifact_block_populated_in_post_run_review(tmp_path: Path, monkeypatch):
     """Artifact block appears in final review when artifact discovery succeeds."""
     output = _run_mocked_campaign(tmp_path, monkeypatch, yolo_mode=False)
-    assert "campaign_summary_md" in output
+    assert "Campaign Summary" in output
     assert "Artifacts" in output
