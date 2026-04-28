@@ -145,7 +145,7 @@ def build_config_list(
         else:
             full_config[variable] = value
 
-        server_args = _config_to_server_args(full_config, baseline)
+        server_args = _config_to_server_args(full_config)
 
         configs.append(
             {
@@ -161,7 +161,7 @@ def build_config_list(
     return configs
 
 
-def _config_to_server_args(config: dict[str, Any], baseline: dict[str, Any]) -> list[str]:
+def _config_to_server_args(config: dict[str, Any]) -> list[str]:
     """
     Convert a merged config dict to a llama-server argument list.
     Does not include --host, --port, or --model (added by server.py).

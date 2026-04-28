@@ -347,12 +347,10 @@ def test_build_defrag_threshold_safe_compare() -> None:
 
     configs = mod.build_config_list(baseline, campaign)
 
-    assert configs[0]["full_config"]["defrag_thold"] == 0.3
-    # 0.3 != 0.1 so should NOT have defrag arg (but it's the swept value)
-    # The baseline has 0.3 now, and the swept value is also 0.3
-    # Since defrag_thold is swept, full_config gets 0.3 from the sweep
-    # But _config_to_server_args uses config["defrag_thold"] not baseline
-    # This test just ensures no exception on float comparison
+    assert configs[0]["full_config"]["defrag_thold"] == pytest.approx(0.3)
+    assert "--defrag-thold" in configs[0]["server_args"]
+    idx = configs[0]["server_args"].index("--defrag-thold")
+    assert configs[0]["server_args"][idx + 1] == "0.3"
 
 
 def test_build_defrag_threshold_negative() -> None:
