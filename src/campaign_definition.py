@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,11 @@ def load_campaign(campaign_id: str) -> dict[str, Any]:
         return yaml.safe_load(f)
 
 
+def _cid(campaign_id: str) -> str:
+    """Return campaign_id or '?' for error messages."""
+    return campaign_id if campaign_id else "?"
+
+
 def validate_campaign_purity(
     baseline: dict[str, Any],
     campaign: dict[str, Any],
@@ -48,29 +54,30 @@ def validate_campaign_purity(
     Returns the variable name being swept.
     Raises CampaignPurityViolationError if zero or >1 fields differ.
     """
-    variable = campaign.get("variable", "")
-    if variable == "interaction":
-        return "interaction"
-    if campaign.get("auto_generated"):
-        if not variable:
-            raise CampaignPurityViolationError(
-                f"Campaign {campaign.get('campaign_id', '?')} is auto_generated but has no variable"
-            )
-        return variable
-    if not variable:
+    campaign_id = _cid(campaign.get("campaign_id", ""))
+
+    variable_raw = campaign.get("variable")
+    if variable_raw is None or not isinstance(variable_raw, str) or not variable_raw.strip():
         raise CampaignPurityViolationError(
-            f"Campaign {campaign.get('campaign_id', '?')} has no variable"
+            f"Campaign {campaign_id} has no variable (got {variable_raw!r})"
         )
+    variable = variable_raw.strip()
 
-    baseline_config: dict[str, Any] = baseline.get("config", {})
     values = campaign.get("values", [])
-
     if not values:
         raise CampaignPurityViolationError(
-            f"Campaign {campaign['campaign_id']} has no values to sweep."
+            f"Campaign {campaign_id} has no values to sweep."
         )
 
-    # Verify the variable exists in baseline config
+    if variable == "interaction":
+        logger.info(
+            "Interaction campaign purity check passed: variable='%s', values=%s",
+            variable,
+            values,
+        )
+        return variable
+
+    baseline_config: dict[str, Any] = baseline.get("config", {})
     if variable not in baseline_config and variable != "cpu_affinity":
         raise CampaignPurityViolationError(
             f"Campaign variable '{variable}' is not a field in baseline.yaml config section.\n"
@@ -83,6 +90,20 @@ def validate_campaign_purity(
         values,
     )
     return variable
+
+
+def _make_config_id(campaign_id: str, value: object) -> str:
+    """Build a deterministic, collision-resistant config_id suffix."""
+    raw = str(value)
+    cleaned = (
+        raw.replace(".", "p")
+        .replace("-", "m")
+        .replace(",", "")
+        .replace("=", "e")
+    )
+    digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
+    prefix = cleaned[:12]
+    return f"{campaign_id}_{prefix}_{digest}" if len(cleaned) > 12 else f"{campaign_id}_{prefix}"
 
 
 def build_config_list(
@@ -109,33 +130,21 @@ def build_config_list(
 
     configs = []
     for value in values:
-        # Build a short config ID suffix
-        val_str = (
-            str(value)
-            .replace(".", "p")
-            .replace("-", "m")
-            .replace(",", "")
-            .replace("=", "e")[:12]
-        )
-        config_id = f"{campaign_id}_{val_str}"
+        config_id = _make_config_id(campaign_id, value)
 
-        # Merge baseline + this value
         full_config = dict(baseline_config)
         if variable == "interaction" and isinstance(value, dict):
-            # Interaction campaigns: each value is a dict of variable overrides
-            config_id = value.get("config_id", f"{campaign_id}_combined")
+            config_id = value.get("config_id", _make_config_id(campaign_id, value))
             full_config.update(value.get("overrides", value))
         elif variable == "cpu_affinity":
             full_config["_cpu_affinity"] = value
         elif variable == "kv_cache_type_k":
-            # C03: mirrors K and V
             full_config["kv_cache_type_k"] = value
             if campaign.get("kv_mirror_v", False):
                 full_config["kv_cache_type_v"] = value
         else:
             full_config[variable] = value
 
-        # Build server args from full_config
         server_args = _config_to_server_args(full_config, baseline)
 
         configs.append(
@@ -159,49 +168,35 @@ def _config_to_server_args(config: dict[str, Any], baseline: dict[str, Any]) -> 
     """
     args: list[str] = []
 
-    # Context
     if "context_size" in config:
         args += ["-c", str(config["context_size"])]
 
-    # GPU layers (locked at 999)
     args += ["-ngl", str(config.get("n_gpu_layers", 999))]
 
-    # Override tensor placement
     ot = config.get("override_tensor")
     if ot:
         args += ["-ot", str(ot)]
 
-    # Flash attention: null = omit flag (server default = auto)
     fa = config.get("flash_attn")
     if fa is False:
         args += ["-fa", "0"]
     elif fa is True:
         args += ["-fa", "1"]
-    # null = omit
 
-    # Jinja templating
     if config.get("jinja", True):
         args.append("--jinja")
 
-    # Threads — all three flags are always explicit.
-    # threads_http was previously omitted when equal to its default (1), making
-    # the resolved_command for C15's threads_http=1 config look identical to a
-    # baseline config and hiding which parameter was being tested. (HIGH-5 fix)
-    # --threads-http 1 is a no-op on the server; explicit is unambiguous.
     args += ["--threads", str(config.get("threads", 16))]
     args += ["--threads-batch", str(config.get("threads_batch", 16))]
     args += ["--threads-http", str(config.get("threads_http", 1))]
 
-    # Batch sizes
     args += ["-ub", str(config.get("ubatch_size", 512))]
     args += ["-b", str(config.get("batch_size", 2048))]
 
-    # Parallel slots
     n_parallel = config.get("n_parallel", 1)
     if n_parallel != 1:
         args += ["--parallel", str(n_parallel)]
 
-    # KV cache type
     kv_k = config.get("kv_cache_type_k", "f16")
     kv_v = config.get("kv_cache_type_v", "f16")
     if kv_k != "f16":
@@ -209,23 +204,18 @@ def _config_to_server_args(config: dict[str, Any], baseline: dict[str, Any]) -> 
     if kv_v != "f16":
         args += ["--cache-type-v", kv_v]
 
-    # mmap
     if not config.get("mmap", True):
         args.append("--no-mmap")
 
-    # mlock
     if config.get("mlock", False):
         args.append("--mlock")
 
-    # Continuous batching
     if not config.get("cont_batching", True):
         args.append("--no-cont-batching")
 
-    # Defrag threshold
     defrag = config.get("defrag_thold", 0.1)
-    if defrag != 0.1:
+    if abs(defrag - 0.1) > 1e-9:
         if defrag < 0:
-            # Negative value = disable. llama.cpp uses -1 to disable.
             args += ["--defrag-thold", "-1"]
         else:
             args += ["--defrag-thold", str(defrag)]
@@ -238,8 +228,19 @@ def _get_affinity_mask(config: dict[str, Any], campaign: dict[str, Any]) -> str 
     affinity = config.get("_cpu_affinity")
     if not affinity or affinity == "all_cores":
         return None
-    # Get the P-cores-only mask from campaign details
-    details = campaign.get("cpu_affinity_details", {})
-    if isinstance(details, dict):
-        return details.get(affinity)
-    return affinity
+
+    details = campaign.get("cpu_affinity_details")
+    if not isinstance(details, dict):
+        raise CampaignPurityViolationError(
+            f"Campaign {_cid(campaign.get('campaign_id', ''))} "
+            f"requests affinity '{affinity}' but cpu_affinity_details is missing or not a dict"
+        )
+
+    mask = details.get(affinity)
+    if mask is None:
+        raise CampaignPurityViolationError(
+            f"Campaign {_cid(campaign.get('campaign_id', ''))} "
+            f"has no affinity mask for key '{affinity}'. Available: {list(details.keys())}"
+        )
+
+    return mask
