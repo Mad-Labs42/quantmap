@@ -937,7 +937,7 @@ def score_campaign(
     abandoned_ids: set[str] = set()
     if campaign:
         try:
-            from src.runner import build_config_list  # noqa: PLC0415
+            from src.campaign_definition import build_config_list  # noqa: PLC0415
             active_configs = build_config_list(baseline, campaign)
             active_ids = {c["config_id"] for c in active_configs}
             abandoned_ids = set(stats.keys()) - active_ids
