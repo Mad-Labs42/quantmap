@@ -16,6 +16,7 @@ def _campaign_definition_module():
         return importlib.import_module("src.campaign_definition")
     except ModuleNotFoundError as exc:  # pragma: no cover - red stage only
         pytest.fail(f"src.campaign_definition is missing: {exc}")
+        raise  # dead code, suppresses CodeQL mixed-return warning
 
 
 def _baseline() -> dict[str, object]:
@@ -129,6 +130,33 @@ def test_validate_campaign_purity_auto_generated_bypass() -> None:
     variable = mod.validate_campaign_purity(baseline, campaign)
 
     assert variable == "threads"
+
+
+def test_validate_campaign_purity_missing_variable_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "values": [8, 16]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no variable"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_validate_campaign_purity_empty_variable_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "variable": "", "values": [8, 16]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no variable"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_validate_campaign_purity_auto_generated_without_variable_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "FINALIST", "values": [], "auto_generated": True}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="auto_generated but has no variable"):
+        mod.validate_campaign_purity(baseline, campaign)
 
 
 def test_build_config_list_normal_scalar_sweep_preserves_shape() -> None:

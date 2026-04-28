@@ -105,8 +105,6 @@ load_baseline = _campaign_definition.load_baseline
 load_campaign = _campaign_definition.load_campaign
 validate_campaign_purity = _campaign_definition.validate_campaign_purity
 build_config_list = _campaign_definition.build_config_list
-_config_to_server_args = _campaign_definition._config_to_server_args
-_get_affinity_mask = _campaign_definition._get_affinity_mask
 
 # Repository root — src/runner.py is one level below the repo root.
 # Used to resolve request file paths relative to the repo (not LAB_ROOT).

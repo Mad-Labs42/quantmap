@@ -48,10 +48,19 @@ def validate_campaign_purity(
     Returns the variable name being swept.
     Raises CampaignPurityViolationError if zero or >1 fields differ.
     """
-    variable = campaign.get("variable")
-    if not variable or variable == "interaction" or campaign.get("auto_generated"):
-        # Interaction and auto-generated campaigns bypass purity check
-        return variable or "interaction"
+    variable = campaign.get("variable", "")
+    if variable == "interaction":
+        return "interaction"
+    if campaign.get("auto_generated"):
+        if not variable:
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign.get('campaign_id', '?')} is auto_generated but has no variable"
+            )
+        return variable
+    if not variable:
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign.get('campaign_id', '?')} has no variable"
+        )
 
     baseline_config: dict[str, Any] = baseline.get("config", {})
     values = campaign.get("values", [])
