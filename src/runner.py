@@ -2322,6 +2322,7 @@ def run_campaign(
                         None if raw_tel_sha else "raw-telemetry.jsonl not found after finalize"
                     ),
                     verification_source="runner",
+                    precomputed_sha256=raw_tel_sha,
                 )
                 if raw_tel_sha:
                     logger.info("Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16])

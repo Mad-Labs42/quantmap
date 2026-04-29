@@ -16,8 +16,10 @@ Checks:
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -279,8 +281,8 @@ def test_trust_identity_artifact_completeness(tmp_path):
             )
             conn.commit()
 
-    # 1. Empty setup -> missing/partial
-    assert summarize_report_artifact_status(campaign_id, db_path) in ("legacy_unknown", "partial")
+    # 1. Empty setup -> partial (no current artifact bundle recorded)
+    assert summarize_report_artifact_status(campaign_id, db_path) == "partial"
 
     # 2. Add only 3 artifacts (the old broken behavior)
     add_art(ARTIFACT_CAMPAIGN_SUMMARY)
@@ -300,23 +302,30 @@ def test_trust_identity_artifact_completeness(tmp_path):
         "Campaign must be 'complete' when all 4 canonical artifacts are registered."
     )
 
-    legacy_campaign_id = "legacy_C01"
-    for legacy_type in ("report_md", "report_v2_md", "scores_csv"):
-        add_art(legacy_type, campaign=legacy_campaign_id)
+    unsupported_campaign_id = "legacy_like_C01"
+    for obsolete_type in ("report_md", "report_v2_md", "scores_csv", "raw_jsonl", "telemetry_jsonl"):
+        add_art(obsolete_type, campaign=unsupported_campaign_id)
 
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
-        "Legacy fallback must not be complete when telemetry artifacts are missing."
+    assert summarize_report_artifact_status(unsupported_campaign_id, db_path) == "partial", (
+        "Obsolete prototype artifact rows must not be treated as a supported complete artifact bundle."
     )
 
-    add_art("raw_jsonl", campaign=legacy_campaign_id)
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
-        "Legacy fallback must not be complete until both legacy telemetry artifacts exist."
+
+def test_artifact_registry_streaming_sha256_matches_expected(tmp_path, monkeypatch):
+    """The registry hash helper must stream file contents and avoid Path.read_bytes()."""
+    from src import artifact_registry
+
+    payload = (b"QuantMapArtifactContract" * (artifact_registry._SHA256_CHUNK_SIZE // 24 + 2))[: artifact_registry._SHA256_CHUNK_SIZE + 257]
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    artifact_path.write_bytes(payload)
+
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("read_bytes should not be used")),
     )
 
-    add_art("telemetry_jsonl", campaign=legacy_campaign_id)
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "complete", (
-        "Legacy fallback may be complete only when report, score, and telemetry artifacts exist."
-    )
+    assert artifact_registry._file_sha256(artifact_path) == hashlib.sha256(payload).hexdigest()
 
 
 def test_artifact_registry_registers_one_current_row_per_type(tmp_path):
@@ -371,6 +380,79 @@ def test_artifact_registry_registers_one_current_row_per_type(tmp_path):
     assert row["producer"] == "test.new"
     assert row["status"] == "complete"
     assert row["verification_source"] == "producer_hash"
+
+
+def test_artifact_registry_accepts_valid_precomputed_sha_without_rehash(tmp_path, monkeypatch):
+    """A valid supplied SHA should be trusted without re-reading the file."""
+    from src import artifact_registry
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("telemetry", encoding="utf-8")
+    expected_sha = hashlib.sha256(b"telemetry").hexdigest()
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "_file_sha256",
+        lambda path: (_ for _ in ()).throw(AssertionError("register_artifact should not rehash")),
+    )
+
+    artifact_registry.register_artifact(
+        db_path,
+        campaign_id="precomputed_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.precomputed",
+        status="complete",
+        precomputed_sha256=expected_sha,
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT sha256, status FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            ("precomputed_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["sha256"] == expected_sha
+    assert row["status"] == "complete"
+
+
+def test_artifact_registry_rejects_invalid_or_inconsistent_precomputed_sha(tmp_path):
+    """Invalid or contradictory precomputed SHA inputs must fail loudly."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("telemetry", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="64-character hexadecimal"):
+        register_artifact(
+            db_path,
+            campaign_id="bad_sha_C01",
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            path=artifact_path,
+            producer="test.invalid",
+            status="complete",
+            precomputed_sha256="not-a-sha",
+        )
+
+    with pytest.raises(ValueError, match="cannot register status='missing' with a SHA-256 digest"):
+        register_artifact(
+            db_path,
+            campaign_id="contradiction_C01",
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            path=artifact_path,
+            producer="test.invalid",
+            status="missing",
+            precomputed_sha256="a" * 64,
+        )
 
 
 def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_path):
@@ -433,6 +515,43 @@ def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_pat
     assert telemetry["exists"] is False
     assert telemetry["db_status"] is None
     assert telemetry["status"] == "not generated"
+
+
+def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
+    """Explicitly missing artifacts must not trigger a file hash attempt."""
+    from src import artifact_registry
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "_file_sha256",
+        lambda path: (_ for _ in ()).throw(AssertionError("missing artifacts should not be hashed")),
+    )
+
+    artifact_registry.register_artifact(
+        db_path,
+        campaign_id="missing_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.missing",
+        status="missing",
+        error_message="raw-telemetry.jsonl not found after finalize",
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT sha256, status, verification_source FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            ("missing_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["sha256"] is None
+    assert row["status"] == "missing"
+    assert row["verification_source"] == "producer_missing"
 
 
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):

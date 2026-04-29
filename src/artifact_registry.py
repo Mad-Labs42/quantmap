@@ -12,9 +12,12 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from src.db import get_connection
+
+_SHA256_CHUNK_SIZE = 1024 * 1024
+_SHA256_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True)
@@ -31,10 +34,22 @@ def _file_sha256(path: Path) -> str | None:
     """Return the SHA-256 hex digest for path, or None if unreadable."""
     try:
         digest = hashlib.sha256()
-        digest.update(path.read_bytes())
+        with path.open("rb") as handle:
+            while chunk := handle.read(_SHA256_CHUNK_SIZE):
+                digest.update(chunk)
         return digest.hexdigest()
-    except Exception:
+    except OSError:
         return None
+
+
+def _validate_precomputed_sha256(sha256: str) -> str:
+    """Validate and normalize a caller-supplied SHA-256 hex digest."""
+    normalized = sha256.strip().lower()
+    if len(normalized) != 64 or any(ch not in _SHA256_HEX_DIGITS for ch in normalized):
+        raise ValueError(
+            "precomputed_sha256 must be a non-empty 64-character hexadecimal SHA-256 digest"
+        )
+    return normalized
 
 
 def register_artifact(
@@ -48,16 +63,36 @@ def register_artifact(
     status: str | None = None,
     error_message: str | None = None,
     verification_source: str | None = None,
+    precomputed_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Replace the current DB row for one campaign artifact with a fresh record."""
     path = Path(path)
     now_utc = created_at or datetime.now(timezone.utc).isoformat()
-    sha256 = _file_sha256(path)
-    final_status = status or ("complete" if sha256 else "failed")
+    final_status = status or "complete"
     final_error = error_message if final_status != "complete" else None
-    final_verification = verification_source or (
-        "producer_hash" if sha256 else "producer_missing"
-    )
+
+    if precomputed_sha256 is not None and final_status != "complete":
+        raise ValueError(
+            f"artifact_type={artifact_type} cannot register status={final_status!r} with a SHA-256 digest"
+        )
+
+    if final_status == "complete":
+        sha256 = (
+            _validate_precomputed_sha256(precomputed_sha256)
+            if precomputed_sha256 is not None
+            else _file_sha256(path)
+        )
+        if sha256 is None:
+            final_status = "failed"
+            final_error = final_error or f"{path.name} missing or unreadable after generation"
+            final_verification = verification_source or "producer_missing"
+        else:
+            final_verification = verification_source or "producer_hash"
+    else:
+        sha256 = None
+        final_verification = verification_source or (
+            "producer_missing" if final_status == "missing" else "producer_status"
+        )
 
     row = {
         "campaign_id": campaign_id,
@@ -103,7 +138,7 @@ def register_artifact(
 
 
 def load_artifact_rows(campaign_id: str, db_path: Path) -> list[dict[str, Any]]:
-    """Load artifact rows for one campaign with stable compatibility defaults."""
+    """Load artifact rows for one campaign with stable current-contract defaults."""
     try:
         with get_connection(db_path) as conn:
             try:
@@ -125,10 +160,8 @@ def load_artifact_rows(campaign_id: str, db_path: Path) -> list[dict[str, Any]]:
     artifacts: list[dict[str, Any]] = []
     for row in rows:
         data = dict(row)
-        data["status"] = data.get("status") or "legacy_path_only"
-        data["verification_source"] = (
-            data.get("verification_source") or "legacy_unverified"
-        )
+        data["status"] = data.get("status") or "partial"
+        data["verification_source"] = data.get("verification_source") or "unknown"
         artifacts.append(data)
     return artifacts
 
@@ -168,7 +201,7 @@ def _project_inventory_status(
 ) -> str:
     """Return a conservative inventory status for one artifact entry."""
     if row:
-        return str(row.get("status") or "legacy_path_only")
+        return str(row.get("status") or "partial")
     if path is not None and path.exists():
         return "file_present"
     return missing_status
@@ -213,29 +246,22 @@ def build_artifact_inventory(
 
 
 def summarize_artifact_bundle_status(
-    campaign_id: str,
-    db_path: Path,
+    rows_by_type: Mapping[str, Mapping[str, Any]],
     expected_types: tuple[str, ...],
 ) -> str:
     """Summarize bundle completeness for the given expected artifact types."""
-    rows_by_type = load_artifact_rows_by_type(campaign_id, db_path)
     if not rows_by_type:
-        return "legacy_unknown"
+        return "partial"
 
     statuses = [
         "missing"
         if artifact_type not in rows_by_type
-        else str(rows_by_type[artifact_type].get("status") or "legacy_path_only")
+        else str(rows_by_type[artifact_type].get("status") or "partial")
         for artifact_type in expected_types
     ]
 
     if statuses and all(status == "complete" for status in statuses):
         return "complete"
-    if any(status == "failed" for status in statuses):
-        return "partial"
-    if any(
-        status in {"partial", "missing", "legacy_path_only", "legacy_unverified"}
-        for status in statuses
-    ):
+    if any(status in {"failed", "partial", "missing"} for status in statuses):
         return "partial"
     return "partial"

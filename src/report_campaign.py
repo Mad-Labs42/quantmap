@@ -2287,19 +2287,19 @@ def _section_supporting_artifacts(
     lines.append("| Artifact | Path | Status | Contents |")
     lines.append("|----------|------|:------:|----------|")
     lines.append(
-        f"| Campaign Summary | `{campaign_summary_md}` | {_artifact_status('campaign_summary_md')} | "
+        f"| Campaign Summary | `{campaign_summary_md}` | {_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY)} | "
         "Compact summary — winner, key results, artifact pointers |"
     )
     lines.append(
-        f"| Run Reports (this file) | `{run_reports_md}` | {_artifact_status('run_reports_md')} | "
+        f"| Run Reports (this file) | `{run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} | "
         "Full readable evidence, rankings, methodology, environment quality |"
     )
     lines.append(
-        f"| Measurement Stream | `{raw_telemetry_jsonl}` | {_artifact_status('raw_telemetry_jsonl')} | "
+        f"| Measurement Stream | `{raw_telemetry_jsonl}` | {_artifact_status(ARTIFACT_RAW_TELEMETRY)} | "
         "Merged request + telemetry records (distinguished by `_stream` field) |"
     )
     lines.append(
-        f"| Provenance + Scores | `{metadata_json}` | {_artifact_status('metadata_json')} | "
+        f"| Provenance + Scores | `{metadata_json}` | {_artifact_status(ARTIFACT_METADATA)} | "
         "Campaign YAML, scores, capability inventory, artifact manifest |"
     )
     lines.append(

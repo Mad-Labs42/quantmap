@@ -21,9 +21,12 @@ from src.artifact_paths import (
     ARTIFACT_RUN_REPORTS,
     ARTIFACT_METADATA,
     ARTIFACT_RAW_TELEMETRY,
-    ARTIFACT_TYPES_DEPRECATED,
 )
-from src.artifact_registry import load_artifact_rows, summarize_artifact_bundle_status
+from src.artifact_registry import (
+    load_artifact_rows,
+    load_artifact_rows_by_type,
+    summarize_artifact_bundle_status,
+)
 
 
 class TrustIdentityError(RuntimeError):
@@ -382,16 +385,6 @@ def load_artifact_summaries(campaign_id: str, db_path: Path) -> list[dict[str, A
     """Return artifact rows with stable defaults for trust-surface readers."""
     return load_artifact_rows(campaign_id, db_path)
 
-
-def _collect_statuses(check_types: tuple, by_type: dict) -> list:
-    """Return a status string for each artifact type in check_types."""
-    result = []
-    for atype in check_types:
-        row = by_type.get(atype)
-        result.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
-    return result
-
-
 def summarize_report_artifact_status(
     campaign_id: str,
     db_path: Path,
@@ -399,44 +392,20 @@ def summarize_report_artifact_status(
 ) -> str:
     """Return the campaign-level aggregate report status from artifact rows.
 
-    Checks for the approved artifact contract types first.  Also accepts old
-    legacy type names so rows written before the redesign migration still count
-    toward completeness rather than being treated as missing.
-
-    expected_types may be overridden by callers during transition; if None the
-    new canonical types are used.
+    Only the current 4-artifact contract is supported for forward-facing
+    report-status projection.
     """
-    # New canonical types for the 4-artifact contract (imported from artifact_paths).
-    _NEW_TYPES = (
+    _CANONICAL_TYPES = (
         ARTIFACT_CAMPAIGN_SUMMARY,
         ARTIFACT_RUN_REPORTS,
         ARTIFACT_METADATA,
         ARTIFACT_RAW_TELEMETRY,
     )
-    # Legacy types written before the rename migration (imported from artifact_paths).
-    _LEGACY_TYPES = tuple(
-        t
-        for t in (
-            "report_md",
-            "report_v2_md",
-            "scores_csv",
-            "raw_jsonl",
-            "telemetry_jsonl",
-        )
-        if t in ARTIFACT_TYPES_DEPRECATED
+    rows_by_type = load_artifact_rows_by_type(campaign_id, db_path)
+    return summarize_artifact_bundle_status(
+        rows_by_type,
+        expected_types or _CANONICAL_TYPES,
     )
-
-    artifacts = load_artifact_summaries(campaign_id, db_path)
-    by_type = {row.get("artifact_type"): row for row in artifacts}
-    if not by_type:
-        return "legacy_unknown"
-
-    if expected_types is not None:
-        check_types = expected_types
-    else:
-        has_any_new = any(atype in by_type for atype in _NEW_TYPES)
-        check_types = _NEW_TYPES if has_any_new else _LEGACY_TYPES
-    return summarize_artifact_bundle_status(campaign_id, db_path, check_types)
 
 
 def load_baseline_for_historical_use(
