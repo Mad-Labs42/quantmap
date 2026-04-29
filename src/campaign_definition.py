@@ -70,10 +70,10 @@ def validate_campaign_purity(
         )
     variable = variable_raw.strip()
 
-    values = campaign.get("values", [])
-    if not values:
+    values = campaign.get("values")
+    if not values or not isinstance(values, list):
         raise CampaignPurityViolationError(
-            f"Campaign {campaign_id} has no values to sweep."
+            f"Campaign {campaign_id} has no values to sweep (got {values!r})"
         )
 
     if variable == "interaction":
@@ -169,7 +169,18 @@ def _expand_value(
                 f"Campaign {campaign_id} interaction value must be a dict, "
                 f"got {type(value).__name__}"
             )
-        config_id = value.get("config_id", _make_config_id(campaign_id, value))
+        raw_cfg_id = value.get("config_id")
+        if raw_cfg_id is not None:
+            if not isinstance(raw_cfg_id, str):
+                raise CampaignPurityViolationError(
+                    f"Campaign {campaign_id} interaction config_id must be a string, "
+                    f"got {type(raw_cfg_id).__name__}"
+                )
+            if not raw_cfg_id.strip():
+                raise CampaignPurityViolationError(
+                    f"Campaign {campaign_id} interaction config_id must not be blank"
+                )
+            config_id = raw_cfg_id.strip()
         overrides = value.get("overrides", value)
         if not isinstance(overrides, dict):
             raise CampaignPurityViolationError(

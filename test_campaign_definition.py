@@ -575,3 +575,124 @@ def test_build_interaction_with_config_id() -> None:
 
     assert configs[0]["config_id"] == "my_interaction_cfg"
     assert configs[0]["full_config"]["threads"] == 24
+
+
+def test_purity_values_as_string_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threads", "values": "threads"}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_purity_values_as_dict_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threads", "values": {"foo": "bar"}}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_purity_values_missing_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threads"}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_purity_values_none_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threads", "values": None}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_build_interaction_config_id_absent_generates() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"overrides": {"threads": 24}}],
+    }
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert configs[0]["config_id"].startswith("C08_interaction_")
+    assert configs[0]["full_config"]["threads"] == 24
+
+
+def test_build_interaction_config_id_non_string_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"config_id": 42, "overrides": {"threads": 24}}],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="config_id must be a string"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_config_id_blank_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"config_id": "", "overrides": {"threads": 24}}],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="config_id must not be blank"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_config_id_whitespace_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"config_id": "   ", "overrides": {"threads": 24}}],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="config_id must not be blank"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_config_id_whitespace_stripped() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"config_id": "  C08_combo  ", "overrides": {"threads": 24}}],
+    }
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert configs[0]["config_id"] == "C08_combo"
+    assert configs[0]["full_config"]["threads"] == 24
+
+
+def test_build_interaction_duplicate_user_config_id_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [
+            {"config_id": "C08_combo", "overrides": {"threads": 24}},
+            {"config_id": "C08_combo", "overrides": {"n_parallel": 2}},
+        ],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="duplicate config_id"):
+        mod.build_config_list(baseline, campaign)
