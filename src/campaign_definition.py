@@ -23,21 +23,28 @@ class CampaignPurityViolationError(ValueError):
     """
 
 
+def _load_yaml_mapping(path: Path, label: str) -> dict[str, Any]:
+    """Load a YAML file and verify it contains a mapping (dict)."""
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} not found: {path}")
+    with open(path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+        raise CampaignPurityViolationError(
+            f"{label} is not a mapping (got {type(data).__name__!r}): {path}"
+        )
+    return data
+
+
 def load_baseline(path: Path = BASELINE_YAML) -> dict[str, Any]:
     """Load and return the baseline YAML."""
-    if not path.is_file():
-        raise FileNotFoundError(f"baseline.yaml not found: {path}")
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return _load_yaml_mapping(path, "baseline.yaml")
 
 
 def load_campaign(campaign_id: str) -> dict[str, Any]:
     """Load and return the campaign YAML for the given campaign_id."""
     path = CAMPAIGNS_DIR / f"{campaign_id}.yaml"
-    if not path.is_file():
-        raise FileNotFoundError(f"Campaign YAML not found: {path}")
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return _load_yaml_mapping(path, "Campaign YAML")
 
 
 def _cid(campaign_id: str) -> str:
@@ -77,7 +84,12 @@ def validate_campaign_purity(
         )
         return variable
 
-    baseline_config: dict[str, Any] = baseline.get("config", {})
+    _raw_config = baseline.get("config")
+    if not isinstance(_raw_config, dict):
+        raise CampaignPurityViolationError(
+            f"Baseline config is not a dict (got {type(_raw_config).__name__})"
+        )
+    baseline_config: dict[str, Any] = _raw_config
     if variable not in baseline_config and variable != "cpu_affinity":
         raise CampaignPurityViolationError(
             f"Campaign variable '{variable}' is not a field in baseline.yaml config section.\n"
@@ -243,9 +255,9 @@ def _apply_cache_type_flags(config: dict[str, Any], args: list[str]) -> None:
     kv_k = config.get("kv_cache_type_k", "f16")
     kv_v = config.get("kv_cache_type_v", "f16")
     if kv_k != "f16":
-        args += ["--cache-type-k", kv_k]
+        args.extend(["--cache-type-k", str(kv_k)])
     if kv_v != "f16":
-        args += ["--cache-type-v", kv_v]
+        args.extend(["--cache-type-v", str(kv_v)])
 
 
 def _apply_bool_flags(config: dict[str, Any], args: list[str]) -> None:

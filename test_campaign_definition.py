@@ -88,6 +88,36 @@ def test_load_campaign_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         mod.load_campaign("missing_campaign")
 
 
+def test_load_baseline_rejects_list_yaml(tmp_path: Path) -> None:
+    mod = _campaign_definition_module()
+    path = tmp_path / "list.yaml"
+    path.write_text(yaml.safe_dump([1, 2, 3]), encoding="utf-8")
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="is not a mapping"):
+        mod.load_baseline(path)
+
+
+def test_load_baseline_rejects_scalar_yaml(tmp_path: Path) -> None:
+    mod = _campaign_definition_module()
+    path = tmp_path / "scalar.yaml"
+    path.write_text("hello", encoding="utf-8")
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="is not a mapping"):
+        mod.load_baseline(path)
+
+
+def test_load_campaign_rejects_list_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = _campaign_definition_module()
+    campaigns_dir = tmp_path / "campaigns"
+    campaigns_dir.mkdir()
+    path = campaigns_dir / "C99_list.yaml"
+    path.write_text(yaml.safe_dump([1, 2, 3]), encoding="utf-8")
+    monkeypatch.setattr(mod, "CAMPAIGNS_DIR", campaigns_dir)
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="is not a mapping"):
+        mod.load_campaign("C99_list")
+
+
 # ---------------------------------------------------------------------------
 # validate_campaign_purity
 # ---------------------------------------------------------------------------
@@ -205,6 +235,24 @@ def test_purity_unknown_variable_raises() -> None:
     campaign = {"campaign_id": "C99_unknown", "variable": "unknown_flag", "values": [1]}
 
     with pytest.raises(mod.CampaignPurityViolationError, match="is not a field in baseline.yaml config section"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_purity_baseline_config_not_dict_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline: dict[str, object] = {"campaign_id": "baseline", "config": [1, 2, 3]}
+    campaign = {"campaign_id": "C01_threads", "variable": "threads", "values": [8]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="Baseline config is not a dict"):
+        mod.validate_campaign_purity(baseline, campaign)
+
+
+def test_purity_baseline_config_none_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline: dict[str, object] = {"campaign_id": "baseline", "config": None}
+    campaign = {"campaign_id": "C01_threads", "variable": "threads", "values": [8]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="Baseline config is not a dict"):
         mod.validate_campaign_purity(baseline, campaign)
 
 
