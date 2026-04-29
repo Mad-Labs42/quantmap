@@ -34,6 +34,7 @@ import pandas as pd
 
 from src.db import get_connection
 from src.analyze import get_telemetry_summary, get_background_interference_summary
+from src.campaign_definition import _config_to_server_args
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
 from src.artifact_paths import (
@@ -153,50 +154,6 @@ def _fmt_ambient(value: str | None) -> str:
         return "<empty string — CPU-only mode, no GPUs visible>"
     return value
 
-
-def _config_to_server_args_for_report(config: dict) -> list[str]:
-    """
-    Reconstruct llama-server args from a stored config_values_json dict.
-    Mirrors runner._config_to_server_args but lives here to avoid circular import.
-    """
-    args: list[str] = []
-    if "context_size" in config:
-        args += ["-c", str(config["context_size"])]
-    args += ["-ngl", str(config.get("n_gpu_layers", 999))]
-    ot = config.get("override_tensor")
-    if ot:
-        args += ["-ot", str(ot)]
-    fa = config.get("flash_attn")
-    if fa is False:
-        args += ["-fa", "0"]
-    elif fa is True:
-        args += ["-fa", "1"]
-    if config.get("jinja", True):
-        args.append("--jinja")
-    args += ["--threads", str(config.get("threads", 16))]
-    args += ["--threads-batch", str(config.get("threads_batch", 16))]
-    args += ["--threads-http", str(config.get("threads_http", 1))]  # always explicit (HIGH-5)
-    args += ["-ub", str(config.get("ubatch_size", 512))]
-    args += ["-b", str(config.get("batch_size", 2048))]
-    n_parallel = config.get("n_parallel", 1)
-    if n_parallel != 1:
-        args += ["--parallel", str(n_parallel)]
-    kv_k = config.get("kv_cache_type_k", "f16")
-    kv_v = config.get("kv_cache_type_v", "f16")
-    if kv_k != "f16":
-        args += ["--cache-type-k", kv_k]
-    if kv_v != "f16":
-        args += ["--cache-type-v", kv_v]
-    if not config.get("mmap", True):
-        args.append("--no-mmap")
-    if config.get("mlock", False):
-        args.append("--mlock")
-    if not config.get("cont_batching", True):
-        args.append("--no-cont-batching")
-    defrag = config.get("defrag_thold", 0.1)
-    if defrag != 0.1:
-        args += ["--defrag-thold", str(defrag) if defrag >= 0 else "-1"]
-    return args
 
 logger = logging.getLogger(__name__)
 
@@ -1404,11 +1361,16 @@ def _build_markdown(
                 (winner, campaign_id),
             ).fetchone()
 
-        if cfg_row:
+        # Prefer persisted resolved_command (source of truth from runner.py).
+        # Fall back to rebuilding from stored config_values_json only for
+        # pre-PR22 DBs that pre-date resolved_command storage.
+        if cmd_row and cmd_row[0]:
+            sections.append(cmd_row[0])
+        elif cfg_row:
             import json as _json
             try:
                 cfg_vals = _json.loads(cfg_row[0])
-                winner_args = _config_to_server_args_for_report(cfg_vals)
+                winner_args = _config_to_server_args(cfg_vals)
                 sections.append(f"{server_bin} ^")
                 sections.append(f'  -m "{model_path}" ^')
                 sections.append(f'  --host {DEFAULT_HOST} --port {PRODUCTION_PORT} ^')
@@ -1417,10 +1379,6 @@ def _build_markdown(
                     sections.append(f"  {arg}{separator}")
             except Exception as exc:
                 sections.append(f"rem [Error reconstructing command from config values: {exc}]")
-                # Fall back to configs.resolved_command, which is stored as the
-                # canonical production command (port 8000, full args) by runner.py.
-                if cmd_row and cmd_row[0]:
-                    sections.append(cmd_row[0])
 
         # Append runtime environment required for reproduction.
         # Two sections: MKL DLL injection (required) and GPU device selection

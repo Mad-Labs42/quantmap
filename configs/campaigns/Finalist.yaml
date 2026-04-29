@@ -1,6 +1,6 @@
 campaign_id: "Finalist"
 description: "Champion validation: C08 winner, 50 requests, full workload matrix"
-variable: null  # No new variable — validates the C08 champion
+variable: "interaction"  # Loads C08 winner from score.py; validates the champion
 values: []      # Auto-populated by score.py after C08
 type: "validation"
 rationale: >
