@@ -37,6 +37,8 @@ KNOWN_CONFIG_FIELDS = frozenset({
     "_cpu_affinity",
 })
 
+BASELINE_CONFIG_FIELDS = frozenset(KNOWN_CONFIG_FIELDS - {"_cpu_affinity"})
+
 
 class CampaignPurityViolationError(ValueError):
     """
@@ -87,11 +89,11 @@ def _is_valid_variable(variable: str) -> bool:
 
 def _validate_config_keys(config: dict[str, Any]) -> None:
     """Raise CampaignPurityViolationError if config contains unknown keys."""
-    unknown = [k for k in config if k not in KNOWN_CONFIG_FIELDS]
+    unknown = [k for k in config if k not in BASELINE_CONFIG_FIELDS]
     if unknown:
         raise CampaignPurityViolationError(
             f"Baseline config contains invalid key(s): {unknown}. "
-            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
+            f"Allowed keys are: {sorted(BASELINE_CONFIG_FIELDS)}"
         )
 
 
@@ -235,13 +237,39 @@ def _expand_interaction_value(campaign_id: str, value: object) -> tuple[dict[str
                 f"Campaign {campaign_id} interaction config_id must not be blank"
             )
         config_id = raw_cfg_id.strip()
-    overrides = value.get("overrides", value)
+    if "overrides" in value:
+        overrides = value["overrides"]
+    else:
+        overrides = {k: v for k, v in value.items() if k != "config_id"}
     if not isinstance(overrides, dict):
         raise CampaignPurityViolationError(
             f"Campaign {campaign_id} interaction overrides must be a dict, "
             f"got {type(overrides).__name__}"
         )
     return overrides, config_id
+
+
+def _apply_interaction_config(
+    full_config: dict[str, Any],
+    campaign_id: str,
+    value: object,
+    default_config_id: str,
+) -> str:
+    """Apply interaction overrides and resolve config_id."""
+    overrides, override_config_id = _expand_interaction_value(campaign_id, value)
+    full_config.update(overrides)
+    return override_config_id or default_config_id
+
+
+def _apply_kv_cache_config(
+    full_config: dict[str, Any],
+    value: object,
+    kv_mirror_v: bool,
+) -> None:
+    """Apply kv_cache_type_k (and optionally kv_cache_type_v) to full_config."""
+    full_config["kv_cache_type_k"] = value
+    if kv_mirror_v:
+        full_config["kv_cache_type_v"] = value
 
 
 def _expand_value(
@@ -256,16 +284,11 @@ def _expand_value(
     full_config = dict(baseline_config)
 
     if variable == "interaction":
-        overrides, override_config_id = _expand_interaction_value(campaign_id, value)
-        if override_config_id is not None:
-            config_id = override_config_id
-        full_config.update(overrides)
+        config_id = _apply_interaction_config(full_config, campaign_id, value, config_id)
     elif variable == "cpu_affinity":
         full_config["_cpu_affinity"] = value
     elif variable == "kv_cache_type_k":
-        full_config["kv_cache_type_k"] = value
-        if kv_mirror_v:
-            full_config["kv_cache_type_v"] = value
+        _apply_kv_cache_config(full_config, value, kv_mirror_v)
     else:
         full_config[variable] = value
 
