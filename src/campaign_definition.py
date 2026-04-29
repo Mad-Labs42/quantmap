@@ -197,21 +197,8 @@ def _config_to_server_args(config: dict[str, Any]) -> list[str]:
     if n_parallel != 1:
         args += ["--parallel", str(n_parallel)]
 
-    kv_k = config.get("kv_cache_type_k", "f16")
-    kv_v = config.get("kv_cache_type_v", "f16")
-    if kv_k != "f16":
-        args += ["--cache-type-k", kv_k]
-    if kv_v != "f16":
-        args += ["--cache-type-v", kv_v]
-
-    if not config.get("mmap", True):
-        args.append("--no-mmap")
-
-    if config.get("mlock", False):
-        args.append("--mlock")
-
-    if not config.get("cont_batching", True):
-        args.append("--no-cont-batching")
+    _apply_cache_type_flags(config, args)
+    _apply_bool_flags(config, args)
 
     defrag = config.get("defrag_thold", 0.1)
     if abs(defrag - 0.1) > 1e-9:
@@ -221,6 +208,24 @@ def _config_to_server_args(config: dict[str, Any]) -> list[str]:
             args += ["--defrag-thold", str(defrag)]
 
     return args
+
+
+def _apply_cache_type_flags(config: dict[str, Any], args: list[str]) -> None:
+    kv_k = config.get("kv_cache_type_k", "f16")
+    kv_v = config.get("kv_cache_type_v", "f16")
+    if kv_k != "f16":
+        args += ["--cache-type-k", kv_k]
+    if kv_v != "f16":
+        args += ["--cache-type-v", kv_v]
+
+
+def _apply_bool_flags(config: dict[str, Any], args: list[str]) -> None:
+    if not config.get("mmap", True):
+        args.append("--no-mmap")
+    if config.get("mlock", False):
+        args.append("--mlock")
+    if not config.get("cont_batching", True):
+        args.append("--no-cont-batching")
 
 
 def _get_affinity_mask(config: dict[str, Any], campaign: dict[str, Any]) -> str | None:
