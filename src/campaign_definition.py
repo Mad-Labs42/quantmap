@@ -118,23 +118,11 @@ def _make_config_id(campaign_id: str, value: object) -> str:
     return f"{campaign_id}_{prefix}_{digest}"
 
 
-def build_config_list(
-    baseline: dict[str, Any],
+def _normalize_campaign_inputs(
     campaign: dict[str, Any],
-) -> list[dict[str, Any]]:
-    """
-    Build the list of configs to test for this campaign.
-
-    Each entry is a dict containing:
-      - config_id: string (e.g., "C01_TB04")
-      - variable_name: the field being swept
-      - variable_value: the value for this config
-      - full_config: merged baseline config + this value
-      - server_args: list of --flag value pairs for llama-server
-
-    C08 (interaction) is handled separately — its values must already be
-    populated in the campaign YAML by score.py.
-    """
+    baseline: dict[str, Any],
+) -> tuple[str, str, list, dict[str, Any]]:
+    """Validate and return campaign_id, variable, values, baseline_config."""
     _campaign_id = campaign.get("campaign_id")
     if not _campaign_id or not isinstance(_campaign_id, str) or not _campaign_id.strip():
         raise CampaignPurityViolationError(
@@ -160,36 +148,75 @@ def build_config_list(
         raise CampaignPurityViolationError(
             f"Baseline config is not a dict (got {type(_raw_config).__name__})"
         )
-    baseline_config: dict[str, Any] = _raw_config
+
+    return campaign_id, variable, values, _raw_config
+
+
+def _expand_value(
+    baseline_config: dict[str, Any],
+    variable: str,
+    campaign_id: str,
+    kv_mirror_v: bool,
+    value: object,
+) -> tuple[dict[str, Any], str]:
+    """Build full_config and resolve config_id for a single sweep value."""
+    config_id = _make_config_id(campaign_id, value)
+    full_config = dict(baseline_config)
+
+    if variable == "interaction":
+        if not isinstance(value, dict):
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} interaction value must be a dict, "
+                f"got {type(value).__name__}"
+            )
+        config_id = value.get("config_id", _make_config_id(campaign_id, value))
+        overrides = value.get("overrides", value)
+        if not isinstance(overrides, dict):
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} interaction overrides must be a dict, "
+                f"got {type(overrides).__name__}"
+            )
+        full_config.update(overrides)
+    elif variable == "cpu_affinity":
+        full_config["_cpu_affinity"] = value
+    elif variable == "kv_cache_type_k":
+        full_config["kv_cache_type_k"] = value
+        if kv_mirror_v:
+            full_config["kv_cache_type_v"] = value
+    else:
+        full_config[variable] = value
+
+    return full_config, config_id
+
+
+def build_config_list(
+    baseline: dict[str, Any],
+    campaign: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    Build the list of configs to test for this campaign.
+
+    Each entry is a dict containing:
+      - config_id: string (e.g., "C01_TB04")
+      - variable_name: the field being swept
+      - variable_value: the value for this config
+      - full_config: merged baseline config + this value
+      - server_args: list of --flag value pairs for llama-server
+
+    C08 (interaction) is handled separately — its values must already be
+    populated in the campaign YAML by score.py.
+    """
+    campaign_id, variable, values, baseline_config = _normalize_campaign_inputs(
+        campaign, baseline
+    )
 
     configs: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    kv_mirror_v = campaign.get("kv_mirror_v", False)
     for value in values:
-        config_id = _make_config_id(campaign_id, value)
-
-        full_config = dict(baseline_config)
-        if variable == "interaction":
-            if not isinstance(value, dict):
-                raise CampaignPurityViolationError(
-                    f"Campaign {campaign_id} interaction value must be a dict, "
-                    f"got {type(value).__name__}"
-                )
-            config_id = value.get("config_id", _make_config_id(campaign_id, value))
-            overrides = value.get("overrides", value)
-            if not isinstance(overrides, dict):
-                raise CampaignPurityViolationError(
-                    f"Campaign {campaign_id} interaction overrides must be a dict, "
-                    f"got {type(overrides).__name__}"
-                )
-            full_config.update(overrides)
-        elif variable == "cpu_affinity":
-            full_config["_cpu_affinity"] = value
-        elif variable == "kv_cache_type_k":
-            full_config["kv_cache_type_k"] = value
-            if campaign.get("kv_mirror_v", False):
-                full_config["kv_cache_type_v"] = value
-        else:
-            full_config[variable] = value
+        full_config, config_id = _expand_value(
+            baseline_config, variable, campaign_id, kv_mirror_v, value
+        )
 
         if config_id in seen_ids:
             raise CampaignPurityViolationError(
@@ -197,15 +224,13 @@ def build_config_list(
             )
         seen_ids.add(config_id)
 
-        server_args = _config_to_server_args(full_config)
-
         configs.append(
             {
                 "config_id": config_id,
                 "variable_name": variable,
                 "variable_value": value,
                 "full_config": full_config,
-                "server_args": server_args,
+                "server_args": _config_to_server_args(full_config),
                 "cpu_affinity_mask": _get_affinity_mask(full_config, campaign),
             }
         )
