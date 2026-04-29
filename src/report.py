@@ -1361,7 +1361,12 @@ def _build_markdown(
                 (winner, campaign_id),
             ).fetchone()
 
-        if cfg_row:
+        # Prefer persisted resolved_command (source of truth from runner.py).
+        # Fall back to rebuilding from stored config_values_json only for
+        # pre-PR22 DBs that pre-date resolved_command storage.
+        if cmd_row and cmd_row[0]:
+            sections.append(cmd_row[0])
+        elif cfg_row:
             import json as _json
             try:
                 cfg_vals = _json.loads(cfg_row[0])
@@ -1374,10 +1379,6 @@ def _build_markdown(
                     sections.append(f"  {arg}{separator}")
             except Exception as exc:
                 sections.append(f"rem [Error reconstructing command from config values: {exc}]")
-                # Fall back to configs.resolved_command, which is stored as the
-                # canonical production command (port 8000, full args) by runner.py.
-                if cmd_row and cmd_row[0]:
-                    sections.append(cmd_row[0])
 
         # Append runtime environment required for reproduction.
         # Two sections: MKL DLL injection (required) and GPU device selection

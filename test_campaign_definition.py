@@ -234,7 +234,7 @@ def test_purity_unknown_variable_raises() -> None:
     baseline = _baseline()
     campaign = {"campaign_id": "C99_unknown", "variable": "unknown_flag", "values": [1]}
 
-    with pytest.raises(mod.CampaignPurityViolationError, match="is not a field in baseline.yaml config section"):
+    with pytest.raises(mod.CampaignPurityViolationError, match="is not a known config field"):
         mod.validate_campaign_purity(baseline, campaign)
 
 
@@ -696,3 +696,56 @@ def test_build_interaction_duplicate_user_config_id_raises() -> None:
 
     with pytest.raises(mod.CampaignPurityViolationError, match="duplicate config_id"):
         mod.build_config_list(baseline, campaign)
+
+
+def test_build_misspelled_variable_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threadss", "values": [16]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="is not a known config field"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_affinity_mask_rejects_non_string() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C17_affinity",
+        "variable": "cpu_affinity",
+        "values": ["bad_mask"],
+        "cpu_affinity_details": {"bad_mask": 42},
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="must be a non-empty string"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_affinity_mask_rejects_empty_string() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C17_affinity",
+        "variable": "cpu_affinity",
+        "values": ["bad_mask"],
+        "cpu_affinity_details": {"bad_mask": ""},
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="must be a non-empty string"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_affinity_mask_whitespace_string_stripped() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C17_affinity",
+        "variable": "cpu_affinity",
+        "values": ["p_cores_only"],
+        "cpu_affinity_details": {"p_cores_only": "  0x00FF  "},
+    }
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert configs[0]["cpu_affinity_mask"] == "0x00FF"
+    assert configs[0]["config_id"].startswith("C17_affinity_p_cores_only")

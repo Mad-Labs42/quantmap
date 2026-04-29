@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,28 @@ logger = logging.getLogger(__name__)
 
 BASELINE_YAML = CONFIGS_DIR / "baseline.yaml"
 CAMPAIGNS_DIR = CONFIGS_DIR / "campaigns"
+
+KNOWN_CONFIG_FIELDS = frozenset({
+    "host",
+    "n_gpu_layers",
+    "override_tensor",
+    "flash_attn",
+    "jinja",
+    "context_size",
+    "threads",
+    "threads_batch",
+    "threads_http",
+    "ubatch_size",
+    "batch_size",
+    "n_parallel",
+    "kv_cache_type_k",
+    "kv_cache_type_v",
+    "mmap",
+    "mlock",
+    "cont_batching",
+    "defrag_thold",
+    "_cpu_affinity",
+})
 
 
 class CampaignPurityViolationError(ValueError):
@@ -90,10 +113,18 @@ def validate_campaign_purity(
             f"Baseline config is not a dict (got {type(_raw_config).__name__})"
         )
     baseline_config: dict[str, Any] = _raw_config
-    if variable not in baseline_config and variable != "cpu_affinity":
+    
+    baseline_unknown = [k for k in baseline_config if k not in KNOWN_CONFIG_FIELDS]
+    if baseline_unknown:
         raise CampaignPurityViolationError(
-            f"Campaign variable '{variable}' is not a field in baseline.yaml config section.\n"
-            f"Known config fields: {list(baseline_config.keys())}"
+            f"Baseline config contains invalid key(s): {baseline_unknown}. "
+            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
+        )
+
+    if variable not in KNOWN_CONFIG_FIELDS and variable not in ("cpu_affinity", "interaction"):
+        raise CampaignPurityViolationError(
+            f"Campaign variable '{variable}' is not a known config field.\n"
+            f"Known config fields: {sorted(list(KNOWN_CONFIG_FIELDS) + ['cpu_affinity', 'interaction'])}"
         )
 
     logger.info(
@@ -106,12 +137,23 @@ def validate_campaign_purity(
 
 def _make_config_id(campaign_id: str, value: object) -> str:
     """Build a deterministic, collision-resistant config_id with an 8-char SHA256 digest suffix."""
-    raw = str(value)
+    if isinstance(value, (dict, list, tuple)):
+        raw = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    else:
+        raw = str(value)
+
     cleaned = (
         raw.replace(".", "p")
         .replace("-", "m")
         .replace(",", "")
         .replace("=", "e")
+        .replace('"', "")
+        .replace("{", "")
+        .replace("}", "")
+        .replace("[", "")
+        .replace("]", "")
+        .replace(":", "")
+        .replace(" ", "")
     )
     digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
     prefix = cleaned[:24] if len(cleaned) > 24 else cleaned
@@ -149,7 +191,48 @@ def _normalize_campaign_inputs(
             f"Baseline config is not a dict (got {type(_raw_config).__name__})"
         )
 
+    baseline_unknown = [k for k in _raw_config if k not in KNOWN_CONFIG_FIELDS]
+    if baseline_unknown:
+        raise CampaignPurityViolationError(
+            f"Baseline config contains invalid key(s): {baseline_unknown}. "
+            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
+        )
+
+    if variable not in KNOWN_CONFIG_FIELDS and variable not in ("cpu_affinity", "interaction"):
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign_id} variable '{variable}' is not a known config field.\n"
+            f"Known config fields: {sorted(list(KNOWN_CONFIG_FIELDS) + ['cpu_affinity', 'interaction'])}"
+        )
+
     return campaign_id, variable, values, _raw_config
+
+
+def _expand_interaction_value(campaign_id: str, value: object) -> tuple[dict[str, Any], str | None]:
+    if not isinstance(value, dict):
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign_id} interaction value must be a dict, "
+            f"got {type(value).__name__}"
+        )
+    config_id = None
+    raw_cfg_id = value.get("config_id")
+    if raw_cfg_id is not None:
+        if not isinstance(raw_cfg_id, str):
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} interaction config_id must be a string, "
+                f"got {type(raw_cfg_id).__name__}"
+            )
+        if not raw_cfg_id.strip():
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} interaction config_id must not be blank"
+            )
+        config_id = raw_cfg_id.strip()
+    overrides = value.get("overrides", value)
+    if not isinstance(overrides, dict):
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign_id} interaction overrides must be a dict, "
+            f"got {type(overrides).__name__}"
+        )
+    return overrides, config_id
 
 
 def _expand_value(
@@ -164,29 +247,9 @@ def _expand_value(
     full_config = dict(baseline_config)
 
     if variable == "interaction":
-        if not isinstance(value, dict):
-            raise CampaignPurityViolationError(
-                f"Campaign {campaign_id} interaction value must be a dict, "
-                f"got {type(value).__name__}"
-            )
-        raw_cfg_id = value.get("config_id")
-        if raw_cfg_id is not None:
-            if not isinstance(raw_cfg_id, str):
-                raise CampaignPurityViolationError(
-                    f"Campaign {campaign_id} interaction config_id must be a string, "
-                    f"got {type(raw_cfg_id).__name__}"
-                )
-            if not raw_cfg_id.strip():
-                raise CampaignPurityViolationError(
-                    f"Campaign {campaign_id} interaction config_id must not be blank"
-                )
-            config_id = raw_cfg_id.strip()
-        overrides = value.get("overrides", value)
-        if not isinstance(overrides, dict):
-            raise CampaignPurityViolationError(
-                f"Campaign {campaign_id} interaction overrides must be a dict, "
-                f"got {type(overrides).__name__}"
-            )
+        overrides, override_config_id = _expand_interaction_value(campaign_id, value)
+        if override_config_id is not None:
+            config_id = override_config_id
         full_config.update(overrides)
     elif variable == "cpu_affinity":
         full_config["_cpu_affinity"] = value
@@ -228,6 +291,14 @@ def build_config_list(
         full_config, config_id = _expand_value(
             baseline_config, variable, campaign_id, kv_mirror_v, value
         )
+
+        unknown_keys = [k for k in full_config if k not in KNOWN_CONFIG_FIELDS]
+        if unknown_keys:
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} config expansion produced invalid key(s): {unknown_keys}. "
+                f"Check interaction overrides or baseline config. "
+                f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
+            )
 
         if config_id in seen_ids:
             raise CampaignPurityViolationError(
@@ -335,5 +406,10 @@ def _get_affinity_mask(config: dict[str, Any], campaign: dict[str, Any]) -> str 
             f"Campaign {_cid(campaign.get('campaign_id', ''))} "
             f"has no affinity mask for key '{affinity}'. Available: {list(details.keys())}"
         )
-
-    return mask
+    if not isinstance(mask, str) or not mask.strip():
+        raise CampaignPurityViolationError(
+            f"Campaign {_cid(campaign.get('campaign_id', ''))} "
+            f"affinity mask for key '{affinity}' must be a non-empty string, "
+            f"got {type(mask).__name__!r}: {mask!r}"
+        )
+    return mask.strip()
