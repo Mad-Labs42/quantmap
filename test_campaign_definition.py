@@ -212,6 +212,11 @@ def test_purity_unknown_variable_raises() -> None:
 # build_config_list
 # ---------------------------------------------------------------------------
 
+def _expected_digest(raw_value: str) -> str:
+    import hashlib as _hl
+    return _hl.sha256(raw_value.encode()).hexdigest()[:8]
+
+
 def test_build_normal_scalar_sweep() -> None:
     mod = _campaign_definition_module()
     baseline = _baseline()
@@ -219,7 +224,8 @@ def test_build_normal_scalar_sweep() -> None:
 
     configs = mod.build_config_list(baseline, campaign)
 
-    assert configs[0]["config_id"] == "C01_threads_32"
+    expected = f"C01_threads_32_{_expected_digest('32')}"
+    assert configs[0]["config_id"] == expected
     assert configs[0]["variable_name"] == "threads"
     assert configs[0]["variable_value"] == 32
     assert configs[0]["full_config"]["threads"] == 32
@@ -227,6 +233,106 @@ def test_build_normal_scalar_sweep() -> None:
     assert configs[0]["cpu_affinity_mask"] is None
     assert "--threads" in configs[0]["server_args"]
     assert configs[0]["server_args"][configs[0]["server_args"].index("--threads") + 1] == "32"
+
+
+def test_build_input_hardening_campaign_id_missing() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"variable": "threads", "values": [8]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no valid campaign_id"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_input_hardening_variable_missing() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "values": [8]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no variable"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_input_hardening_variable_whitespace_normalized() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "variable": "  threads  ", "values": [32]}
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert configs[0]["variable_name"] == "threads"
+    assert configs[0]["full_config"]["threads"] == 32
+
+
+def test_build_input_hardening_values_empty_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "variable": "threads", "values": []}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_input_hardening_values_missing_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01_threads", "variable": "threads"}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="has no values to sweep"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_input_hardening_baseline_config_not_dict_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline: dict[str, object] = {"campaign_id": "baseline", "config": None}
+    campaign = {"campaign_id": "C01_threads", "variable": "threads", "values": [8]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="Baseline config is not a dict"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_config_id_short_prefix_collision_resistant() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C01",
+        "variable": "threads",
+        "values": ["1,2", "12"],
+    }
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert len(configs) == 2
+    # "1,2" → cleaned "12" + digest, "12" → cleaned "12" + digest
+    # Both have same prefix "12" but different digests
+    assert configs[0]["config_id"] != configs[1]["config_id"]
+    assert configs[0]["config_id"].startswith("C01_12_")
+    assert configs[1]["config_id"].startswith("C01_12_")
+
+
+def test_build_config_id_duplicate_generated_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {"campaign_id": "C01", "variable": "threads", "values": [32, 32]}
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="duplicate config_id"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_config_id_duplicate_interaction_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [
+            {"config_id": "same_id", "overrides": {"threads": 24}},
+            {"config_id": "same_id", "overrides": {"n_parallel": 2}},
+        ],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="duplicate config_id"):
+        mod.build_config_list(baseline, campaign)
 
 
 def test_build_interaction_override() -> None:

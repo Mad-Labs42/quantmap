@@ -93,7 +93,7 @@ def validate_campaign_purity(
 
 
 def _make_config_id(campaign_id: str, value: object) -> str:
-    """Build a deterministic, collision-resistant config_id suffix."""
+    """Build a deterministic, collision-resistant config_id with an 8-char SHA256 digest suffix."""
     raw = str(value)
     cleaned = (
         raw.replace(".", "p")
@@ -102,8 +102,8 @@ def _make_config_id(campaign_id: str, value: object) -> str:
         .replace("=", "e")
     )
     digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
-    prefix = cleaned[:12]
-    return f"{campaign_id}_{prefix}_{digest}" if len(cleaned) > 12 else f"{campaign_id}_{prefix}"
+    prefix = cleaned[:24] if len(cleaned) > 24 else cleaned
+    return f"{campaign_id}_{prefix}_{digest}"
 
 
 def build_config_list(
@@ -123,12 +123,35 @@ def build_config_list(
     C08 (interaction) is handled separately — its values must already be
     populated in the campaign YAML by score.py.
     """
-    campaign_id = campaign["campaign_id"]
-    variable = campaign.get("variable", "")
-    values = campaign.get("values", [])
-    baseline_config = baseline.get("config", {})
+    _campaign_id = campaign.get("campaign_id")
+    if not _campaign_id or not isinstance(_campaign_id, str) or not _campaign_id.strip():
+        raise CampaignPurityViolationError(
+            f"Campaign has no valid campaign_id (got {_campaign_id!r})"
+        )
+    campaign_id = _campaign_id.strip()
 
-    configs = []
+    _var_raw = campaign.get("variable")
+    if _var_raw is None or not isinstance(_var_raw, str) or not _var_raw.strip():
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign_id} has no variable (got {_var_raw!r})"
+        )
+    variable = _var_raw.strip()
+
+    values = campaign.get("values")
+    if not values or not isinstance(values, list):
+        raise CampaignPurityViolationError(
+            f"Campaign {campaign_id} has no values to sweep (got {values!r})"
+        )
+
+    _raw_config = baseline.get("config")
+    if not isinstance(_raw_config, dict):
+        raise CampaignPurityViolationError(
+            f"Baseline config is not a dict (got {type(_raw_config).__name__})"
+        )
+    baseline_config: dict[str, Any] = _raw_config
+
+    configs: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for value in values:
         config_id = _make_config_id(campaign_id, value)
 
@@ -144,6 +167,12 @@ def build_config_list(
                 full_config["kv_cache_type_v"] = value
         else:
             full_config[variable] = value
+
+        if config_id in seen_ids:
+            raise CampaignPurityViolationError(
+                f"Campaign {campaign_id} produced duplicate config_id: {config_id!r}"
+            )
+        seen_ids.add(config_id)
 
         server_args = _config_to_server_args(full_config)
 
