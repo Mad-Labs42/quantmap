@@ -75,6 +75,26 @@ def _cid(campaign_id: str) -> str:
     return campaign_id if campaign_id else "?"
 
 
+def _is_non_empty_str(value: object) -> bool:
+    """Return True if value is a non-empty, non-blank string."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_valid_variable(variable: str) -> bool:
+    """Return True if variable is a known config field or special field."""
+    return variable in KNOWN_CONFIG_FIELDS or variable in ("cpu_affinity", "interaction")
+
+
+def _validate_config_keys(config: dict[str, Any]) -> None:
+    """Raise CampaignPurityViolationError if config contains unknown keys."""
+    unknown = [k for k in config if k not in KNOWN_CONFIG_FIELDS]
+    if unknown:
+        raise CampaignPurityViolationError(
+            f"Baseline config contains invalid key(s): {unknown}. "
+            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
+        )
+
+
 def validate_campaign_purity(
     baseline: dict[str, Any],
     campaign: dict[str, Any],
@@ -87,7 +107,7 @@ def validate_campaign_purity(
     campaign_id = _cid(campaign.get("campaign_id", ""))
 
     variable_raw = campaign.get("variable")
-    if variable_raw is None or not isinstance(variable_raw, str) or not variable_raw.strip():
+    if not _is_non_empty_str(variable_raw):
         raise CampaignPurityViolationError(
             f"Campaign {campaign_id} has no variable (got {variable_raw!r})"
         )
@@ -113,15 +133,9 @@ def validate_campaign_purity(
             f"Baseline config is not a dict (got {type(_raw_config).__name__})"
         )
     baseline_config: dict[str, Any] = _raw_config
-    
-    baseline_unknown = [k for k in baseline_config if k not in KNOWN_CONFIG_FIELDS]
-    if baseline_unknown:
-        raise CampaignPurityViolationError(
-            f"Baseline config contains invalid key(s): {baseline_unknown}. "
-            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
-        )
+    _validate_config_keys(baseline_config)
 
-    if variable not in KNOWN_CONFIG_FIELDS and variable not in ("cpu_affinity", "interaction"):
+    if not _is_valid_variable(variable):
         raise CampaignPurityViolationError(
             f"Campaign variable '{variable}' is not a known config field.\n"
             f"Known config fields: {sorted(list(KNOWN_CONFIG_FIELDS) + ['cpu_affinity', 'interaction'])}"
@@ -166,14 +180,14 @@ def _normalize_campaign_inputs(
 ) -> tuple[str, str, list, dict[str, Any]]:
     """Validate and return campaign_id, variable, values, baseline_config."""
     _campaign_id = campaign.get("campaign_id")
-    if not _campaign_id or not isinstance(_campaign_id, str) or not _campaign_id.strip():
+    if not _is_non_empty_str(_campaign_id):
         raise CampaignPurityViolationError(
             f"Campaign has no valid campaign_id (got {_campaign_id!r})"
         )
     campaign_id = _campaign_id.strip()
 
     _var_raw = campaign.get("variable")
-    if _var_raw is None or not isinstance(_var_raw, str) or not _var_raw.strip():
+    if not _is_non_empty_str(_var_raw):
         raise CampaignPurityViolationError(
             f"Campaign {campaign_id} has no variable (got {_var_raw!r})"
         )
@@ -191,14 +205,9 @@ def _normalize_campaign_inputs(
             f"Baseline config is not a dict (got {type(_raw_config).__name__})"
         )
 
-    baseline_unknown = [k for k in _raw_config if k not in KNOWN_CONFIG_FIELDS]
-    if baseline_unknown:
-        raise CampaignPurityViolationError(
-            f"Baseline config contains invalid key(s): {baseline_unknown}. "
-            f"Allowed keys are: {sorted(KNOWN_CONFIG_FIELDS)}"
-        )
+    _validate_config_keys(_raw_config)
 
-    if variable not in KNOWN_CONFIG_FIELDS and variable not in ("cpu_affinity", "interaction"):
+    if not _is_valid_variable(variable):
         raise CampaignPurityViolationError(
             f"Campaign {campaign_id} variable '{variable}' is not a known config field.\n"
             f"Known config fields: {sorted(list(KNOWN_CONFIG_FIELDS) + ['cpu_affinity', 'interaction'])}"
