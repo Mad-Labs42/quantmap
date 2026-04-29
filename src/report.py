@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +48,11 @@ from src.artifact_paths import (
     find_artifact_dir,
     infer_model_identity,
     report_paths,
+)
+from src.artifact_registry import (
+    ArtifactInventorySpec,
+    build_artifact_inventory,
+    register_artifact,
 )
 
 _STR_NOT_SET_IN_BASELINE = "not set in baseline"
@@ -111,20 +115,6 @@ def render_recommendation_projection(
     
     lines.append("")
     return lines
-
-
-def _file_sha256(path: Path) -> str | None:
-    """Compute SHA-256 hex digest of a file; return None on any I/O error."""
-    try:
-        h = hashlib.sha256()
-        with path.open("rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except Exception:
-        return None
-
-
 def _fmt_tel(val: float | int | None, fmt: str) -> str:
     """
     Format a telemetry value; return 'N/A' when the value is None.
@@ -530,31 +520,15 @@ def generate_report(
     # suppress a valid report write.
     _now_utc = datetime.now(timezone.utc).isoformat()
     try:
-        with get_connection(db_path) as _art_conn:
-            _sha = _file_sha256(md_path)
-            _status = "complete" if _sha else "failed"
-            _error = None if _sha else "campaign-summary.md missing or unreadable after write"
-            _art_conn.execute(
-                "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, ARTIFACT_CAMPAIGN_SUMMARY),
-            )
-            _art_conn.execute(
-                "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at, status, producer, error_message, updated_at, verification_source)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    campaign_id,
-                    ARTIFACT_CAMPAIGN_SUMMARY,
-                    str(md_path),
-                    _sha,
-                    _now_utc,
-                    _status,
-                    "src.report.generate_report",
-                    _error,
-                    _now_utc,
-                    "producer_hash" if _sha else "producer_missing",
-                ),
-            )
-            _art_conn.commit()
+        register_artifact(
+            db_path,
+            campaign_id=campaign_id,
+            artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+            path=md_path,
+            producer="src.report.generate_report",
+            created_at=_now_utc,
+            error_message="campaign-summary.md missing or unreadable after write",
+        )
     except Exception as _art_exc:
         logger.warning("Could not record campaign-summary.md in DB (non-fatal): %s", _art_exc)
 
@@ -1632,35 +1606,56 @@ def _build_markdown(
     _run_reports_md      = report_dir / FILENAME_RUN_REPORTS
     _metadata_json       = report_dir / FILENAME_METADATA
 
-    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
+    _artifact_inventory = build_artifact_inventory(
+        campaign_id,
+        db_path,
+        [
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+                filename=FILENAME_CAMPAIGN_SUMMARY,
+                role="user-facing summary",
+                candidate_path=report_dir / FILENAME_CAMPAIGN_SUMMARY,
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_RUN_REPORTS,
+                filename=FILENAME_RUN_REPORTS,
+                role="informational detail report",
+                candidate_path=_run_reports_md,
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_RAW_TELEMETRY,
+                filename=FILENAME_RAW_TELEMETRY,
+                role="raw machine measurement stream",
+                candidate_path=_raw_telemetry_jsonl,
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_METADATA,
+                filename=FILENAME_METADATA,
+                role="structured provenance and scoring record",
+                candidate_path=_metadata_json,
+            ),
+        ],
+        missing_status="pending",
+    )
     _artifact_rows = {
-        row.get("artifact_type"): row
-        for row in load_artifact_summaries(campaign_id, db_path)
+        entry["artifact_type"]: entry
+        for entry in _artifact_inventory
     }
 
-    def _artifact_status(artifact_type: str, p: "Path") -> str:  # noqa: F821
+    def _artifact_status(artifact_type: str) -> str:
         """Return a display label for an artifact status string."""
-        row = _artifact_rows.get(artifact_type)
-        if row:
-            status = row.get("status") or _STR_NOT_RECORDED
-            sha = row.get("sha256")
-            verification = row.get("verification_source") or _STR_NOT_RECORDED
-            err = row.get("error_message")
-            parts = [status, f"verification={verification}"]
-            if sha:
-                parts.append(f"sha256={sha[:12]}")
-            if err:
-                parts.append(f"error={str(err)[:80]}")
-            return "; ".join(parts)
-        if p.exists():
-            return "file_present"
-        # No DB row and file absent. campaign-summary.md is written first; peer
-        # artifacts may not yet exist at generation time. Use "pending" for
-        # canonical types so the file does not permanently claim "not generated"
-        # for artifacts that will be present moments after this report is written.
-        _CANONICAL = {ARTIFACT_CAMPAIGN_SUMMARY, ARTIFACT_RUN_REPORTS,
-                      ARTIFACT_METADATA, ARTIFACT_RAW_TELEMETRY}
-        return "pending" if artifact_type in _CANONICAL else "not generated"
+        entry = _artifact_rows[artifact_type]
+        if entry["db_status"] is None:
+            return str(entry["status"])
+        verification = entry.get("verification_source") or _STR_NOT_RECORDED
+        sha = entry.get("sha256")
+        err = entry.get("error_message")
+        parts = [str(entry["db_status"]), f"verification={verification}"]
+        if sha:
+            parts.append(f"sha256={str(sha)[:12]}")
+        if err:
+            parts.append(f"error={str(err)[:80]}")
+        return "; ".join(parts)
 
     sections.append("\n---\n")
     sections.append("## Campaign Artifacts\n")
@@ -1672,17 +1667,17 @@ def _build_markdown(
     sections.append("|----------|------|:------:|")
     sections.append(
         f"| Campaign Summary (this file) | `{report_dir / FILENAME_CAMPAIGN_SUMMARY}` | "
-        f"{_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY, report_dir / FILENAME_CAMPAIGN_SUMMARY)} |"
+        f"{_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY)} |"
     )
     sections.append(
-        f"| Detailed Report | `{_run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS, _run_reports_md)} |"
+        f"| Detailed Report | `{_run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} |"
     )
     sections.append(
         f"| Measurement Stream | `{_raw_telemetry_jsonl}` | "
-        f"{_artifact_status(ARTIFACT_RAW_TELEMETRY, _raw_telemetry_jsonl)} |"
+        f"{_artifact_status(ARTIFACT_RAW_TELEMETRY)} |"
     )
     sections.append(
-        f"| Provenance + Scores | `{_metadata_json}` | {_artifact_status(ARTIFACT_METADATA, _metadata_json)} |"
+        f"| Provenance + Scores | `{_metadata_json}` | {_artifact_status(ARTIFACT_METADATA)} |"
     )
     sections.append(
         f"| Full database | `{db_path}` | {'file_present' if db_path.exists() else 'not found'} |"

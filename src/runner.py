@@ -89,6 +89,7 @@ from src.artifact_paths import (  # noqa: E402
     infer_model_identity,
     report_paths,
 )
+from src.artifact_registry import register_artifact  # noqa: E402
 
 # Rich components
 from rich.console import Console  # type: ignore[import]  # noqa: E402
@@ -2309,33 +2310,19 @@ def run_campaign(
                             h.update(chunk)
                     raw_tel_sha = h.hexdigest()
                 
-                _now_utc = datetime.now(timezone.utc).isoformat()
-                with get_connection(_eff_db_path) as _art_conn:
-                    _art_conn.execute(
-                        "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                        (effective_campaign_id, ARTIFACT_RAW_TELEMETRY)
-                    )
-                    _art_conn.execute(
-                        """
-                        INSERT INTO artifacts (
-                            campaign_id, artifact_type, path, sha256, created_at, status, 
-                            producer, error_message, updated_at, verification_source
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            effective_campaign_id,
-                            ARTIFACT_RAW_TELEMETRY,
-                            str(raw_telemetry_jsonl_path),
-                            raw_tel_sha,
-                            _now_utc,
-                            "complete" if raw_tel_sha else "missing",
-                            "src.runner.run_campaign",
-                            None if raw_tel_sha else "raw-telemetry.jsonl not found after finalize",
-                            _now_utc,
-                            "runner",
-                        )
-                    )
-                    _art_conn.commit()
+                register_artifact(
+                    _eff_db_path,
+                    campaign_id=effective_campaign_id,
+                    artifact_type=ARTIFACT_RAW_TELEMETRY,
+                    path=raw_telemetry_jsonl_path,
+                    producer="src.runner.run_campaign",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    status="complete" if raw_tel_sha else "missing",
+                    error_message=(
+                        None if raw_tel_sha else "raw-telemetry.jsonl not found after finalize"
+                    ),
+                    verification_source="runner",
+                )
                 if raw_tel_sha:
                     logger.info("Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16])
                 else:
@@ -2536,31 +2523,17 @@ def run_campaign(
                     ARTIFACT_RUN_REPORTS,
                     _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS,
                 )
-                with get_connection(_eff_db_path) as _art_conn:
-                    _now_utc = datetime.now(timezone.utc).isoformat()
-                    _art_conn.execute(
-                        "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                        (effective_campaign_id, ARTIFACT_RUN_REPORTS),
-                    )
-                    _art_conn.execute(
-                        """
-                        INSERT INTO artifacts (
-                            campaign_id, artifact_type, path, created_at, status,
-                            producer, error_message, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            effective_campaign_id,
-                            ARTIFACT_RUN_REPORTS,
-                            str(_v2_path),
-                            _now_utc,
-                            "failed",
-                            "src.report_campaign.generate_campaign_report",
-                            str(_v2_exc),
-                            _now_utc,
-                        ),
-                    )
-                    _art_conn.commit()
+                register_artifact(
+                    _eff_db_path,
+                    campaign_id=effective_campaign_id,
+                    artifact_type=ARTIFACT_RUN_REPORTS,
+                    path=_v2_path,
+                    producer="src.report_campaign.generate_campaign_report",
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    status="failed",
+                    error_message=str(_v2_exc),
+                    verification_source="producer_missing",
+                )
             except Exception as _art_exc:
                 logger.warning("Could not record run-reports.md failure artifact: %s", _art_exc)
 

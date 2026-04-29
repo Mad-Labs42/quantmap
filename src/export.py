@@ -22,6 +22,19 @@ from src.artifact_paths import (
     infer_model_identity,
     find_artifact_dir,
     ARTIFACT_METADATA,
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_RUN_REPORTS,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_ROLES,
+    FILENAME_CAMPAIGN_SUMMARY,
+    FILENAME_RUN_REPORTS,
+    FILENAME_RAW_TELEMETRY,
+    FILENAME_METADATA,
+)
+from src.artifact_registry import (
+    ArtifactInventorySpec,
+    build_artifact_inventory,
+    register_artifact,
 )
 from src.trust_identity import (
     load_run_identity,
@@ -451,58 +464,33 @@ def _build_artifact_inventory(
     meas_dir: Path | None,
 ) -> list:
     """Return the artifact inventory list for metadata.json."""
-    from src.trust_identity import load_artifact_summaries  # noqa: PLC0415
-    from src.artifact_paths import (  # noqa: PLC0415
-        ARTIFACT_CAMPAIGN_SUMMARY,
-        ARTIFACT_RUN_REPORTS,
-        ARTIFACT_METADATA,
-        ARTIFACT_RAW_TELEMETRY,
-        ARTIFACT_ROLES,
-        FILENAME_CAMPAIGN_SUMMARY,
-        FILENAME_RUN_REPORTS,
-        FILENAME_METADATA,
-        FILENAME_RAW_TELEMETRY,
-    )
-
-    artifact_rows = load_artifact_summaries(campaign_id, db_path)
-    artifact_inventory = []
-    for row in artifact_rows:
-        artifact_inventory.append({
-            "artifact_type": row.get("artifact_type"),
-            "role": ARTIFACT_ROLES.get(row.get("artifact_type", ""), "not classified"),
-            "path": row.get("path"),
-            "status": row.get("status") or _STR_NOT_RECORDED,
-            "sha256": row.get("sha256"),
-            "verification_source": row.get("verification_source") or _STR_NOT_RECORDED,
-            "created_at": row.get("created_at"),
-            "error_message": row.get("error_message"),
-        })
-
-    registered_types = {r["artifact_type"] for r in artifact_inventory}
-    canonical_map = {
-        ARTIFACT_CAMPAIGN_SUMMARY: FILENAME_CAMPAIGN_SUMMARY,
-        ARTIFACT_RUN_REPORTS:      FILENAME_RUN_REPORTS,
-        ARTIFACT_METADATA:         FILENAME_METADATA,
-        ARTIFACT_RAW_TELEMETRY:    FILENAME_RAW_TELEMETRY,
-    }
-    for art_type, filename in canonical_map.items():
-        if art_type in registered_types:
-            continue
-        if art_type == ARTIFACT_RAW_TELEMETRY:
-            candidate = (meas_dir / filename) if meas_dir is not None else None
-        else:
-            candidate = reports_dir / filename
-        artifact_inventory.append({
-            "artifact_type": art_type,
-            "role": ARTIFACT_ROLES.get(art_type, ""),
-            "path": str(candidate) if candidate else None,
-            "status": "file_present" if (candidate and candidate.exists()) else "not generated",
-            "sha256": None,
-            "verification_source": "not registered \u2014 file exists but not recorded in DB",
-            "created_at": None,
-            "error_message": None,
-        })
-    return artifact_inventory
+    specs = [
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+            filename=FILENAME_CAMPAIGN_SUMMARY,
+            role=ARTIFACT_ROLES[ARTIFACT_CAMPAIGN_SUMMARY],
+            candidate_path=reports_dir / FILENAME_CAMPAIGN_SUMMARY,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RUN_REPORTS,
+            filename=FILENAME_RUN_REPORTS,
+            role=ARTIFACT_ROLES[ARTIFACT_RUN_REPORTS],
+            candidate_path=reports_dir / FILENAME_RUN_REPORTS,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_METADATA,
+            filename=FILENAME_METADATA,
+            role=ARTIFACT_ROLES[ARTIFACT_METADATA],
+            candidate_path=reports_dir / FILENAME_METADATA,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            filename=FILENAME_RAW_TELEMETRY,
+            role=ARTIFACT_ROLES[ARTIFACT_RAW_TELEMETRY],
+            candidate_path=(meas_dir / FILENAME_RAW_TELEMETRY) if meas_dir is not None else None,
+        ),
+    ]
+    return build_artifact_inventory(campaign_id, db_path, specs)
 
 
 def _build_run_context_summary(
@@ -591,47 +579,16 @@ def _register_metadata_artifact(
     logger: logging.Logger,
 ) -> None:
     """Hash and upsert the metadata.json registration record in the artifacts table."""
-    import hashlib  # noqa: PLC0415
-    from src.db import get_connection  # noqa: PLC0415
-    from src.artifact_paths import ARTIFACT_METADATA  # noqa: PLC0415
-
-    def _sha256(p: Path) -> str | None:
-        """Compute SHA-256 hex digest of a file path."""
-        try:
-            h = hashlib.sha256()
-            h.update(p.read_bytes())
-            return h.hexdigest()
-        except Exception:
-            return None
-
-    _sha = _sha256(metadata_path)
-    _status = "complete" if _sha else "failed"
-    _error = None if _sha else "metadata.json missing or unreadable after write"
-
     try:
-        with get_connection(db_path) as _art_conn:
-            _art_conn.execute(
-                "DELETE FROM artifacts WHERE campaign_id=? AND artifact_type=?",
-                (campaign_id, ARTIFACT_METADATA),
-            )
-            _art_conn.execute(
-                "INSERT INTO artifacts (campaign_id, artifact_type, path, sha256, created_at,"
-                " status, producer, error_message, updated_at, verification_source)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    campaign_id,
-                    ARTIFACT_METADATA,
-                    str(metadata_path),
-                    _sha,
-                    now_utc,
-                    _status,
-                    "src.export.generate_metadata_json",
-                    _error,
-                    now_utc,
-                    "producer_hash" if _sha else "producer_missing",
-                ),
-            )
-            _art_conn.commit()
+        register_artifact(
+            db_path,
+            campaign_id=campaign_id,
+            artifact_type=ARTIFACT_METADATA,
+            path=metadata_path,
+            producer="src.export.generate_metadata_json",
+            created_at=now_utc,
+            error_message="metadata.json missing or unreadable after write",
+        )
     except Exception as reg_exc:
         logger.warning("metadata.json: could not register in DB (non-fatal): %s", reg_exc)
 

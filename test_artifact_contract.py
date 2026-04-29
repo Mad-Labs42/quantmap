@@ -319,6 +319,122 @@ def test_trust_identity_artifact_completeness(tmp_path):
     )
 
 
+def test_artifact_registry_registers_one_current_row_per_type(tmp_path):
+    """Central registry helper must replace prior rows for one artifact type."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    campaign_id = "registry_C01"
+    now = "2026-04-29T00:00:00Z"
+
+    first_path = tmp_path / "reports" / "metadata-old.json"
+    first_path.parent.mkdir(parents=True, exist_ok=True)
+    first_path.write_text('{"old": true}', encoding="utf-8")
+
+    second_path = tmp_path / "reports" / "metadata.json"
+    second_path.write_text('{"new": true}', encoding="utf-8")
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_METADATA,
+        path=first_path,
+        producer="test.old",
+        created_at=now,
+    )
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_METADATA,
+        path=second_path,
+        producer="test.new",
+        created_at=now,
+    )
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT artifact_type, path, producer, status, verification_source
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            ORDER BY created_at DESC
+            """,
+            (campaign_id, ARTIFACT_METADATA),
+        ).fetchall()
+
+    assert len(rows) == 1
+    row = dict(rows[0])
+    assert row["path"] == str(second_path)
+    assert row["producer"] == "test.new"
+    assert row["status"] == "complete"
+    assert row["verification_source"] == "producer_hash"
+
+
+def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_path):
+    """Canonical inventory should prefer DB paths and preserve missing states."""
+    from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    campaign_id = "inventory_C01"
+    report_dir = tmp_path / "artifacts" / "reports" / "model" / campaign_id
+    meas_dir = tmp_path / "artifacts" / "measurements" / "model" / campaign_id
+    report_dir.mkdir(parents=True, exist_ok=True)
+    meas_dir.mkdir(parents=True, exist_ok=True)
+
+    db_summary_path = tmp_path / "registered" / "campaign-summary.md"
+    db_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    db_summary_path.write_text("summary", encoding="utf-8")
+
+    register_path = report_dir / "campaign-summary.md"
+    register_path.write_text("fallback-summary", encoding="utf-8")
+
+    from src.artifact_registry import register_artifact
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+        path=db_summary_path,
+        producer="test.summary",
+        created_at="2026-04-29T00:00:00Z",
+    )
+
+    specs = [
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+            filename="campaign-summary.md",
+            role="user-facing summary",
+            candidate_path=register_path,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            filename="raw-telemetry.jsonl",
+            role="raw machine measurement stream",
+            candidate_path=meas_dir / "raw-telemetry.jsonl",
+        ),
+    ]
+
+    inventory = build_artifact_inventory(campaign_id, db_path, specs)
+    by_type = {item["artifact_type"]: item for item in inventory}
+
+    summary = by_type[ARTIFACT_CAMPAIGN_SUMMARY]
+    assert summary["path"] == str(db_summary_path)
+    assert summary["exists"] is True
+    assert summary["db_status"] == "complete"
+
+    telemetry = by_type[ARTIFACT_RAW_TELEMETRY]
+    assert telemetry["path"] == str(meas_dir / "raw-telemetry.jsonl")
+    assert telemetry["exists"] is False
+    assert telemetry["db_status"] is None
+    assert telemetry["status"] == "not generated"
+
+
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):
     """Early exits before execution must not append raw-telemetry markers."""
     monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
