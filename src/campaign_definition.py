@@ -168,9 +168,20 @@ def build_config_list(
         config_id = _make_config_id(campaign_id, value)
 
         full_config = dict(baseline_config)
-        if variable == "interaction" and isinstance(value, dict):
+        if variable == "interaction":
+            if not isinstance(value, dict):
+                raise CampaignPurityViolationError(
+                    f"Campaign {campaign_id} interaction value must be a dict, "
+                    f"got {type(value).__name__}"
+                )
             config_id = value.get("config_id", _make_config_id(campaign_id, value))
-            full_config.update(value.get("overrides", value))
+            overrides = value.get("overrides", value)
+            if not isinstance(overrides, dict):
+                raise CampaignPurityViolationError(
+                    f"Campaign {campaign_id} interaction overrides must be a dict, "
+                    f"got {type(overrides).__name__}"
+                )
+            full_config.update(overrides)
         elif variable == "cpu_affinity":
             full_config["_cpu_affinity"] = value
         elif variable == "kv_cache_type_k":

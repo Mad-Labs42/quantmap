@@ -518,3 +518,60 @@ def test_build_defrag_threshold_negative() -> None:
     assert "--defrag-thold" in configs[0]["server_args"]
     idx = configs[0]["server_args"].index("--defrag-thold")
     assert configs[0]["server_args"][idx + 1] == "-1"
+
+
+def test_build_interaction_scalar_value_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": ["threads=24"],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="interaction value must be a dict"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_list_value_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [[("threads", 24)]],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="interaction value must be a dict"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_overrides_not_dict_raises() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{"overrides": "threads=24"}],
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="interaction overrides must be a dict"):
+        mod.build_config_list(baseline, campaign)
+
+
+def test_build_interaction_with_config_id() -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C08_interaction",
+        "variable": "interaction",
+        "values": [{
+            "config_id": "my_interaction_cfg",
+            "overrides": {"threads": 24},
+        }],
+    }
+
+    configs = mod.build_config_list(baseline, campaign)
+
+    assert configs[0]["config_id"] == "my_interaction_cfg"
+    assert configs[0]["full_config"]["threads"] == 24
