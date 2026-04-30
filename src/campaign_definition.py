@@ -4,7 +4,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 import yaml
 
@@ -77,8 +77,8 @@ def _cid(campaign_id: str) -> str:
     return campaign_id if campaign_id else "?"
 
 
-def _is_non_empty_str(value: object) -> bool:
-    """Return True if value is a non-empty, non-blank string."""
+def _is_non_empty_str(value: object) -> TypeGuard[str]:
+    """Return True when value is a non-empty, non-blank string."""
     return isinstance(value, str) and bool(value.strip())
 
 

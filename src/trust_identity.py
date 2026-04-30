@@ -21,7 +21,11 @@ from src.artifact_paths import (
     ARTIFACT_RUN_REPORTS,
     ARTIFACT_METADATA,
     ARTIFACT_RAW_TELEMETRY,
-    ARTIFACT_TYPES_DEPRECATED,
+)
+from src.artifact_registry import (
+    load_artifact_rows,
+    load_artifact_rows_by_type,
+    summarize_artifact_bundle_status,
 )
 
 
@@ -379,38 +383,7 @@ def load_methodology_for_historical_scoring(
 
 def load_artifact_summaries(campaign_id: str, db_path: Path) -> list[dict[str, Any]]:
     """Return artifact rows with stable defaults for trust-surface readers."""
-    with get_connection(db_path) as conn:
-        try:
-            rows = conn.execute(
-                """
-                SELECT artifact_type, path, sha256, created_at, status, producer,
-                       error_message, updated_at, verification_source
-                FROM artifacts
-                WHERE campaign_id=?
-                ORDER BY created_at DESC, artifact_type
-                """,
-                (campaign_id,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-
-    artifacts: list[dict[str, Any]] = []
-    for row in rows:
-        d = dict(row)
-        d["status"] = d.get("status") or "legacy_path_only"
-        d["verification_source"] = d.get("verification_source") or "legacy_unverified"
-        artifacts.append(d)
-    return artifacts
-
-
-def _collect_statuses(check_types: tuple, by_type: dict) -> list:
-    """Return a status string for each artifact type in check_types."""
-    result = []
-    for atype in check_types:
-        row = by_type.get(atype)
-        result.append("missing" if row is None else (row.get("status") or "legacy_path_only"))
-    return result
-
+    return load_artifact_rows(campaign_id, db_path)
 
 def summarize_report_artifact_status(
     campaign_id: str,
@@ -419,59 +392,20 @@ def summarize_report_artifact_status(
 ) -> str:
     """Return the campaign-level aggregate report status from artifact rows.
 
-    Checks for the approved artifact contract types first.  Also accepts old
-    legacy type names so rows written before the redesign migration still count
-    toward completeness rather than being treated as missing.
-
-    expected_types may be overridden by callers during transition; if None the
-    new canonical types are used.
+    Only the current 4-artifact contract is supported for forward-facing
+    report-status projection.
     """
-    # New canonical types for the 4-artifact contract (imported from artifact_paths).
-    _NEW_TYPES = (
+    _CANONICAL_TYPES = (
         ARTIFACT_CAMPAIGN_SUMMARY,
         ARTIFACT_RUN_REPORTS,
         ARTIFACT_METADATA,
         ARTIFACT_RAW_TELEMETRY,
     )
-    # Legacy types written before the rename migration (imported from artifact_paths).
-    _LEGACY_TYPES = tuple(
-        t
-        for t in (
-            "report_md",
-            "report_v2_md",
-            "scores_csv",
-            "raw_jsonl",
-            "telemetry_jsonl",
-        )
-        if t in ARTIFACT_TYPES_DEPRECATED
+    rows_by_type = load_artifact_rows_by_type(campaign_id, db_path)
+    return summarize_artifact_bundle_status(
+        rows_by_type,
+        expected_types or _CANONICAL_TYPES,
     )
-
-    artifacts = load_artifact_summaries(campaign_id, db_path)
-    by_type = {row.get("artifact_type"): row for row in artifacts}
-    if not by_type:
-        return "legacy_unknown"
-
-    if expected_types is not None:
-        # Explicit override: use exactly these types.
-        statuses = _collect_statuses(expected_types, by_type)
-    else:
-        # Auto: check new types; fall back to legacy equivalents if new are absent.
-        # A campaign that was run before the redesign only has old-type rows;
-        # we must not report it as "partial" just because new-type rows are missing.
-        has_any_new = any(atype in by_type for atype in _NEW_TYPES)
-        check_types = _NEW_TYPES if has_any_new else _LEGACY_TYPES
-        statuses = _collect_statuses(check_types, by_type)
-
-    if statuses and all(status == "complete" for status in statuses):
-        return "complete"
-    if any(status == "failed" for status in statuses):
-        return "partial"
-    if any(
-        status in {"partial", "missing", "legacy_path_only", "legacy_unverified"}
-        for status in statuses
-    ):
-        return "partial"
-    return "partial"
 
 
 def load_baseline_for_historical_use(

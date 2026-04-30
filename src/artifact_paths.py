@@ -10,6 +10,8 @@ import os
 import re
 from pathlib import Path
 
+from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
+
 
 APPROVED_ARTIFACT_TYPES = {"logs", "measurements", "reports", "environment"}
 
@@ -203,6 +205,35 @@ def measurement_paths(
     }
 
 
+def campaign_artifact_dirs(
+    lab_root: Path,
+    model_identity: str,
+    campaign_id: str,
+    *,
+    create: bool = False,
+) -> dict[str, Path]:
+    """Return canonical report/measurement/environment directories for one campaign."""
+    report_dir = report_paths(lab_root, model_identity, campaign_id, create=create)["dir"]
+    measurements_dir = measurement_paths(
+        lab_root,
+        model_identity,
+        campaign_id,
+        create=create,
+    )["dir"]
+    environment_dir = artifact_dir(
+        lab_root,
+        "environment",
+        model_identity,
+        campaign_id,
+        create=create,
+    )
+    return {
+        "reports_dir": report_dir,
+        "measurements_dir": measurements_dir,
+        "environment_dir": environment_dir,
+    }
+
+
 def compare_default_report_path(lab_root: Path, campaign_a: str, campaign_b: str) -> Path:
     """Return canonical default compare report path under the reports family."""
     pair = f"{campaign_a}_vs_{campaign_b}"
@@ -214,74 +245,6 @@ def compare_default_report_path(lab_root: Path, campaign_a: str, campaign_b: str
         create=True,
     )
     return compare_dir / "compare.md"
-
-
-def _load_artifact_db_rows(db_path: "Path | None", campaign_id: str) -> dict:
-    """Load artifact rows from the DB for a campaign, keyed by artifact_type.
-
-    Returns a mapping of artifact_type -> dict(row) with the newest entry
-    winning when multiple rows exist for the same type.
-
-    Non-fatal: any DB access failure returns an empty dict so callers can
-    proceed with filesystem-only discovery.
-    """
-    if db_path is None:
-        return {}
-    try:
-        import sqlite3  # noqa: PLC0415
-        # Query artifact rows directly to avoid a circular import:
-        # trust_identity imports artifact_paths at module level, so importing
-        # trust_identity here (even lazily) creates a cyclic dependency.
-        conn = sqlite3.connect(db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                """
-                SELECT artifact_type, path, sha256, created_at, status,
-                       producer, error_message, updated_at, verification_source
-                FROM artifacts
-                WHERE campaign_id=?
-                ORDER BY created_at DESC, artifact_type
-                """,
-                (campaign_id,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = []
-        finally:
-            conn.close()
-        # Iterate oldest-first so newest entry wins when same type appears twice.
-        db_rows: dict = {}
-        for row in reversed(rows):
-            atype = row["artifact_type"] if row["artifact_type"] else ""
-            if atype:
-                db_rows[atype] = dict(row)
-        return db_rows
-    except Exception:  # pragma: no cover — DB unavailable or path invalid
-        # Non-fatal: artifact enrichment is best-effort; path/exists are still returned.
-        return {}
-
-
-
-def _resolve_artifact_path(
-    row: dict,
-    base_dir: "Path | None",
-    fname: str,
-) -> "tuple[Path | None, bool]":
-    """Resolve a single artifact path from a DB row or filesystem fallback.
-
-    Prefers the DB-registered path (row['path']) when present and non-empty,
-    avoiding model-slug ambiguity when the same campaign_id exists under
-    multiple model directories. Falls back to base_dir / fname when no DB path
-    is available.
-
-    Returns (path, exists) tuple.
-    """
-    db_path_str = row.get("path") if row else None
-    if db_path_str:
-        resolved: Path = Path(db_path_str)
-        return resolved, resolved.exists()
-    fallback = (base_dir / fname) if base_dir is not None else None
-    return fallback, (fallback.exists() if fallback is not None else False)
 
 def get_campaign_artifact_paths(
     lab_root: Path,
@@ -307,24 +270,55 @@ def get_campaign_artifact_paths(
     """
     report_dir = find_artifact_dir(lab_root, "reports", campaign_id)
     meas_dir = find_artifact_dir(lab_root, "measurements", campaign_id)
-    db_rows = _load_artifact_db_rows(db_path, campaign_id)
-
-    _CANONICAL: list[tuple[str, str, "Path | None"]] = [
-        (ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY, report_dir),
-        (ARTIFACT_RUN_REPORTS,      FILENAME_RUN_REPORTS,      report_dir),
-        (ARTIFACT_METADATA,         FILENAME_METADATA,         report_dir),
-        (ARTIFACT_RAW_TELEMETRY,    FILENAME_RAW_TELEMETRY,    meas_dir),
+    specs = [
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+            filename=FILENAME_CAMPAIGN_SUMMARY,
+            role=ARTIFACT_ROLES[ARTIFACT_CAMPAIGN_SUMMARY],
+            candidate_path=(report_dir / FILENAME_CAMPAIGN_SUMMARY) if report_dir is not None else None,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RUN_REPORTS,
+            filename=FILENAME_RUN_REPORTS,
+            role=ARTIFACT_ROLES[ARTIFACT_RUN_REPORTS],
+            candidate_path=(report_dir / FILENAME_RUN_REPORTS) if report_dir is not None else None,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_METADATA,
+            filename=FILENAME_METADATA,
+            role=ARTIFACT_ROLES[ARTIFACT_METADATA],
+            candidate_path=(report_dir / FILENAME_METADATA) if report_dir is not None else None,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            filename=FILENAME_RAW_TELEMETRY,
+            role=ARTIFACT_ROLES[ARTIFACT_RAW_TELEMETRY],
+            candidate_path=(meas_dir / FILENAME_RAW_TELEMETRY) if meas_dir is not None else None,
+        ),
     ]
-    entries: list[dict] = []
-    for atype, fname, base_dir in _CANONICAL:
-        row = db_rows.get(atype, {})
-        path, exists = _resolve_artifact_path(row, base_dir, fname)
-        entries.append({
-            "artifact_type": atype,
-            "filename":      fname,
-            "path":          path,
-            "exists":        exists,
-            "db_status":     row.get("status") if row else None,
-            "sha256":        row.get("sha256") if row else None,
-        })
-    return entries
+
+    if db_path is None:
+        return [
+            {
+                "artifact_type": spec.artifact_type,
+                "filename": spec.filename,
+                "path": spec.candidate_path,
+                "exists": spec.candidate_path.exists() if spec.candidate_path is not None else False,
+                "db_status": None,
+                "sha256": None,
+            }
+            for spec in specs
+        ]
+
+    inventory = build_artifact_inventory(campaign_id, db_path, specs)
+    return [
+        {
+            "artifact_type": item["artifact_type"],
+            "filename": item["filename"],
+            "path": Path(item["path"]) if item["path"] else None,
+            "exists": item["exists"],
+            "db_status": item["db_status"],
+            "sha256": item["sha256"],
+        }
+        for item in inventory
+    ]

@@ -16,8 +16,11 @@ Checks:
 from __future__ import annotations
 
 import json
+import hashlib
+import sqlite3
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +33,7 @@ from src.artifact_paths import (
     ARTIFACT_RAW_TELEMETRY,
     ARTIFACT_RUN_REPORTS,
     ARTIFACT_TYPES_DEPRECATED,
+    campaign_artifact_dirs,
     measurement_paths,
     report_paths,
 )
@@ -279,8 +283,8 @@ def test_trust_identity_artifact_completeness(tmp_path):
             )
             conn.commit()
 
-    # 1. Empty setup -> missing/partial
-    assert summarize_report_artifact_status(campaign_id, db_path) in ("legacy_unknown", "partial")
+    # 1. Empty setup -> partial (no current artifact bundle recorded)
+    assert summarize_report_artifact_status(campaign_id, db_path) == "partial"
 
     # 2. Add only 3 artifacts (the old broken behavior)
     add_art(ARTIFACT_CAMPAIGN_SUMMARY)
@@ -300,23 +304,638 @@ def test_trust_identity_artifact_completeness(tmp_path):
         "Campaign must be 'complete' when all 4 canonical artifacts are registered."
     )
 
-    legacy_campaign_id = "legacy_C01"
-    for legacy_type in ("report_md", "report_v2_md", "scores_csv"):
-        add_art(legacy_type, campaign=legacy_campaign_id)
+    unsupported_campaign_id = "legacy_like_C01"
+    for obsolete_type in ("report_md", "report_v2_md", "scores_csv", "raw_jsonl", "telemetry_jsonl"):
+        add_art(obsolete_type, campaign=unsupported_campaign_id)
 
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
-        "Legacy fallback must not be complete when telemetry artifacts are missing."
+    assert summarize_report_artifact_status(unsupported_campaign_id, db_path) == "partial", (
+        "Obsolete prototype artifact rows must not be treated as a supported complete artifact bundle."
     )
 
-    add_art("raw_jsonl", campaign=legacy_campaign_id)
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "partial", (
-        "Legacy fallback must not be complete until both legacy telemetry artifacts exist."
+
+def test_artifact_registry_streaming_sha256_matches_expected(tmp_path, monkeypatch):
+    """The registry hash helper must stream file contents and avoid Path.read_bytes()."""
+    from src import artifact_registry
+
+    payload = (b"QuantMapArtifactContract" * (artifact_registry._SHA256_CHUNK_SIZE // 24 + 2))[: artifact_registry._SHA256_CHUNK_SIZE + 257]
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    artifact_path.write_bytes(payload)
+
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda self: (_ for _ in ()).throw(AssertionError("read_bytes should not be used")),
     )
 
-    add_art("telemetry_jsonl", campaign=legacy_campaign_id)
-    assert summarize_report_artifact_status(legacy_campaign_id, db_path) == "complete", (
-        "Legacy fallback may be complete only when report, score, and telemetry artifacts exist."
+    assert artifact_registry._file_sha256(artifact_path) == hashlib.sha256(payload).hexdigest()
+
+
+def test_artifact_registry_registers_one_current_row_per_type(tmp_path):
+    """Central registry helper must replace prior rows for one artifact type."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    campaign_id = "registry_C01"
+    now = "2026-04-29T00:00:00Z"
+
+    first_path = tmp_path / "reports" / "metadata-old.json"
+    first_path.parent.mkdir(parents=True, exist_ok=True)
+    first_path.write_text('{"old": true}', encoding="utf-8")
+
+    second_path = tmp_path / "reports" / "metadata.json"
+    second_path.write_text('{"new": true}', encoding="utf-8")
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_METADATA,
+        path=first_path,
+        producer="test.old",
+        created_at=now,
     )
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_METADATA,
+        path=second_path,
+        producer="test.new",
+        created_at=now,
+    )
+
+    with get_connection(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT artifact_type, path, producer, status, verification_source
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            ORDER BY created_at DESC
+            """,
+            (campaign_id, ARTIFACT_METADATA),
+        ).fetchall()
+
+    assert len(rows) == 1
+    row = dict(rows[0])
+    assert row["path"] == str(second_path)
+    assert row["producer"] == "test.new"
+    assert row["status"] == "complete"
+    assert row["verification_source"] == "producer_hash"
+
+
+def test_artifact_registry_accepts_valid_precomputed_sha_without_rehash(tmp_path, monkeypatch):
+    """A valid supplied SHA should be trusted without re-reading the file."""
+    from src import artifact_registry
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("telemetry", encoding="utf-8")
+    expected_sha = hashlib.sha256(b"telemetry").hexdigest()
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "_file_sha256",
+        lambda path: (_ for _ in ()).throw(AssertionError("register_artifact should not rehash")),
+    )
+
+    artifact_registry.register_artifact(
+        db_path,
+        campaign_id="precomputed_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.precomputed",
+        status="complete",
+        precomputed_sha256=expected_sha,
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT sha256, status FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            ("precomputed_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["sha256"] == expected_sha
+    assert row["status"] == "complete"
+
+
+def test_artifact_registry_rejects_invalid_or_inconsistent_precomputed_sha(tmp_path):
+    """Invalid or contradictory precomputed SHA inputs must fail loudly."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("telemetry", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="64-character hexadecimal"):
+        register_artifact(
+            db_path,
+            campaign_id="bad_sha_C01",
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            path=artifact_path,
+            producer="test.invalid",
+            status="complete",
+            precomputed_sha256="not-a-sha",
+        )
+
+    with pytest.raises(ValueError, match="cannot register status='missing' with a SHA-256 digest"):
+        register_artifact(
+            db_path,
+            campaign_id="contradiction_C01",
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            path=artifact_path,
+            producer="test.invalid",
+            status="missing",
+            precomputed_sha256="a" * 64,
+        )
+
+
+def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_path):
+    """Canonical inventory should prefer DB paths and preserve missing states."""
+    from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    campaign_id = "inventory_C01"
+    report_dir = tmp_path / "artifacts" / "reports" / "model" / campaign_id
+    meas_dir = tmp_path / "artifacts" / "measurements" / "model" / campaign_id
+    report_dir.mkdir(parents=True, exist_ok=True)
+    meas_dir.mkdir(parents=True, exist_ok=True)
+
+    db_summary_path = tmp_path / "registered" / "campaign-summary.md"
+    db_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    db_summary_path.write_text("summary", encoding="utf-8")
+
+    register_path = report_dir / "campaign-summary.md"
+    register_path.write_text("fallback-summary", encoding="utf-8")
+
+    from src.artifact_registry import register_artifact
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+        path=db_summary_path,
+        producer="test.summary",
+        created_at="2026-04-29T00:00:00Z",
+    )
+
+    specs = [
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+            filename="campaign-summary.md",
+            role="user-facing summary",
+            candidate_path=register_path,
+        ),
+        ArtifactInventorySpec(
+            artifact_type=ARTIFACT_RAW_TELEMETRY,
+            filename="raw-telemetry.jsonl",
+            role="raw machine measurement stream",
+            candidate_path=meas_dir / "raw-telemetry.jsonl",
+        ),
+    ]
+
+    inventory = build_artifact_inventory(campaign_id, db_path, specs)
+    by_type = {item["artifact_type"]: item for item in inventory}
+
+    summary = by_type[ARTIFACT_CAMPAIGN_SUMMARY]
+    assert summary["path"] == str(db_summary_path)
+    assert summary["exists"] is True
+    assert summary["db_status"] == "complete"
+
+    telemetry = by_type[ARTIFACT_RAW_TELEMETRY]
+    assert telemetry["path"] == str(meas_dir / "raw-telemetry.jsonl")
+    assert telemetry["exists"] is False
+    assert telemetry["db_status"] is None
+    assert telemetry["status"] == "not generated"
+
+
+def test_campaign_artifact_dirs_use_canonical_model_scoped_paths(tmp_path):
+    """Canonical dirs must be model-scoped, not campaign-only rediscovery."""
+    dirs = campaign_artifact_dirs(
+        tmp_path,
+        "Model X",
+        "Campaign_01",
+        create=False,
+    )
+    assert dirs["reports_dir"] == (
+        tmp_path / "artifacts" / "reports" / "model-x" / "Campaign_01"
+    )
+    assert dirs["measurements_dir"] == (
+        tmp_path / "artifacts" / "measurements" / "model-x" / "Campaign_01"
+    )
+    assert dirs["environment_dir"] == (
+        tmp_path / "artifacts" / "environment" / "model-x" / "Campaign_01"
+    )
+
+
+def test_report_artifact_index_projection_uses_canonical_model_paths(tmp_path, monkeypatch):
+    """Report artifact index must use current model canonical paths."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path))
+    from src.db import init_db
+    from src import report
+
+    campaign_id = "Campaign_Projection_01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    # Decoy legacy dirs for the same campaign_id under a different model slug.
+    (tmp_path / "artifacts" / "reports" / "legacy-model" / campaign_id).mkdir(parents=True)
+    (tmp_path / "artifacts" / "measurements" / "legacy-model" / campaign_id).mkdir(parents=True)
+
+    paths, rows = report._artifact_index_projection(
+        campaign_id,
+        db_path,
+        lab_root=tmp_path,
+        model_identity="Model-New",
+    )
+
+    assert paths[ARTIFACT_CAMPAIGN_SUMMARY] == (
+        tmp_path
+        / "artifacts"
+        / "reports"
+        / "model-new"
+        / campaign_id
+        / "campaign-summary.md"
+    )
+    assert paths[ARTIFACT_RAW_TELEMETRY] == (
+        tmp_path
+        / "artifacts"
+        / "measurements"
+        / "model-new"
+        / campaign_id
+        / "raw-telemetry.jsonl"
+    )
+    assert rows[ARTIFACT_RAW_TELEMETRY]["path"] == str(paths[ARTIFACT_RAW_TELEMETRY])
+    assert rows[ARTIFACT_RAW_TELEMETRY]["db_status"] is None
+
+
+def test_metadata_generation_uses_canonical_model_scoped_dirs(tmp_path, monkeypatch):
+    """metadata.json helpers must receive canonical model-scoped measurement/env dirs."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path))
+    from src import export
+    from src.db import init_db, get_connection
+
+    campaign_id = "Metadata_Canonical_01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO campaigns (id, name, status, created_at)
+            VALUES (?, ?, 'complete', '2026-04-30T00:00:00Z')
+            """,
+            (campaign_id, campaign_id),
+        )
+        conn.commit()
+
+    # Decoy legacy directories that campaign-only rediscovery could pick.
+    (tmp_path / "artifacts" / "measurements" / "legacy-model" / campaign_id).mkdir(parents=True)
+    (tmp_path / "artifacts" / "environment" / "legacy-model" / campaign_id).mkdir(parents=True)
+
+    observed: dict[str, Path] = {}
+
+    monkeypatch.setattr(
+        export,
+        "_load_campaign_snapshot",
+        lambda *_args, **_kwargs: (
+            {},
+            {"model": {"name": "Model-New", "path": "models/model-new.gguf"}},
+        ),
+    )
+    monkeypatch.setattr(export, "_build_ranking_output", lambda *_args, **_kwargs: ([], [], None, None))
+    monkeypatch.setattr(export, "_build_recommendation_projection", lambda *_args, **_kwargs: {"available": False, "source": "test"})
+    monkeypatch.setattr(export, "methodology_source_label", lambda *_args, **_kwargs: "snapshot_complete")
+    monkeypatch.setattr(
+        export,
+        "load_run_identity",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            execution_environment={},
+            telemetry_provider={},
+            sources={
+                "baseline": "snapshot",
+                "campaign": "snapshot",
+                "quantmap": "snapshot",
+                "filter_policy": "snapshot",
+            },
+            methodology={},
+            filter_policy={},
+        ),
+    )
+
+    def _capture_inventory(_campaign_id, _db_path, _reports_dir, meas_dir):
+        observed["meas_dir"] = meas_dir
+        return []
+
+    def _capture_context(_campaign_id, _db_path, env_dir, _logger):
+        observed["env_dir"] = env_dir
+        return {}
+
+    monkeypatch.setattr(export, "_build_artifact_inventory", _capture_inventory)
+    monkeypatch.setattr(export, "_build_run_context_summary", _capture_context)
+
+    export.generate_metadata_json(
+        campaign_id,
+        db_path,
+        scores_result={},
+        stats={},
+        lab_root=tmp_path,
+    )
+
+    assert observed["meas_dir"] == (
+        tmp_path / "artifacts" / "measurements" / "model-new" / campaign_id
+    )
+    assert observed["env_dir"] == (
+        tmp_path / "artifacts" / "environment" / "model-new" / campaign_id
+    )
+
+
+def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
+    """Explicitly missing artifacts must not trigger a file hash attempt."""
+    from src import artifact_registry
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "_file_sha256",
+        lambda path: (_ for _ in ()).throw(AssertionError("missing artifacts should not be hashed")),
+    )
+
+    artifact_registry.register_artifact(
+        db_path,
+        campaign_id="missing_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.missing",
+        status="missing",
+        error_message="raw-telemetry.jsonl not found after finalize",
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            "SELECT sha256, status, verification_source FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            ("missing_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["sha256"] is None
+    assert row["status"] == "missing"
+    assert row["verification_source"] == "producer_missing"
+
+
+def test_artifact_registry_missing_table_is_benign_empty(tmp_path):
+    """Artifact reads should treat an absent artifacts table as an empty inventory."""
+    from src import artifact_registry
+
+    db_path = tmp_path / "lab.sqlite"
+    sqlite3.connect(db_path).close()
+
+    assert artifact_registry.load_artifact_rows("missing_table_C01", db_path) == []
+    assert artifact_registry.load_artifact_rows_by_type("missing_table_C01", db_path) == {}
+
+
+def test_artifact_registry_non_benign_read_failure_is_not_silently_normalized(
+    tmp_path,
+    monkeypatch,
+):
+    """Locked/corrupt/unreadable DB reads must surface a registry-owned failure."""
+    from src import artifact_registry
+
+    class _LockedConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "get_connection",
+        lambda db_path: _LockedConnection(),
+    )
+
+    with pytest.raises(artifact_registry.ArtifactRegistryReadError, match="database is locked"):
+        artifact_registry.load_artifact_rows_by_type("locked_C01", tmp_path / "lab.sqlite")
+
+
+def test_report_campaign_artifact_index_uses_canonical_paths_and_flags_stale_rows(tmp_path):
+    """Supporting Evidence must show registry paths and stale file-missing evidence."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db
+    from src import report_campaign
+
+    campaign_id = "report_index_C01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    reports_dir = tmp_path / "artifacts" / "reports" / "model" / campaign_id
+    measurements_dir = tmp_path / "artifacts" / "measurements" / "model" / campaign_id
+    environment_dir = tmp_path / "artifacts" / "environment" / "model" / campaign_id
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    measurements_dir.mkdir(parents=True, exist_ok=True)
+    environment_dir.mkdir(parents=True, exist_ok=True)
+
+    canonical_summary = tmp_path / "registered" / "campaign-summary.md"
+    canonical_summary.parent.mkdir(parents=True, exist_ok=True)
+    canonical_summary.write_text("summary", encoding="utf-8")
+
+    canonical_raw = tmp_path / "registered" / "raw-telemetry.jsonl"
+    canonical_raw.write_text('{"_stream":"telemetry"}\n', encoding="utf-8")
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+        path=canonical_summary,
+        producer="test.summary",
+    )
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=canonical_raw,
+        producer="test.raw",
+    )
+    canonical_raw.unlink()
+
+    lines = report_campaign._section_supporting_artifacts(
+        campaign_id,
+        reports_dir,
+        measurements_dir,
+        environment_dir,
+        db_path,
+        run_contexts=[],
+    )
+    rendered = "\n".join(lines)
+    measurement_line = next(line for line in lines if line.startswith("| Measurement Stream |"))
+
+    assert f"`{canonical_summary}`" in rendered
+    assert f"`{reports_dir / 'campaign-summary.md'}`" not in rendered
+    assert f"`{canonical_raw}`" in measurement_line
+    assert "complete" in measurement_line
+    assert "file_missing" in measurement_line
+
+
+def test_runner_register_raw_telemetry_artifact_hash_failure_records_failed_row(
+    tmp_path,
+    monkeypatch,
+):
+    """Hash/read failures after finalize must still register a failed artifact row."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    artifact_path.write_text('{"_stream":"telemetry"}\n', encoding="utf-8")
+
+    original_open = Path.open
+
+    def _failing_open(self, *args, **kwargs):
+        if self == artifact_path:
+            raise OSError("forced raw telemetry read failure")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _failing_open)
+
+    runner._register_raw_telemetry_artifact(db_path, "hash_fail_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("hash_fail_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["sha256"] is None
+    assert "forced raw telemetry read failure" in row["error_message"]
+
+
+def test_runner_register_raw_telemetry_artifact_missing_records_missing_row(
+    tmp_path,
+    monkeypatch,
+):
+    """Absent raw telemetry must remain a missing artifact, not a failed one."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+
+    runner._register_raw_telemetry_artifact(db_path, "missing_raw_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("missing_raw_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "missing"
+    assert row["sha256"] is None
+    assert row["error_message"] == "raw-telemetry.jsonl not found after finalize"
+
+
+def test_runner_register_raw_telemetry_artifact_complete_preserves_precomputed_sha(
+    tmp_path,
+    monkeypatch,
+):
+    """Successful finalize registration should stay complete and keep the computed SHA."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    payload = b'{"_stream":"telemetry"}\n'
+    artifact_path.write_bytes(payload)
+
+    runner._register_raw_telemetry_artifact(db_path, "complete_raw_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("complete_raw_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "complete"
+    assert row["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_runner_run_reports_failure_registration_is_not_marked_missing(tmp_path, monkeypatch):
+    """Render exceptions must register a failed producer status, not producer_missing."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    report_path = tmp_path / "run-reports.md"
+
+    runner._register_run_reports_failure_artifact(
+        db_path,
+        "run_reports_fail_C01",
+        report_path,
+        RuntimeError("forced render failure"),
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, verification_source, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("run_reports_fail_C01", ARTIFACT_RUN_REPORTS),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["verification_source"] == "producer_status"
+    assert row["verification_source"] != "producer_missing"
+    assert "RuntimeError" in row["error_message"]
 
 
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):
