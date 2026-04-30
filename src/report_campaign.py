@@ -2248,6 +2248,10 @@ def _section_supporting_artifacts(
         for entry in artifact_inventory
     }
 
+    def _artifact_path(artifact_type: str, candidate_path: Path) -> str:
+        entry = artifact_rows[artifact_type]
+        return str(entry.get("path") or candidate_path)
+
     def _artifact_status(artifact_type: str) -> str:
         entry = artifact_rows[artifact_type]
         if entry["db_status"] is None:
@@ -2255,7 +2259,10 @@ def _section_supporting_artifacts(
         verification = entry.get("verification_source") or _STR_NOT_RECORDED
         sha = entry.get("sha256")
         error = entry.get("error_message")
-        parts = [str(entry["db_status"]), f"verification={verification}"]
+        parts = [str(entry["db_status"])]
+        if not entry.get("exists", False):
+            parts.append("file_missing")
+        parts.append(f"verification={verification}")
         if sha:
             parts.append(f"sha256={str(sha)[:12]}")
         if error:
@@ -2287,19 +2294,19 @@ def _section_supporting_artifacts(
     lines.append("| Artifact | Path | Status | Contents |")
     lines.append("|----------|------|:------:|----------|")
     lines.append(
-        f"| Campaign Summary | `{campaign_summary_md}` | {_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY)} | "
+        f"| Campaign Summary | `{_artifact_path(ARTIFACT_CAMPAIGN_SUMMARY, campaign_summary_md)}` | {_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY)} | "
         "Compact summary — winner, key results, artifact pointers |"
     )
     lines.append(
-        f"| Run Reports (this file) | `{run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} | "
+        f"| Run Reports (this file) | `{_artifact_path(ARTIFACT_RUN_REPORTS, run_reports_md)}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} | "
         "Full readable evidence, rankings, methodology, environment quality |"
     )
     lines.append(
-        f"| Measurement Stream | `{raw_telemetry_jsonl}` | {_artifact_status(ARTIFACT_RAW_TELEMETRY)} | "
+        f"| Measurement Stream | `{_artifact_path(ARTIFACT_RAW_TELEMETRY, raw_telemetry_jsonl)}` | {_artifact_status(ARTIFACT_RAW_TELEMETRY)} | "
         "Merged request + telemetry records (distinguished by `_stream` field) |"
     )
     lines.append(
-        f"| Provenance + Scores | `{metadata_json}` | {_artifact_status(ARTIFACT_METADATA)} | "
+        f"| Provenance + Scores | `{_artifact_path(ARTIFACT_METADATA, metadata_json)}` | {_artifact_status(ARTIFACT_METADATA)} | "
         "Campaign YAML, scores, capability inventory, artifact manifest |"
     )
     lines.append(

@@ -8,6 +8,7 @@ construction remains owned by ``src.artifact_paths``.
 from __future__ import annotations
 
 import hashlib
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from src.db import get_connection
 
 _SHA256_CHUNK_SIZE = 1024 * 1024
 _SHA256_HEX_DIGITS = frozenset("0123456789abcdef")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,10 @@ class ArtifactInventorySpec:
     filename: str
     role: str
     candidate_path: Path | None
+
+
+class ArtifactRegistryReadError(RuntimeError):
+    """Raised when artifact rows cannot be read truthfully from the registry."""
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -50,6 +56,14 @@ def _validate_precomputed_sha256(sha256: str) -> str:
             "precomputed_sha256 must be a non-empty 64-character hexadecimal SHA-256 digest"
         )
     return normalized
+
+
+def _is_missing_artifacts_table_error(exc: BaseException) -> bool:
+    """Return True when the current DB simply has no artifacts table yet."""
+    return (
+        isinstance(exc, sqlite3.OperationalError)
+        and "no such table: artifacts" in str(exc).lower()
+    )
 
 
 def register_artifact(
@@ -139,23 +153,38 @@ def register_artifact(
 
 def load_artifact_rows(campaign_id: str, db_path: Path) -> list[dict[str, Any]]:
     """Load artifact rows for one campaign with stable current-contract defaults."""
+    query = """
+        SELECT artifact_type, path, sha256, created_at, status, producer,
+               error_message, updated_at, verification_source
+        FROM artifacts
+        WHERE campaign_id=?
+        ORDER BY created_at DESC, artifact_type
+        """
     try:
         with get_connection(db_path) as conn:
             try:
-                rows = conn.execute(
-                    """
-                    SELECT artifact_type, path, sha256, created_at, status, producer,
-                           error_message, updated_at, verification_source
-                    FROM artifacts
-                    WHERE campaign_id=?
-                    ORDER BY created_at DESC, artifact_type
-                    """,
-                    (campaign_id,),
-                ).fetchall()
-            except sqlite3.OperationalError:
-                rows = []
-    except (OSError, sqlite3.Error):
-        rows = []
+                rows = conn.execute(query, (campaign_id,)).fetchall()
+            except sqlite3.OperationalError as exc:
+                if _is_missing_artifacts_table_error(exc):
+                    rows = []
+                else:
+                    logger.exception(
+                        "Artifact registry read failed for campaign_id=%s db_path=%s",
+                        campaign_id,
+                        db_path,
+                    )
+                    raise ArtifactRegistryReadError(
+                        f"Artifact registry read failed for campaign_id={campaign_id} db_path={db_path}: {exc}"
+                    ) from exc
+    except (OSError, sqlite3.Error) as exc:
+        logger.exception(
+            "Artifact registry connection failed for campaign_id=%s db_path=%s",
+            campaign_id,
+            db_path,
+        )
+        raise ArtifactRegistryReadError(
+            f"Artifact registry connection failed for campaign_id={campaign_id} db_path={db_path}: {exc}"
+        ) from exc
 
     artifacts: list[dict[str, Any]] = []
     for row in rows:

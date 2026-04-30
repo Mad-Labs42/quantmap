@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 import sys
 import types
 from pathlib import Path
@@ -552,6 +553,210 @@ def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
     assert row["sha256"] is None
     assert row["status"] == "missing"
     assert row["verification_source"] == "producer_missing"
+
+
+def test_artifact_registry_missing_table_is_benign_empty(tmp_path):
+    """Artifact reads should treat an absent artifacts table as an empty inventory."""
+    from src import artifact_registry
+
+    db_path = tmp_path / "lab.sqlite"
+    sqlite3.connect(db_path).close()
+
+    assert artifact_registry.load_artifact_rows("missing_table_C01", db_path) == []
+    assert artifact_registry.load_artifact_rows_by_type("missing_table_C01", db_path) == {}
+
+
+def test_artifact_registry_non_benign_read_failure_is_not_silently_normalized(
+    tmp_path,
+    monkeypatch,
+):
+    """Locked/corrupt/unreadable DB reads must surface a registry-owned failure."""
+    from src import artifact_registry
+
+    class _LockedConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "get_connection",
+        lambda db_path: _LockedConnection(),
+    )
+
+    with pytest.raises(artifact_registry.ArtifactRegistryReadError, match="database is locked"):
+        artifact_registry.load_artifact_rows_by_type("locked_C01", tmp_path / "lab.sqlite")
+
+
+def test_report_campaign_artifact_index_uses_canonical_paths_and_flags_stale_rows(tmp_path):
+    """Supporting Evidence must show registry paths and stale file-missing evidence."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db
+    from src import report_campaign
+
+    campaign_id = "report_index_C01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    reports_dir = tmp_path / "artifacts" / "reports" / "model" / campaign_id
+    measurements_dir = tmp_path / "artifacts" / "measurements" / "model" / campaign_id
+    environment_dir = tmp_path / "artifacts" / "environment" / "model" / campaign_id
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    measurements_dir.mkdir(parents=True, exist_ok=True)
+    environment_dir.mkdir(parents=True, exist_ok=True)
+
+    canonical_summary = tmp_path / "registered" / "campaign-summary.md"
+    canonical_summary.parent.mkdir(parents=True, exist_ok=True)
+    canonical_summary.write_text("summary", encoding="utf-8")
+
+    canonical_raw = tmp_path / "registered" / "raw-telemetry.jsonl"
+    canonical_raw.write_text('{"_stream":"telemetry"}\n', encoding="utf-8")
+
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+        path=canonical_summary,
+        producer="test.summary",
+    )
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=canonical_raw,
+        producer="test.raw",
+    )
+    canonical_raw.unlink()
+
+    lines = report_campaign._section_supporting_artifacts(
+        campaign_id,
+        reports_dir,
+        measurements_dir,
+        environment_dir,
+        db_path,
+        run_contexts=[],
+    )
+    rendered = "\n".join(lines)
+    measurement_line = next(line for line in lines if line.startswith("| Measurement Stream |"))
+
+    assert f"`{canonical_summary}`" in rendered
+    assert f"`{reports_dir / 'campaign-summary.md'}`" not in rendered
+    assert f"`{canonical_raw}`" in measurement_line
+    assert "complete" in measurement_line
+    assert "file_missing" in measurement_line
+
+
+def test_runner_register_raw_telemetry_artifact_hash_failure_records_failed_row(
+    tmp_path,
+    monkeypatch,
+):
+    """Hash/read failures after finalize must still register a failed artifact row."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    artifact_path.write_text('{"_stream":"telemetry"}\n', encoding="utf-8")
+
+    original_open = Path.open
+
+    def _failing_open(self, *args, **kwargs):
+        if self == artifact_path:
+            raise OSError("forced raw telemetry read failure")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", _failing_open)
+
+    runner._register_raw_telemetry_artifact(db_path, "hash_fail_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("hash_fail_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["sha256"] is None
+    assert "forced raw telemetry read failure" in row["error_message"]
+
+
+def test_runner_register_raw_telemetry_artifact_missing_records_missing_row(
+    tmp_path,
+    monkeypatch,
+):
+    """Absent raw telemetry must remain a missing artifact, not a failed one."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+
+    runner._register_raw_telemetry_artifact(db_path, "missing_raw_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("missing_raw_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "missing"
+    assert row["sha256"] is None
+    assert row["error_message"] == "raw-telemetry.jsonl not found after finalize"
+
+
+def test_runner_register_raw_telemetry_artifact_complete_preserves_precomputed_sha(
+    tmp_path,
+    monkeypatch,
+):
+    """Successful finalize registration should stay complete and keep the computed SHA."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "raw-telemetry.jsonl"
+    payload = b'{"_stream":"telemetry"}\n'
+    artifact_path.write_bytes(payload)
+
+    runner._register_raw_telemetry_artifact(db_path, "complete_raw_C01", artifact_path)
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("complete_raw_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "complete"
+    assert row["sha256"] == hashlib.sha256(payload).hexdigest()
 
 
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):

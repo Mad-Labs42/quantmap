@@ -33,19 +33,11 @@ def test_artifacts_help_includes_campaign_id_argument():
 
 
 def test_artifacts_unknown_id_shows_campaign_id_in_output(tmp_path, monkeypatch):
-    db_path = tmp_path / "lab.sqlite"
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        """
-        CREATE TABLE campaigns (
-            id TEXT PRIMARY KEY,
-            status TEXT
-        )
-        """
-    )
-    conn.execute("CREATE TABLE artifacts (campaign_id TEXT, artifact_type TEXT, path TEXT)")
-    conn.commit()
-    conn.close()
+    from src.db import init_db
+
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
 
     monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path))
     output = _run_cli("--plain", "artifacts", "does_not_exist_999")
@@ -53,33 +45,21 @@ def test_artifacts_unknown_id_shows_campaign_id_in_output(tmp_path, monkeypatch)
 
 
 def test_artifacts_command_returns_success_for_known_campaign(tmp_path, monkeypatch):
+    from src.db import init_db
+
     reports_dir = tmp_path / "artifacts" / "reports" / "my-model" / "TestCampaign_01"
     reports_dir.mkdir(parents=True, exist_ok=True)
     (reports_dir / "campaign-summary.md").touch()
 
     db_path = tmp_path / "db" / "lab.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
     conn = sqlite3.connect(db_path)
     conn.execute(
         """
-        CREATE TABLE campaigns (
-            id TEXT PRIMARY KEY,
-            status TEXT
-        )
+        INSERT INTO campaigns (id, name, status, created_at)
+        VALUES ('TestCampaign_01', 'TestCampaign_01', 'complete', '2026-04-30T00:00:00Z')
         """
-    )
-    conn.execute(
-        """
-        CREATE TABLE artifacts (
-            campaign_id TEXT,
-            artifact_type TEXT,
-            path TEXT,
-            status TEXT
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO campaigns (id, status) VALUES ('TestCampaign_01', 'complete')"
     )
     conn.commit()
     conn.close()
