@@ -18,9 +18,9 @@ from rich.console import Console
 from src import ui
 from src.db import get_connection
 from src.artifact_paths import (
+    campaign_artifact_dirs,
     report_paths,
     infer_model_identity,
-    find_artifact_dir,
     ARTIFACT_METADATA,
     ARTIFACT_CAMPAIGN_SUMMARY,
     ARTIFACT_RUN_REPORTS,
@@ -645,9 +645,14 @@ def generate_metadata_json(
     report_arts = report_paths(effective_lab_root, model_identity, campaign_id, create=True)
     metadata_path = report_arts[ARTIFACT_METADATA]
     reports_dir = report_arts["dir"]
-
-    meas_dir = find_artifact_dir(effective_lab_root, "measurements", campaign_id)
-    env_dir = find_artifact_dir(effective_lab_root, "environment", campaign_id)
+    artifact_dirs = campaign_artifact_dirs(
+        effective_lab_root,
+        model_identity,
+        campaign_id,
+        create=False,
+    )
+    meas_dir = artifact_dirs["measurements_dir"]
+    env_dir = artifact_dirs["environment_dir"]
 
     # ── Analysis (re-run if not provided) ─────────────────────────────────────
     if scores_result is None:

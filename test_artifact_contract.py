@@ -33,6 +33,7 @@ from src.artifact_paths import (
     ARTIFACT_RAW_TELEMETRY,
     ARTIFACT_RUN_REPORTS,
     ARTIFACT_TYPES_DEPRECATED,
+    campaign_artifact_dirs,
     measurement_paths,
     report_paths,
 )
@@ -518,6 +519,149 @@ def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_pat
     assert telemetry["status"] == "not generated"
 
 
+def test_campaign_artifact_dirs_use_canonical_model_scoped_paths(tmp_path):
+    """Canonical dirs must be model-scoped, not campaign-only rediscovery."""
+    dirs = campaign_artifact_dirs(
+        tmp_path,
+        "Model X",
+        "Campaign_01",
+        create=False,
+    )
+    assert dirs["reports_dir"] == (
+        tmp_path / "artifacts" / "reports" / "model-x" / "Campaign_01"
+    )
+    assert dirs["measurements_dir"] == (
+        tmp_path / "artifacts" / "measurements" / "model-x" / "Campaign_01"
+    )
+    assert dirs["environment_dir"] == (
+        tmp_path / "artifacts" / "environment" / "model-x" / "Campaign_01"
+    )
+
+
+def test_report_artifact_index_projection_uses_canonical_model_paths(tmp_path, monkeypatch):
+    """Report artifact index must use current model canonical paths."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path))
+    from src.db import init_db
+    from src import report
+
+    campaign_id = "Campaign_Projection_01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    # Decoy legacy dirs for the same campaign_id under a different model slug.
+    (tmp_path / "artifacts" / "reports" / "legacy-model" / campaign_id).mkdir(parents=True)
+    (tmp_path / "artifacts" / "measurements" / "legacy-model" / campaign_id).mkdir(parents=True)
+
+    paths, rows = report._artifact_index_projection(
+        campaign_id,
+        db_path,
+        lab_root=tmp_path,
+        model_identity="Model-New",
+    )
+
+    assert paths[ARTIFACT_CAMPAIGN_SUMMARY] == (
+        tmp_path
+        / "artifacts"
+        / "reports"
+        / "model-new"
+        / campaign_id
+        / "campaign-summary.md"
+    )
+    assert paths[ARTIFACT_RAW_TELEMETRY] == (
+        tmp_path
+        / "artifacts"
+        / "measurements"
+        / "model-new"
+        / campaign_id
+        / "raw-telemetry.jsonl"
+    )
+    assert rows[ARTIFACT_RAW_TELEMETRY]["path"] == str(paths[ARTIFACT_RAW_TELEMETRY])
+    assert rows[ARTIFACT_RAW_TELEMETRY]["db_status"] is None
+
+
+def test_metadata_generation_uses_canonical_model_scoped_dirs(tmp_path, monkeypatch):
+    """metadata.json helpers must receive canonical model-scoped measurement/env dirs."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path))
+    from src import export
+    from src.db import init_db, get_connection
+
+    campaign_id = "Metadata_Canonical_01"
+    db_path = tmp_path / "db" / "lab.sqlite"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    init_db(db_path)
+
+    with get_connection(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO campaigns (id, name, status, created_at)
+            VALUES (?, ?, 'complete', '2026-04-30T00:00:00Z')
+            """,
+            (campaign_id, campaign_id),
+        )
+        conn.commit()
+
+    # Decoy legacy directories that campaign-only rediscovery could pick.
+    (tmp_path / "artifacts" / "measurements" / "legacy-model" / campaign_id).mkdir(parents=True)
+    (tmp_path / "artifacts" / "environment" / "legacy-model" / campaign_id).mkdir(parents=True)
+
+    observed: dict[str, Path] = {}
+
+    monkeypatch.setattr(
+        export,
+        "_load_campaign_snapshot",
+        lambda *_args, **_kwargs: (
+            {},
+            {"model": {"name": "Model-New", "path": "models/model-new.gguf"}},
+        ),
+    )
+    monkeypatch.setattr(export, "_build_ranking_output", lambda *_args, **_kwargs: ([], [], None, None))
+    monkeypatch.setattr(export, "_build_recommendation_projection", lambda *_args, **_kwargs: {"available": False, "source": "test"})
+    monkeypatch.setattr(export, "methodology_source_label", lambda *_args, **_kwargs: "snapshot_complete")
+    monkeypatch.setattr(
+        export,
+        "load_run_identity",
+        lambda *_args, **_kwargs: types.SimpleNamespace(
+            execution_environment={},
+            telemetry_provider={},
+            sources={
+                "baseline": "snapshot",
+                "campaign": "snapshot",
+                "quantmap": "snapshot",
+                "filter_policy": "snapshot",
+            },
+            methodology={},
+            filter_policy={},
+        ),
+    )
+
+    def _capture_inventory(_campaign_id, _db_path, _reports_dir, meas_dir):
+        observed["meas_dir"] = meas_dir
+        return []
+
+    def _capture_context(_campaign_id, _db_path, env_dir, _logger):
+        observed["env_dir"] = env_dir
+        return {}
+
+    monkeypatch.setattr(export, "_build_artifact_inventory", _capture_inventory)
+    monkeypatch.setattr(export, "_build_run_context_summary", _capture_context)
+
+    export.generate_metadata_json(
+        campaign_id,
+        db_path,
+        scores_result={},
+        stats={},
+        lab_root=tmp_path,
+    )
+
+    assert observed["meas_dir"] == (
+        tmp_path / "artifacts" / "measurements" / "model-new" / campaign_id
+    )
+    assert observed["env_dir"] == (
+        tmp_path / "artifacts" / "environment" / "model-new" / campaign_id
+    )
+
+
 def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
     """Explicitly missing artifacts must not trigger a file hash attempt."""
     from src import artifact_registry
@@ -757,6 +901,41 @@ def test_runner_register_raw_telemetry_artifact_complete_preserves_precomputed_s
     assert row is not None
     assert row["status"] == "complete"
     assert row["sha256"] == hashlib.sha256(payload).hexdigest()
+
+
+def test_runner_run_reports_failure_registration_is_not_marked_missing(tmp_path, monkeypatch):
+    """Render exceptions must register a failed producer status, not producer_missing."""
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "default-lab"))
+
+    from src import runner
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    report_path = tmp_path / "run-reports.md"
+
+    runner._register_run_reports_failure_artifact(
+        db_path,
+        "run_reports_fail_C01",
+        report_path,
+        RuntimeError("forced render failure"),
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, verification_source, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("run_reports_fail_C01", ARTIFACT_RUN_REPORTS),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["verification_source"] == "producer_status"
+    assert row["verification_source"] != "producer_missing"
+    assert "RuntimeError" in row["error_message"]
 
 
 def test_complete_campaign_no_resume_does_not_mutate_telemetry_stream(tmp_path, monkeypatch):

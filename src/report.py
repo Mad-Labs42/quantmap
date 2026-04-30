@@ -37,6 +37,7 @@ from src.campaign_definition import _config_to_server_args
 from src.run_plan import RunPlan
 from src.settings_env import optional_env_path, read_env_path
 from src.artifact_paths import (
+    campaign_artifact_dirs,
     ARTIFACT_CAMPAIGN_SUMMARY,
     ARTIFACT_METADATA,
     ARTIFACT_RAW_TELEMETRY,
@@ -45,7 +46,6 @@ from src.artifact_paths import (
     FILENAME_METADATA,
     FILENAME_RAW_TELEMETRY,
     FILENAME_RUN_REPORTS,
-    find_artifact_dir,
     infer_model_identity,
     report_paths,
 )
@@ -152,6 +152,64 @@ logger = logging.getLogger(__name__)
 # work unchanged. Fallback defaults to this repository root to avoid
 # cross-workspace writes when QUANTMAP_LAB_ROOT is unset.
 LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
+
+
+def _artifact_index_projection(
+    campaign_id: str,
+    db_path: Path,
+    *,
+    lab_root: Path,
+    model_identity: str,
+) -> tuple[dict[str, Path], dict[str, dict[str, Any]]]:
+    """Build canonical artifact index paths plus DB-aware status rows."""
+    dirs = campaign_artifact_dirs(
+        lab_root,
+        model_identity,
+        campaign_id,
+        create=False,
+    )
+    report_dir = dirs["reports_dir"]
+    measurements_dir = dirs["measurements_dir"]
+
+    paths = {
+        ARTIFACT_CAMPAIGN_SUMMARY: report_dir / FILENAME_CAMPAIGN_SUMMARY,
+        ARTIFACT_RUN_REPORTS: report_dir / FILENAME_RUN_REPORTS,
+        ARTIFACT_RAW_TELEMETRY: measurements_dir / FILENAME_RAW_TELEMETRY,
+        ARTIFACT_METADATA: report_dir / FILENAME_METADATA,
+    }
+    inventory = build_artifact_inventory(
+        campaign_id,
+        db_path,
+        [
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
+                filename=FILENAME_CAMPAIGN_SUMMARY,
+                role="user-facing summary",
+                candidate_path=paths[ARTIFACT_CAMPAIGN_SUMMARY],
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_RUN_REPORTS,
+                filename=FILENAME_RUN_REPORTS,
+                role="informational detail report",
+                candidate_path=paths[ARTIFACT_RUN_REPORTS],
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_RAW_TELEMETRY,
+                filename=FILENAME_RAW_TELEMETRY,
+                role="raw machine measurement stream",
+                candidate_path=paths[ARTIFACT_RAW_TELEMETRY],
+            ),
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_METADATA,
+                filename=FILENAME_METADATA,
+                role="structured provenance and scoring record",
+                candidate_path=paths[ARTIFACT_METADATA],
+            ),
+        ],
+        missing_status="pending",
+    )
+    rows = {entry["artifact_type"]: entry for entry in inventory}
+    return paths, rows
 
 
 # ---------------------------------------------------------------------------
@@ -1591,56 +1649,17 @@ def _build_markdown(
     # Compact index of the four formal campaign artifacts.
     # Full evidence and methodology details are in run-reports.md.
     # Missing artifacts are stated explicitly — never silently omitted.
-    report_dir = find_artifact_dir(
-        effective_lab_root,
-        "reports",
-        campaign_id,
-    ) or (effective_lab_root / "results" / campaign_id)
-    measurements_dir = find_artifact_dir(
-        effective_lab_root,
-        "measurements",
-        campaign_id,
-    ) or report_dir
-
-    _raw_telemetry_jsonl = measurements_dir / FILENAME_RAW_TELEMETRY
-    _run_reports_md      = report_dir / FILENAME_RUN_REPORTS
-    _metadata_json       = report_dir / FILENAME_METADATA
-
-    _artifact_inventory = build_artifact_inventory(
+    _artifact_model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    _artifact_model_identity = infer_model_identity(
+        model_name=_artifact_model_cfg.get("name"),
+        model_path=_artifact_model_cfg.get("path"),
+    )
+    _artifact_paths, _artifact_rows = _artifact_index_projection(
         campaign_id,
         db_path,
-        [
-            ArtifactInventorySpec(
-                artifact_type=ARTIFACT_CAMPAIGN_SUMMARY,
-                filename=FILENAME_CAMPAIGN_SUMMARY,
-                role="user-facing summary",
-                candidate_path=report_dir / FILENAME_CAMPAIGN_SUMMARY,
-            ),
-            ArtifactInventorySpec(
-                artifact_type=ARTIFACT_RUN_REPORTS,
-                filename=FILENAME_RUN_REPORTS,
-                role="informational detail report",
-                candidate_path=_run_reports_md,
-            ),
-            ArtifactInventorySpec(
-                artifact_type=ARTIFACT_RAW_TELEMETRY,
-                filename=FILENAME_RAW_TELEMETRY,
-                role="raw machine measurement stream",
-                candidate_path=_raw_telemetry_jsonl,
-            ),
-            ArtifactInventorySpec(
-                artifact_type=ARTIFACT_METADATA,
-                filename=FILENAME_METADATA,
-                role="structured provenance and scoring record",
-                candidate_path=_metadata_json,
-            ),
-        ],
-        missing_status="pending",
+        lab_root=effective_lab_root,
+        model_identity=_artifact_model_identity,
     )
-    _artifact_rows = {
-        entry["artifact_type"]: entry
-        for entry in _artifact_inventory
-    }
 
     def _artifact_status(artifact_type: str) -> str:
         """Return a display label for an artifact status string."""
@@ -1666,18 +1685,18 @@ def _build_markdown(
     sections.append("| Artifact | Path | Status |")
     sections.append("|----------|------|:------:|")
     sections.append(
-        f"| Campaign Summary (this file) | `{report_dir / FILENAME_CAMPAIGN_SUMMARY}` | "
+        f"| Campaign Summary (this file) | `{_artifact_paths[ARTIFACT_CAMPAIGN_SUMMARY]}` | "
         f"{_artifact_status(ARTIFACT_CAMPAIGN_SUMMARY)} |"
     )
     sections.append(
-        f"| Detailed Report | `{_run_reports_md}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} |"
+        f"| Detailed Report | `{_artifact_paths[ARTIFACT_RUN_REPORTS]}` | {_artifact_status(ARTIFACT_RUN_REPORTS)} |"
     )
     sections.append(
-        f"| Measurement Stream | `{_raw_telemetry_jsonl}` | "
+        f"| Measurement Stream | `{_artifact_paths[ARTIFACT_RAW_TELEMETRY]}` | "
         f"{_artifact_status(ARTIFACT_RAW_TELEMETRY)} |"
     )
     sections.append(
-        f"| Provenance + Scores | `{_metadata_json}` | {_artifact_status(ARTIFACT_METADATA)} |"
+        f"| Provenance + Scores | `{_artifact_paths[ARTIFACT_METADATA]}` | {_artifact_status(ARTIFACT_METADATA)} |"
     )
     sections.append(
         f"| Full database | `{db_path}` | {'file_present' if db_path.exists() else 'not found'} |"

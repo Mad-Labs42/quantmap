@@ -180,6 +180,28 @@ def _register_raw_telemetry_artifact(
     return row
 
 
+def _register_run_reports_failure_artifact(
+    db_path: Path,
+    campaign_id: str,
+    report_path: Path,
+    render_exc: BaseException,
+) -> None:
+    """Record a run-reports render failure without claiming the file was missing."""
+    error_message = (
+        f"run-reports render exception ({type(render_exc).__name__}): {render_exc}"
+    )
+    register_artifact(
+        db_path,
+        campaign_id=campaign_id,
+        artifact_type=ARTIFACT_RUN_REPORTS,
+        path=report_path,
+        producer="src.report_campaign.generate_campaign_report",
+        created_at=datetime.now(timezone.utc).isoformat(),
+        status="failed",
+        error_message=error_message,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-baseline lab root derivation
 # ---------------------------------------------------------------------------
@@ -2560,16 +2582,11 @@ def run_campaign(
                     ARTIFACT_RUN_REPORTS,
                     _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS,
                 )
-                register_artifact(
+                _register_run_reports_failure_artifact(
                     _eff_db_path,
-                    campaign_id=effective_campaign_id,
-                    artifact_type=ARTIFACT_RUN_REPORTS,
-                    path=_v2_path,
-                    producer="src.report_campaign.generate_campaign_report",
-                    created_at=datetime.now(timezone.utc).isoformat(),
-                    status="failed",
-                    error_message=str(_v2_exc),
-                    verification_source="producer_missing",
+                    effective_campaign_id,
+                    _v2_path,
+                    _v2_exc,
                 )
             except Exception as _art_exc:
                 logger.warning("Could not record run-reports.md failure artifact: %s", _art_exc)

@@ -205,6 +205,35 @@ def measurement_paths(
     }
 
 
+def campaign_artifact_dirs(
+    lab_root: Path,
+    model_identity: str,
+    campaign_id: str,
+    *,
+    create: bool = False,
+) -> dict[str, Path]:
+    """Return canonical report/measurement/environment directories for one campaign."""
+    report_dir = report_paths(lab_root, model_identity, campaign_id, create=create)["dir"]
+    measurements_dir = measurement_paths(
+        lab_root,
+        model_identity,
+        campaign_id,
+        create=create,
+    )["dir"]
+    environment_dir = artifact_dir(
+        lab_root,
+        "environment",
+        model_identity,
+        campaign_id,
+        create=create,
+    )
+    return {
+        "reports_dir": report_dir,
+        "measurements_dir": measurements_dir,
+        "environment_dir": environment_dir,
+    }
+
+
 def compare_default_report_path(lab_root: Path, campaign_a: str, campaign_b: str) -> Path:
     """Return canonical default compare report path under the reports family."""
     pair = f"{campaign_a}_vs_{campaign_b}"
