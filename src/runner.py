@@ -1029,22 +1029,30 @@ def _run_cycle(
     results: list[dict] = []
     thermal_event = False
 
-    from src.server import start_server  # noqa: PLC0415 — lazy: avoids EnvironmentError on --list/--validate
+    from src.backends import (  # noqa: PLC0415 — lazy: avoids EnvironmentError on --list/--validate
+        BackendFailureReason,
+        BackendStartupError,
+        BackendKind,
+        BackendLaunchRequest,
+        start_backend_session,
+    )
 
     try:
-        with start_server(
-            extra_args=server_args,
+        request = BackendLaunchRequest(
+            backend_kind=BackendKind.LLAMACPP,
             campaign_id=campaign_id,
             config_id=config_id,
-            cycle=cycle_number,
+            cycle_number=cycle_number,
+            extra_args=server_args,
             ready_timeout_s=ready_timeout,
             bind_timeout_s=bind_timeout,
             logs_dir=logs_dir,
-        ) as srv:
-            base_url = srv["base_url"]
-            server_pid = srv["pid"]
-            server_log = srv["log_file"]
-            resolved_cmd = srv["resolved_cmd_str"]
+        )
+        with start_backend_session(request) as session:
+            base_url = session.base_url
+            server_pid = session.pid
+            server_log = session.log_file
+            resolved_cmd = session.resolved_cmd_str
 
             # Apply CPU affinity if specified (L4: check return value)
             if cpu_affinity_mask:
@@ -1069,9 +1077,9 @@ def _run_cycle(
                         server_pid,
                         str(server_log),
                         datetime.now(timezone.utc).isoformat(),
-                        int(srv["no_warmup"]),
-                        srv["attempt_count"],
-                        srv["startup_duration_s"],
+                        int(session.no_warmup),
+                        session.attempt_count,
+                        session.startup_duration_s,
                         cycle_id,
                     ),
                 )
@@ -1082,7 +1090,7 @@ def _run_cycle(
             logger.info(
                 "Cycle %d/%s started — server pid=%d port=%s no_warmup=%s",
                 cycle_number, config_id, server_pid,
-                srv["port"], srv["no_warmup"],
+                session.port, session.no_warmup,
             )
 
             # --- Execute requests -------------------------------------------
@@ -1126,7 +1134,7 @@ def _run_cycle(
                 result_dict = result.to_dict()
                 result_dict["server_pid"] = server_pid
                 result_dict["resolved_command"] = resolved_cmd
-                result_dict["resolved_cmd_argv"] = srv["resolved_cmd_argv"]
+                result_dict["resolved_cmd_argv"] = session.resolved_cmd_argv
 
                 # Write to raw-telemetry.jsonl (canonical merged stream)
                 if raw_telemetry_jsonl_path:
@@ -1157,8 +1165,43 @@ def _run_cycle(
                     time.sleep(inter_request_delay)
 
     except Exception as exc:
+        from src.settings_env import SettingsEnvError  # noqa: PLC0415
         from src.server import ServerOOMError
-        
+
+        if isinstance(exc, SettingsEnvError):
+            # Configuration/env contract failure must remain a clear setup failure.
+            raise
+
+        if isinstance(exc, BackendStartupError):
+            startup_failure = exc.failure
+            if startup_failure.reason is BackendFailureReason.GPU_OOM:
+                logger.error(
+                    "Cycle %d/%s backend startup OOM: %s",
+                    cycle_number,
+                    config_id,
+                    startup_failure.message,
+                )
+                _mark_cycle_invalid(conn, cycle_id, "crash: OOM")
+                raise ServerOOMError(
+                    log_snippet=startup_failure.message,
+                    log_path=startup_failure.log_path or Path(),
+                    exit_code=startup_failure.exit_code,
+                ) from exc
+
+            logger.error(
+                "Cycle %d/%s backend startup failed (%s): %s",
+                cycle_number,
+                config_id,
+                startup_failure.reason.value,
+                startup_failure.message,
+            )
+            _mark_cycle_invalid(
+                conn,
+                cycle_id,
+                f"startup_failure: {startup_failure.reason.value}",
+            )
+            return False, []
+
         # Determine if this was an OOM
         is_oom = isinstance(exc, ServerOOMError)
         log_snippet = str(exc)
