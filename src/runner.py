@@ -1614,6 +1614,10 @@ def run_campaign(
 
     _run_start_time = time.monotonic()
 
+    # Initialize failure tracking variables - will be set if measurement phase fails
+    failure_cause = None
+    failure_remediation = None
+
     _setup_logging(effective_campaign_id, logs_dir=_eff_logs_dir)
     logger.info("=" * 70)
     logger.info(
@@ -1836,7 +1840,9 @@ def run_campaign(
                 "then run 'quantmap doctor'."
             )
             logger.error(msg)
-            sys.exit(1)
+            failure_cause = "Dry run blocked: methodology load failure"
+            failure_remediation = str(exc)
+            # Continue to post-run review instead of exiting immediately
 
         _mode_label = run_plan.mode_label
         _mode_desc  = run_plan.mode_description
@@ -1932,7 +1938,9 @@ def run_campaign(
     except tele.TelemetryStartupError as exc:
         console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
         logger.critical("Campaign aborted: %s", exc)
-        sys.exit(1)
+        failure_cause = "Telemetry startup check failed"
+        failure_remediation = str(exc)
+        # Continue to post-run review instead of exiting immediately
 
     # -------------------------------------------------------------------------
     # Defender pre-flight (warning only — never aborts)
@@ -2185,11 +2193,9 @@ def run_campaign(
             )
             conn.commit()
             logger.critical("Campaign aborted by backend execution policy: %s", exc)
-            console.print(
-                "[bold red]CAMPAIGN ABORTED — Backend execution policy blocked measurement startup:[/bold red]\n"
-                f"{exc}"
-            )
-            sys.exit(1)
+            failure_cause = "Backend execution policy blocked measurement startup"
+            failure_remediation = str(exc)
+            # Continue to post-run review instead of exiting immediately
 
         # Log campaign structure so the log file alone is sufficient to reconstruct
         # what was tested. If the YAML is later modified, the log proves what ran.
@@ -2394,15 +2400,9 @@ def run_campaign(
             campaign_exit_detail = str(exc)
             logger.critical("Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True)
             console.print(f"[bold red]Fatal error: {exc}[/bold red]")
-            try:
-                conn.execute(
-                    "UPDATE campaigns SET status='failed', failed_at=?, failure_reason=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), str(exc), effective_campaign_id),
-                )
-                conn.commit()
-            except Exception as db_exc:
-                logger.error("Failed to update campaign failure status: %s", db_exc)
-            raise
+            failure_cause = "Measurement phase failure"
+            failure_remediation = str(exc)
+            # Continue to post-run review instead of raising immediately
 
     finally:
         tele.shutdown()
@@ -2452,8 +2452,6 @@ def run_campaign(
     # runner MUST exit non-zero so automation (CI pipelines, batch scripts) can
     # detect the failure. Exiting 0 when the report failed to generate is data
     # falsification from the caller's perspective. (L5 fix)
-    failure_cause = None
-    failure_remediation = None
     report_ok = False
     v2_ok = False
     meta_ok = False
