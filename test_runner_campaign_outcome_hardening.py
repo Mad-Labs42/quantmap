@@ -168,6 +168,75 @@ def test_exit_code_helper_maps_success_style_only() -> None:
     assert runner._exit_code_for_campaign_outcome(bad) == 1
 
 
+def test_fetch_campaign_evidence_summary_counts_only_complete_success_requests(
+    tmp_path: Path,
+) -> None:
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO campaigns (id, name, created_at) VALUES ('camp', 'camp', '2026-04-25T12:00:00Z')"
+        )
+        conn.executemany(
+            """
+            INSERT INTO configs
+                (id, campaign_id, variable_name, variable_value, config_values_json, status)
+            VALUES (?, 'camp', 'n_gpu_layers', ?, '{}', ?)
+            """,
+            [
+                ("complete_cfg", "10", "complete"),
+                ("oom_cfg", "20", "oom"),
+                ("skipped_cfg", "30", "skipped_oom"),
+                ("degraded_cfg", "40", "degraded"),
+            ],
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
+            VALUES ('complete_cfg', 'camp', 1, 'complete')
+            """
+        )
+        complete_cycle_id = cur.lastrowid
+        cur = conn.execute(
+            """
+            INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
+            VALUES ('degraded_cfg', 'camp', 1, 'invalid')
+            """
+        )
+        invalid_cycle_id = cur.lastrowid
+        conn.executemany(
+            """
+            INSERT INTO requests
+                (cycle_id, campaign_id, config_id, cycle_number, request_index,
+                 is_cold, request_type, outcome, cycle_status)
+            VALUES (?, 'camp', ?, 1, ?, 0, 'speed_short', ?, ?)
+            """,
+            [
+                (complete_cycle_id, "complete_cfg", 1, "success", "complete"),
+                (invalid_cycle_id, "degraded_cfg", 1, "success", "invalid"),
+                (complete_cycle_id, "complete_cfg", 2, "timeout", "complete"),
+            ],
+        )
+        conn.commit()
+
+        summary = runner._fetch_campaign_evidence_summary(conn, "camp")
+
+    assert summary == CampaignEvidenceSummary(
+        configs_total=4,
+        configs_completed=1,
+        configs_oom=1,
+        configs_skipped_oom=1,
+        configs_degraded=1,
+        cycles_attempted=2,
+        cycles_complete=1,
+        cycles_invalid=1,
+        has_any_success_request=True,
+    )
+
+
 def test_runner_exit_nonzero_when_report_ok_but_no_measurement_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

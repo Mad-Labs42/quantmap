@@ -114,6 +114,50 @@ def test_abort_maps_to_aborted():
     assert out.abort == AbortReason.USER_INTERRUPT
 
 
+@pytest.mark.parametrize(
+    ("flag_name", "abort_reason"),
+    [
+        ("telemetry_aborted_before_db", AbortReason.TELEMETRY_STARTUP),
+        ("backend_policy_blocked", AbortReason.BACKEND_EXECUTION_POLICY),
+    ],
+)
+def test_pre_measurement_startup_blocks_are_abort_outcomes(
+    flag_name: str, abort_reason: AbortReason
+) -> None:
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        evidence=_base_evidence(has_any_success_request=True),
+        **{flag_name: True},
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
+    assert out.abort == abort_reason
+    assert out.failure_domain == FailureDomain.CONTRACT_CONFIG_ENV
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+def test_fatal_measurement_exception_is_failed_measurement_outcome() -> None:
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        fatal_exception_during_measurement=True,
+        fatal_exception_message="server vanished",
+        report_ok=True,
+        evidence=_base_evidence(has_any_success_request=True),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.post_run == PostRunVerdict.NOT_REACHED
+    assert out.failure_domain == FailureDomain.UNKNOWN
+    assert out.failure_detail == "server vanished"
+    assert not out.allows_success_style_review
+
+
 def test_backend_startup_distinct_from_measurement_body():
     ev_startup = _base_evidence(
         has_any_success_request=False,
