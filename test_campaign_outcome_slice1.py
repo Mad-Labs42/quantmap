@@ -222,6 +222,36 @@ def test_artifact_report_failure_is_not_measurement_failure():
     assert out.failure_domain == FailureDomain.ARTIFACT_PROJECTION
 
 
+@pytest.mark.parametrize(
+    ("report_status", "expected_post_run"),
+    (
+        ("failed", PostRunVerdict.REPORT_FAILED),
+        ("skipped", PostRunVerdict.ANALYSIS_SKIPPED),
+    ),
+)
+def test_explicit_report_status_blocks_success_when_report_ok_is_stale(
+    report_status: str,
+    expected_post_run: PostRunVerdict,
+):
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        report_status=report_status,
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+    assert out.post_run == expected_post_run
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert out.failure_domain == FailureDomain.POST_RUN_PIPELINE
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
 def test_recommendation_authority_requires_more_than_report_ok_alone():
     inp = CampaignOutcomeInputs(
         campaign_id="c",

@@ -90,7 +90,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         and inputs.scoring_completed
         and inputs.passing_count > 0
         and inputs.winner_config_id is not None
-        and inputs.report_ok is True
+        and post_run == PostRunVerdict.REPORT_SUCCEEDED
         and not inputs.user_interrupted
         and not inputs.telemetry_aborted_before_db
         and not inputs.backend_policy_blocked
@@ -191,9 +191,14 @@ def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
             return PostRunVerdict.ANALYSIS_SKIPPED
         return PostRunVerdict.NOT_REACHED
 
+    if inputs.report_status == "failed":
+        return PostRunVerdict.REPORT_FAILED
+    if inputs.report_status == "skipped":
+        return PostRunVerdict.ANALYSIS_SKIPPED
+    if inputs.report_status == "partial":
+        return PostRunVerdict.REPORT_PARTIAL
+
     if inputs.report_ok:
-        if inputs.report_status == "partial":
-            return PostRunVerdict.REPORT_PARTIAL
         return PostRunVerdict.REPORT_SUCCEEDED
 
     return PostRunVerdict.REPORT_FAILED
@@ -264,7 +269,10 @@ def _synthesize_outcome(
             "No passing rankable configuration produced a winner.",
         )
 
-    if not inputs.report_ok:
+    if not inputs.report_ok or post_run in (
+        PostRunVerdict.REPORT_FAILED,
+        PostRunVerdict.ANALYSIS_SKIPPED,
+    ):
         return (
             CampaignOutcomeKind.PARTIAL,
             FailureDomain.POST_RUN_PIPELINE,
