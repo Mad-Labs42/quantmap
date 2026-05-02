@@ -229,6 +229,8 @@ def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
         return PostRunVerdict.REPORT_SKIPPED
     if report_s == "partial":
         return PostRunVerdict.REPORT_PARTIAL
+    if report_s == "complete":
+        return PostRunVerdict.REPORT_SUCCEEDED
 
     if inputs.report_ok:
         return PostRunVerdict.REPORT_SUCCEEDED

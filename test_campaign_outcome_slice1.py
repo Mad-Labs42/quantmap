@@ -326,6 +326,23 @@ def test_report_status_partial_not_success_style():
     assert not out.allows_success_style_review
 
 
+def test_report_status_complete_overrides_stale_report_ok_false():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=False,
+        report_status="complete",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.post_run == PostRunVerdict.REPORT_SUCCEEDED
+    assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert out.allows_success_style_review
+
+
 def test_distinct_failure_detail_analysis_branches():
     base_ev = _base_evidence()
     failed = evaluate_campaign_outcome(
