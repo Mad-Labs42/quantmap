@@ -8,6 +8,7 @@ UI; callers supply aggregated evidence and status fields from the runner.
 from __future__ import annotations
 
 import dataclasses
+from dataclasses import dataclass
 
 from src.campaign_outcome.contracts import (
     AbortReason,
@@ -21,7 +22,15 @@ from src.campaign_outcome.contracts import (
     PostRunVerdict,
 )
 
-_OutcomeSynth = tuple[CampaignOutcomeKind, FailureDomain | None, str | None]
+
+@dataclass(frozen=True, slots=True)
+class _OutcomeSynth:
+    """Private synthesis result: kind, diagnostic fields, and optional abort reason."""
+
+    kind: CampaignOutcomeKind
+    failure_domain: FailureDomain | None
+    failure_detail: str | None
+    abort: AbortReason | None = None
 
 
 def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
@@ -87,16 +96,18 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
     measurement, measurement_failure_domain = _measurement_domain(inputs)
     post_run = _post_run_verdict(inputs)
 
-    outcome_kind, failure_domain, failure_detail = _synthesize_outcome(
+    synth = _synthesize_outcome(
         inputs, measurement, measurement_failure_domain, post_run
     )
 
-    allows_success = outcome_kind == CampaignOutcomeKind.SUCCESS
+    allows_success = synth.kind == CampaignOutcomeKind.SUCCESS
 
-    # Handoff-grade authority (Slice 1): requires full measurement success (not
-    # PARTIAL), normalized post-run success, rankable winner, and negative gates.
+    # Handoff-grade authority (Slice 1): requires terminal SUCCESS outcome kind,
+    # full measurement success (not PARTIAL), normalized post-run success,
+    # rankable winner, and negative gates.
     allows_rec = (
-        _measurement_supports_authority(measurement)
+        allows_success
+        and _measurement_supports_authority(measurement)
         and ev.has_any_success_request
         and _scoring_supports_authority(inputs, post_run)
         and not inputs.user_interrupted
@@ -112,13 +123,13 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
     )
 
     return CampaignOutcome(
-        outcome_kind=outcome_kind,
+        outcome_kind=synth.kind,
         lifecycle_phase_at_decision=phase,
         measurement=measurement,
         post_run=post_run,
-        failure_domain=failure_domain,
-        failure_detail=failure_detail,
-        abort=None,
+        failure_domain=synth.failure_domain,
+        failure_detail=synth.failure_detail,
+        abort=synth.abort,
         allows_success_style_review=allows_success,
         allows_recommendation_authority=allows_rec,
         report_ok=inputs.report_ok,
@@ -212,8 +223,8 @@ def _scoring_supports_authority(
 
 
 def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
-    analysis_s = (inputs.analysis_status or "").lower()
-    report_s = (inputs.report_status or "").lower()
+    analysis_s = (inputs.analysis_status or "").strip().lower()
+    report_s = (inputs.report_status or "").strip().lower()
 
     if not inputs.scoring_completed:
         if analysis_s == "failed":
@@ -229,6 +240,8 @@ def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
         return PostRunVerdict.REPORT_SKIPPED
     if report_s == "partial":
         return PostRunVerdict.REPORT_PARTIAL
+    if report_s == "complete":
+        return PostRunVerdict.REPORT_SUCCEEDED
 
     if inputs.report_ok:
         return PostRunVerdict.REPORT_SUCCEEDED
@@ -248,8 +261,10 @@ def _outcome_gate_lifecycle_complete_no_success(
     _lifecycle_domain = measurement_failure_domain or FailureDomain.MEASUREMENT_BODY
     _msg = "Campaign lifecycle completed without successful measurement requests."
     if ev.configs_degraded > 0 and ev.configs_completed > 0:
-        return CampaignOutcomeKind.DEGRADED, _lifecycle_domain, _msg
-    return CampaignOutcomeKind.INSUFFICIENT_EVIDENCE, _lifecycle_domain, _msg
+        return _OutcomeSynth(CampaignOutcomeKind.DEGRADED, _lifecycle_domain, _msg)
+    return _OutcomeSynth(
+        CampaignOutcomeKind.INSUFFICIENT_EVIDENCE, _lifecycle_domain, _msg
+    )
 
 
 def _outcome_gate_no_measurement_evidence(
@@ -261,7 +276,7 @@ def _outcome_gate_no_measurement_evidence(
         MeasurementPhaseVerdict.NOT_STARTED,
     ):
         return None
-    return (
+    return _OutcomeSynth(
         CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
         measurement_failure_domain,
         "No measurement evidence to score.",
@@ -280,7 +295,7 @@ def _outcome_gate_measurement_failed(
         if inputs.last_backend_failure_reason
         else "Measurement did not produce successful requests."
     )
-    return CampaignOutcomeKind.FAILED, measurement_failure_domain, detail
+    return _OutcomeSynth(CampaignOutcomeKind.FAILED, measurement_failure_domain, detail)
 
 
 def _outcome_gate_scoring_not_completed(
@@ -289,18 +304,18 @@ def _outcome_gate_scoring_not_completed(
     if inputs.scoring_completed:
         return None
     if post_run == PostRunVerdict.ANALYSIS_FAILED:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.FAILED,
             FailureDomain.POST_RUN_PIPELINE,
             "Post-campaign analysis failed.",
         )
     if post_run == PostRunVerdict.ANALYSIS_SKIPPED:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.FAILED,
             FailureDomain.POST_RUN_PIPELINE,
             "Post-campaign analysis was skipped.",
         )
-    return (
+    return _OutcomeSynth(
         CampaignOutcomeKind.FAILED,
         FailureDomain.POST_RUN_PIPELINE,
         "Post-campaign analysis and scoring did not complete.",
@@ -313,12 +328,12 @@ def _outcome_gate_no_rankable_winner(
     if inputs.passing_count > 0 and inputs.winner_config_id is not None:
         return None
     if ev.configs_degraded > 0:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.DEGRADED,
             FailureDomain.MEASUREMENT_BODY,
             "No rankable winner; instrumentation or evidence quality is degraded.",
         )
-    return (
+    return _OutcomeSynth(
         CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
         FailureDomain.MEASUREMENT_BODY,
         "No passing rankable configuration produced a winner.",
@@ -329,19 +344,19 @@ def _outcome_gate_post_run_report(
     post_run: PostRunVerdict,
 ) -> _OutcomeSynth | None:
     if post_run == PostRunVerdict.REPORT_FAILED:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.PARTIAL,
             FailureDomain.POST_RUN_PIPELINE,
             "Primary report generation failed; measurement data remains valid.",
         )
     if post_run == PostRunVerdict.REPORT_SKIPPED:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.PARTIAL,
             FailureDomain.POST_RUN_PIPELINE,
             "Primary report generation was skipped; measurement data remains valid.",
         )
     if post_run == PostRunVerdict.REPORT_PARTIAL:
-        return (
+        return _OutcomeSynth(
             CampaignOutcomeKind.PARTIAL,
             FailureDomain.ARTIFACT_PROJECTION,
             "Report bundle partially generated (secondary artifacts).",
@@ -354,7 +369,7 @@ def _outcome_gate_partial_measurement(
 ) -> _OutcomeSynth | None:
     if measurement != MeasurementPhaseVerdict.PARTIAL:
         return None
-    return (
+    return _OutcomeSynth(
         CampaignOutcomeKind.PARTIAL,
         FailureDomain.MEASUREMENT_BODY,
         "Partial measurement evidence (some invalid cycles).",
@@ -395,4 +410,4 @@ def _synthesize_outcome(
     if r is not None:
         return r
 
-    return CampaignOutcomeKind.SUCCESS, None, None
+    return _OutcomeSynth(CampaignOutcomeKind.SUCCESS, None, None)

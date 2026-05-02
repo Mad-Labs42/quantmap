@@ -1174,6 +1174,134 @@ def _fetch_campaign_evidence_summary(
     )
 
 
+def _finalize_interrupt_post_run_review(
+    *,
+    campaign_id: str,
+    effective_campaign_id: str,
+    measurement_evidence: CampaignEvidenceSummary,
+    measurement_hints: dict[str, Any],
+    db_path: Path,
+    lab_root: Path,
+    model_identity: str,
+    yolo_mode: bool,
+    run_plan: RunPlan,
+    run_start_time: float,
+) -> None:
+    """Evaluate + project + render for KeyboardInterrupt; ends with ``sys.exit(130)``.
+
+    Caller must not run analysis/report/export — this path skips those stages.
+    """
+    failure_cause = None
+    failure_remediation = None
+    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
+    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
+    with get_connection(db_path) as _camp_conn:
+        _camp_row = _camp_conn.execute(
+            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
+            (effective_campaign_id,),
+        ).fetchone()
+    _camp_status = (
+        str(_camp_row["status"])
+        if _camp_row and _camp_row["status"] is not None
+        else None
+    )
+    _camp_analysis = (
+        str(_camp_row["analysis_status"])
+        if _camp_row and _camp_row["analysis_status"] is not None
+        else None
+    )
+    _camp_report = (
+        str(_camp_row["report_status"])
+        if _camp_row and _camp_row["report_status"] is not None
+        else None
+    )
+    _camp_failure_reason = (
+        str(_camp_row["failure_reason"])
+        if _camp_row and _camp_row["failure_reason"] is not None
+        else None
+    )
+    _evidence_for_outcome = dataclasses.replace(
+        measurement_evidence,
+        campaign_db_status=_camp_status,
+        analysis_status=_camp_analysis,
+        report_status=_camp_report,
+        rankable_config_count=None,
+        winner_present=False,
+    )
+    _outcome_inputs = CampaignOutcomeInputs(
+        campaign_id=campaign_id,
+        effective_campaign_id=effective_campaign_id,
+        campaign_db_status=_camp_status,
+        analysis_status=_camp_analysis,
+        report_status=_camp_report,
+        failure_reason=_camp_failure_reason,
+        user_interrupted=True,
+        evidence=_evidence_for_outcome,
+        scoring_completed=False,
+        passing_count=0,
+        eliminated_count=0,
+        unrankable_count=0,
+        winner_config_id=None,
+        unrankable_reason=None,
+        report_ok=False,
+        run_reports_ok=None,
+        metadata_ok=None,
+        last_backend_failure_reason=_last_br_val,
+    )
+    _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
+    _review_read_model = project_final_review(
+        _campaign_outcome,
+        metrics=FinalReviewMetricsSnapshot(
+            elapsed_seconds=time.monotonic() - run_start_time,
+            run_mode=run_plan.run_mode,
+        ),
+        runner_failure_cause=failure_cause,
+        runner_failure_remediation=failure_remediation,
+    )
+    _diagnostics_path: str | None = None
+    try:
+        _eff_diagnostics_folder = artifact_dir(
+            lab_root,
+            "logs",
+            model_identity,
+            effective_campaign_id,
+            create=False,
+        )
+        _diagnostics_path = str(_eff_diagnostics_folder)
+    except Exception as _diag_exc:
+        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
+
+    _artifact_list: list[dict] | None = None
+    try:
+        _artifact_list = get_campaign_artifact_paths(
+            lab_root, effective_campaign_id, db_path=db_path
+        )
+        if _artifact_list is not None:
+            _art_ok_map = {
+                ARTIFACT_CAMPAIGN_SUMMARY: False,
+                ARTIFACT_RUN_REPORTS: False,
+                ARTIFACT_METADATA: False,
+            }
+            for _art in _artifact_list:
+                _mapped_ok = _art_ok_map.get(_art["artifact_type"])
+                if _mapped_ok is False:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
+    except Exception as _art_list_exc:
+        logger.warning(
+            "Could not retrieve artifact paths for review screen: %s", _art_list_exc
+        )
+
+    ui.render_post_run_review_from_read_model(
+        campaign_id=effective_campaign_id,
+        read_model=_review_read_model,
+        artifacts=_artifact_list,
+        diagnostics_path=_diagnostics_path,
+        yolo_mode=yolo_mode,
+    )
+    sys.exit(130)
+
+
 # ---------------------------------------------------------------------------
 # Single cycle execution
 # ---------------------------------------------------------------------------
@@ -2268,6 +2396,8 @@ def run_campaign(
     # active measurement phase. Sub-functions (_run_config, _run_cycle) reuse this connection.
     conn = get_connection(_eff_db_path)
     try:
+        _user_interrupted = False
+        measurement_hints: dict[str, Any] = {}
         # -------------------------------------------------------------------------
         # Register or resume campaign in DB (Phase 2 Scoped)
         # -------------------------------------------------------------------------
@@ -2596,7 +2726,6 @@ def run_campaign(
         first_config = True
         campaign_exit_state = "COMPLETED"
         campaign_exit_detail = "Normal execution complete."
-        measurement_hints: dict[str, Any] = {}
         try:
             for i, config in enumerate(configs):
                 config_id = config["config_id"]
@@ -2735,7 +2864,7 @@ def run_campaign(
             console.print(
                 "\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]"
             )
-            sys.exit(130)
+            _user_interrupted = True
         except Exception as exc:
             campaign_exit_state = "FAILED"
             campaign_exit_detail = str(exc)
@@ -2788,6 +2917,24 @@ def run_campaign(
                 logger.warning(
                     "Could not register raw_telemetry_jsonl artifact: %s", _art_exc
                 )
+
+    if _user_interrupted:
+        with get_connection(_eff_db_path) as _intr_conn:
+            _me_intr = _fetch_campaign_evidence_summary(
+                _intr_conn, effective_campaign_id
+            )
+        _finalize_interrupt_post_run_review(
+            campaign_id=campaign_id,
+            effective_campaign_id=effective_campaign_id,
+            measurement_evidence=_me_intr,
+            measurement_hints=measurement_hints,
+            db_path=_eff_db_path,
+            lab_root=_effective_lab_root,
+            model_identity=model_identity,
+            yolo_mode=yolo_mode,
+            run_plan=run_plan,
+            run_start_time=_run_start_time,
+        )
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)

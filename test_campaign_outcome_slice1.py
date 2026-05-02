@@ -15,6 +15,7 @@ from src.campaign_outcome.contracts import (
     MeasurementPhaseVerdict,
     PostRunVerdict,
 )
+import src.campaign_outcome.evaluate as evaluate_module
 from src.campaign_outcome.evaluate import evaluate_campaign_outcome
 from src.campaign_outcome.projection import project_final_review
 
@@ -324,6 +325,58 @@ def test_report_status_partial_not_success_style():
     out = evaluate_campaign_outcome(inp)
     assert out.post_run == PostRunVerdict.REPORT_PARTIAL
     assert not out.allows_success_style_review
+
+
+def test_report_status_complete_overrides_stale_report_ok_false():
+    """Explicit ``report_status=complete`` wins over a stale ``report_ok=False`` bit."""
+    out = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=False,
+            report_status=" COMPLETE ",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.post_run == PostRunVerdict.REPORT_SUCCEEDED
+    assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert out.allows_recommendation_authority
+
+
+def test_synthesized_abort_reason_propagates_to_campaign_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synthesis may attach ``abort``; main path must not discard it (future-proofing)."""
+
+    def _fake_synth(*args: object, **kwargs: object) -> evaluate_module._OutcomeSynth:
+        return evaluate_module._OutcomeSynth(
+            CampaignOutcomeKind.ABORTED,
+            FailureDomain.CONTRACT_CONFIG_ENV,
+            "synthetic abort detail",
+            AbortReason.UNKNOWN,
+        )
+
+    monkeypatch.setattr(evaluate_module, "_synthesize_outcome", _fake_synth)
+    out = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=True,
+            report_ok=True,
+            report_status="complete",
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert out.abort == AbortReason.UNKNOWN
+    assert out.failure_detail == "synthetic abort detail"
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
 
 
 def test_distinct_failure_detail_analysis_branches():

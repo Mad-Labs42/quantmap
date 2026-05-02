@@ -391,13 +391,40 @@ def test_runner_primary_report_failure_preserves_measurement_verdict(
 def test_keyboard_interrupt_exits_130_not_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """KeyboardInterrupt during measurement must yield nonzero exit (130), not code 0."""
-    _minimal_run_campaign_env(tmp_path, monkeypatch)
+    """Interrupt routes through outcome evaluation + read-model render; exits 130; no report run."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
 
     def _interrupt(*_a: object, **_k: object) -> bool:
         raise KeyboardInterrupt
 
     monkeypatch.setattr(runner, "_run_config", _interrupt)
+
+    outcome_calls: list[CampaignOutcomeInputs] = []
+
+    def _wrap_eval(inp: CampaignOutcomeInputs):
+        outcome_calls.append(inp)
+        return evaluate_campaign_outcome(inp)
+
+    monkeypatch.setattr(runner, "evaluate_campaign_outcome", _wrap_eval)
+
+    def _report_must_not_run(*_a: object, **_k: object) -> Path:
+        raise AssertionError("generate_report must not run after KeyboardInterrupt")
+
+    monkeypatch.setattr("src.report.generate_report", _report_must_not_run)
+
+    captured_read_models: list = []
+    _real_render = ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs):
+        kwargs.pop("target_console", None)
+        captured_read_models.append(kwargs["read_model"])
+        return _real_render(**kwargs, target_console=con)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _capture_render,
+    )
 
     with pytest.raises(SystemExit) as exc:
         runner.run_campaign(
@@ -407,3 +434,9 @@ def test_keyboard_interrupt_exits_130_not_success(
             baseline_path=tmp_path / "baseline.yaml",
         )
     assert exc.value.code == 130
+    assert len(outcome_calls) == 1
+    assert outcome_calls[0].user_interrupted is True
+    assert captured_read_models
+    rm = captured_read_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert not rm.show_next_actions
