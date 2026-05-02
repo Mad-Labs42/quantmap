@@ -178,8 +178,9 @@ def test_backend_startup_distinct_from_measurement_body():
         evidence=ev_startup,
     )
     out_b = outcome_evaluate.evaluate_campaign_outcome(inp_b)
+    assert out_b.measurement == MeasurementPhaseVerdict.FAILED
     assert out_b.failure_domain == FailureDomain.BACKEND_STARTUP
-    assert out_b.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out_b.outcome_kind == CampaignOutcomeKind.FAILED
 
     ev_body = _base_evidence(
         has_any_success_request=False,
@@ -195,6 +196,8 @@ def test_backend_startup_distinct_from_measurement_body():
         evidence=ev_body,
     )
     out_body = outcome_evaluate.evaluate_campaign_outcome(inp_body)
+    assert out_body.measurement == MeasurementPhaseVerdict.FAILED
+    assert out_body.outcome_kind == CampaignOutcomeKind.FAILED
     assert out_body.failure_domain == FailureDomain.MEASUREMENT_BODY
 
 
@@ -216,7 +219,56 @@ def test_lifecycle_complete_no_success_measurement_body_without_startup_signal()
         evidence=ev,
     )
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
     assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
+
+
+def test_complete_lifecycle_startup_failure_is_failed_not_insufficient_evidence():
+    """Lifecycle complete + startup signal retains BACKEND_STARTUP and FAILED outcome kind."""
+    ev = _base_evidence(
+        campaign_db_status="complete",
+        has_any_success_request=False,
+        cycles_attempted=2,
+        cycles_complete=2,
+        cycles_invalid=0,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        campaign_db_status="complete",
+        last_backend_failure_reason="cuda_init_failed",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
+    assert out.failure_domain == FailureDomain.BACKEND_STARTUP
+
+
+def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_complete():
+    """NOT_STARTED/NO_EVIDENCE gates run before lifecycle-complete-no-success."""
+    ev = CampaignEvidenceSummary(
+        configs_total=0,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+        campaign_db_status="complete",
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        campaign_db_status="complete",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.failure_detail == "No measurement evidence to score."
 
 
 def test_happy_path_success_style():
@@ -251,6 +303,7 @@ def test_lifecycle_complete_does_not_imply_outcome_success():
     )
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind in (
+        CampaignOutcomeKind.FAILED,
         CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
         CampaignOutcomeKind.DEGRADED,
     )

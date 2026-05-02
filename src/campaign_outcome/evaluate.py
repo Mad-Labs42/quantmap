@@ -405,16 +405,20 @@ def _synthesize_outcome(
 ) -> _OutcomeSynth:
     ev = inputs.evidence
 
-    r = _outcome_gate_lifecycle_complete_no_success(
-        inputs, ev, measurement_failure_domain
-    )
-    if r is not None:
-        return r
+    # True no-evidence / not-started before lifecycle “complete but no success” — avoids
+    # conflating absent evidence with a finished lifecycle that never produced successes.
     r = _outcome_gate_no_measurement_evidence(measurement, measurement_failure_domain)
     if r is not None:
         return r
+    # Active measurement failure before lifecycle gate: complete DB status must not
+    # downgrade FAILED measurement to insufficient-evidence when requests were attempted.
     r = _outcome_gate_measurement_failed(
         inputs, measurement, measurement_failure_domain
+    )
+    if r is not None:
+        return r
+    r = _outcome_gate_lifecycle_complete_no_success(
+        inputs, ev, measurement_failure_domain
     )
     if r is not None:
         return r

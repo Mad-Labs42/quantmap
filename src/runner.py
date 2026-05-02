@@ -100,6 +100,7 @@ from src.campaign_outcome import (  # noqa: E402
 from src.campaign_outcome.contracts import (  # noqa: E402
     CampaignOutcome,
     FinalReviewMetricsSnapshot,
+    FinalReviewReadModel,
 )
 
 # Rich components
@@ -1174,6 +1175,59 @@ def _fetch_campaign_evidence_summary(
     )
 
 
+def _render_campaign_post_run_review_screen(
+    *,
+    effective_campaign_id: str,
+    read_model: FinalReviewReadModel,
+    lab_root: Path,
+    model_identity: str,
+    db_path: Path,
+    yolo_mode: bool,
+    artifact_ok_map: dict[str, bool | None],
+) -> None:
+    """Diagnostics path + artifact presentation + post-run review UI (shared seam).
+
+    DB-backed statuses belong on ``CampaignOutcomeInputs``; ``artifact_ok_map``
+    only adjusts review-screen labels for known artifact types.
+    """
+    _diagnostics_path: str | None = None
+    try:
+        _eff_diagnostics_folder = artifact_dir(
+            lab_root,
+            "logs",
+            model_identity,
+            effective_campaign_id,
+            create=False,
+        )
+        _diagnostics_path = str(_eff_diagnostics_folder)
+    except Exception as _diag_exc:
+        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
+
+    _artifact_list: list[dict] | None = None
+    try:
+        _artifact_list = get_campaign_artifact_paths(
+            lab_root, effective_campaign_id, db_path=db_path
+        )
+        if _artifact_list is not None:
+            for _art in _artifact_list:
+                _mapped_ok = artifact_ok_map.get(_art["artifact_type"])
+                if _mapped_ok is False:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
+    except Exception as _art_list_exc:
+        logger.warning(
+            "Could not retrieve artifact paths for review screen: %s", _art_list_exc
+        )
+
+    ui.render_post_run_review_from_read_model(
+        campaign_id=effective_campaign_id,
+        read_model=read_model,
+        artifacts=_artifact_list,
+        diagnostics_path=_diagnostics_path,
+        yolo_mode=yolo_mode,
+    )
+
+
 def _finalize_interrupt_post_run_review(
     *,
     campaign_id: str,
@@ -1221,14 +1275,6 @@ def _finalize_interrupt_post_run_review(
         if _camp_row and _camp_row["failure_reason"] is not None
         else None
     )
-    _evidence_for_outcome = dataclasses.replace(
-        measurement_evidence,
-        campaign_db_status=_camp_status,
-        analysis_status=_camp_analysis,
-        report_status=_camp_report,
-        rankable_config_count=None,
-        winner_present=False,
-    )
     _outcome_inputs = CampaignOutcomeInputs(
         campaign_id=campaign_id,
         effective_campaign_id=effective_campaign_id,
@@ -1237,7 +1283,7 @@ def _finalize_interrupt_post_run_review(
         report_status=_camp_report,
         failure_reason=_camp_failure_reason,
         user_interrupted=True,
-        evidence=_evidence_for_outcome,
+        evidence=measurement_evidence,
         scoring_completed=False,
         passing_count=0,
         eliminated_count=0,
@@ -1259,46 +1305,18 @@ def _finalize_interrupt_post_run_review(
         runner_failure_cause=failure_cause,
         runner_failure_remediation=failure_remediation,
     )
-    _diagnostics_path: str | None = None
-    try:
-        _eff_diagnostics_folder = artifact_dir(
-            lab_root,
-            "logs",
-            model_identity,
-            effective_campaign_id,
-            create=False,
-        )
-        _diagnostics_path = str(_eff_diagnostics_folder)
-    except Exception as _diag_exc:
-        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
-
-    _artifact_list: list[dict] | None = None
-    try:
-        _artifact_list = get_campaign_artifact_paths(
-            lab_root, effective_campaign_id, db_path=db_path
-        )
-        if _artifact_list is not None:
-            _art_ok_map = {
-                ARTIFACT_CAMPAIGN_SUMMARY: False,
-                ARTIFACT_RUN_REPORTS: False,
-                ARTIFACT_METADATA: False,
-            }
-            for _art in _artifact_list:
-                _mapped_ok = _art_ok_map.get(_art["artifact_type"])
-                if _mapped_ok is False:
-                    _art["db_status"] = "failed"
-                    _art["exists"] = False
-    except Exception as _art_list_exc:
-        logger.warning(
-            "Could not retrieve artifact paths for review screen: %s", _art_list_exc
-        )
-
-    ui.render_post_run_review_from_read_model(
-        campaign_id=effective_campaign_id,
+    _render_campaign_post_run_review_screen(
+        effective_campaign_id=effective_campaign_id,
         read_model=_review_read_model,
-        artifacts=_artifact_list,
-        diagnostics_path=_diagnostics_path,
+        lab_root=lab_root,
+        model_identity=model_identity,
+        db_path=db_path,
         yolo_mode=yolo_mode,
+        artifact_ok_map={
+            ARTIFACT_CAMPAIGN_SUMMARY: False,
+            ARTIFACT_RUN_REPORTS: False,
+            ARTIFACT_METADATA: False,
+        },
     )
 
 
@@ -3290,11 +3308,10 @@ def run_campaign(
         if scores and isinstance(scores.get("unrankable"), dict)
         else 0
     )
+    # Status lanes live on CampaignOutcomeInputs; evidence carries measurement-derived
+    # counters plus scoring-phase enrichments only (rankable count / winner flag).
     _evidence_for_outcome = dataclasses.replace(
         measurement_evidence,
-        campaign_db_status=_camp_status,
-        analysis_status=_camp_analysis,
-        report_status=_camp_report,
         rankable_config_count=(_configs_valid if analysis_ok else None),
         winner_present=_winner_config_id is not None,
     )
@@ -3333,52 +3350,18 @@ def run_campaign(
         runner_failure_remediation=failure_remediation,
     )
 
-    # -------------------------------------------------------------------------
-    # Post-run review screen
-    # -------------------------------------------------------------------------
-    _diagnostics_path: str | None = None
-    try:
-        _eff_diagnostics_folder = artifact_dir(
-            _effective_lab_root,
-            "logs",
-            model_identity,
-            effective_campaign_id,
-            create=False,
-        )
-        _diagnostics_path = str(_eff_diagnostics_folder)
-    except Exception as _diag_exc:
-        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
-
-    # Collect canonical artifact paths for the review screen.
-    # get_campaign_artifact_paths is read-only: DB + filesystem discovery, no writes.
-    # Called after all artifact writers finish so DB rows are present.
-    _artifact_list: list[dict] | None = None
-    try:
-        _artifact_list = get_campaign_artifact_paths(
-            _effective_lab_root, effective_campaign_id, db_path=_eff_db_path
-        )
-        if _artifact_list is not None:
-            _art_ok_map = {
-                ARTIFACT_CAMPAIGN_SUMMARY: report_ok,
-                ARTIFACT_RUN_REPORTS: v2_ok,
-                ARTIFACT_METADATA: meta_ok,
-            }
-            for _art in _artifact_list:
-                _mapped_ok = _art_ok_map.get(_art["artifact_type"])
-                if _mapped_ok is False:
-                    _art["db_status"] = "failed"
-                    _art["exists"] = False
-    except Exception as _art_list_exc:
-        logger.warning(
-            "Could not retrieve artifact paths for review screen: %s", _art_list_exc
-        )
-
-    ui.render_post_run_review_from_read_model(
-        campaign_id=effective_campaign_id,
+    _render_campaign_post_run_review_screen(
+        effective_campaign_id=effective_campaign_id,
         read_model=_review_read_model,
-        artifacts=_artifact_list,
-        diagnostics_path=_diagnostics_path,
+        lab_root=_effective_lab_root,
+        model_identity=model_identity,
+        db_path=_eff_db_path,
         yolo_mode=yolo_mode,
+        artifact_ok_map={
+            ARTIFACT_CAMPAIGN_SUMMARY: report_ok,
+            ARTIFACT_RUN_REPORTS: v2_ok,
+            ARTIFACT_METADATA: meta_ok,
+        },
     )
 
     _final_exit = _exit_code_for_campaign_outcome(_campaign_outcome)
