@@ -248,7 +248,7 @@ def test_complete_lifecycle_startup_failure_is_failed_not_insufficient_evidence(
 
 
 def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_complete():
-    """NOT_STARTED/NO_EVIDENCE gates run before lifecycle-complete-no-success."""
+    """NOT_STARTED / NO_EVIDENCE synthesis applies even when DB lifecycle looks complete."""
     ev = CampaignEvidenceSummary(
         configs_total=0,
         configs_completed=0,
@@ -328,7 +328,7 @@ def test_partial_evidence_partial_outcome():
 
 
 def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_present():
-    """OOM/skipped-OOM aggregate counts explain invalid cycles during boundary sweeps."""
+    """OOM + skipped-OOM capacity must meet invalid-cycle count (aggregate Slice 1 rule)."""
     out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
@@ -338,12 +338,39 @@ def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_p
             passing_count=1,
             winner_config_id="w",
             report_status="complete",
-            evidence=_base_evidence(cycles_invalid=4, configs_skipped_oom=1),
+            evidence=_base_evidence(
+                cycles_invalid=2,
+                configs_oom=1,
+                configs_skipped_oom=1,
+            ),
         )
     )
     assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
     assert out.allows_recommendation_authority
+
+
+def test_invalid_cycles_remain_partial_when_oom_capacity_below_invalid_count():
+    """Insufficient OOM/skipped-OOM capacity cannot explain all invalid cycles → PARTIAL."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(
+                cycles_invalid=3,
+                configs_oom=1,
+                configs_skipped_oom=0,
+            ),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not out.allows_recommendation_authority
 
 
 def test_invalid_cycles_remain_partial_when_no_boundary_oom_aggregate_evidence():

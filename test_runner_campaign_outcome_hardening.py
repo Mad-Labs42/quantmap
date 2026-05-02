@@ -480,7 +480,47 @@ def test_keyboard_interrupt_exits_130_when_finalize_raises(
     assert exc.value.code == 130
     assert isinstance(exc.value.__cause__, RuntimeError)
     assert not gen_calls
-    assert "Interrupted campaign final review failed" in caplog.text
+    assert "Interrupted campaign closeout failed" in caplog.text
+
+
+def test_keyboard_interrupt_exits_130_when_evidence_fetch_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DB/evidence fetch during interrupt closeout is best-effort; exit 130 is mandatory."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_run_config",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    def _locked_db(*_a: object, **_k: object):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runner, "_fetch_campaign_evidence_summary", _locked_db)
+
+    gen_calls: list[int] = []
+
+    def _track_gen(*_a: object, **_k: object) -> Path:
+        gen_calls.append(1)
+        return tmp_path / "x.md"
+
+    monkeypatch.setattr("src.report.generate_report", _track_gen)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SystemExit) as exc:
+            runner.run_campaign(
+                campaign_id="test_camp",
+                dry_run=False,
+                yolo_mode=False,
+                baseline_path=tmp_path / "baseline.yaml",
+            )
+    assert exc.value.code == 130
+    assert isinstance(exc.value.__cause__, sqlite3.OperationalError)
+    assert not gen_calls
+    assert "Interrupted campaign closeout failed" in caplog.text
 
 
 def test_keyboard_interrupt_always_system_exit_130_when_finalize_returns_normally(

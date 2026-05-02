@@ -181,20 +181,22 @@ def _finalize(
 def _invalid_cycles_explained_by_boundary_oom_counters(
     ev: CampaignEvidenceSummary,
 ) -> bool:
-    """Whether aggregate OOM-style config counts can explain invalid cycles.
+    """Aggregate capacity guard (Slice 1 approximation, not per-cycle proof).
 
-    Lab DB summaries do not tie each invalid cycle row to a config outcome.
-    ``configs_degraded`` is **not** used here: it reflects instrumentation/evidence
-    quality signals that may be unrelated to boundary/OOM exploration, so counting
-    it would over-credit “explained” invalids. Only ``configs_oom`` and
-    ``configs_skipped_oom`` indicate boundary/OOM elimination alongside invalid cycles.
+    Persisted lab summaries do not link each invalid cycle row to OOM vs other causes.
+    We treat ``configs_oom + configs_skipped_oom`` as an upper bound on how many
+    invalid cycles *might* be attributable to boundary/OOM exploration. Invalid cycles
+    may avoid downgrading measurement to ``PARTIAL`` only when this capacity meets or
+    exceeds ``cycles_invalid``. A single OOM-style signal cannot honestly explain
+    multiple unexplained invalid cycles.
 
-    When ``cycles_invalid > 0`` but neither OOM counter is non-zero, invalids stay
-    unexplained → ``PARTIAL``. Slice 1 cannot refine further without per-cycle linkage.
+    ``configs_degraded`` is **not** counted: it is not reliably OOM/boundary-specific.
+    True per-cycle invalid attribution requires richer evidence (deferred schema work).
     """
     if ev.cycles_invalid <= 0:
         return True
-    return bool(ev.configs_oom or ev.configs_skipped_oom)
+    explained_capacity = ev.configs_oom + ev.configs_skipped_oom
+    return explained_capacity >= ev.cycles_invalid
 
 
 def _measurement_domain(
@@ -268,24 +270,6 @@ def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
         return PostRunVerdict.REPORT_SUCCEEDED
 
     return PostRunVerdict.REPORT_FAILED
-
-
-def _outcome_gate_lifecycle_complete_no_success(
-    inputs: CampaignOutcomeInputs,
-    ev: CampaignEvidenceSummary,
-    measurement_failure_domain: FailureDomain | None,
-) -> _OutcomeSynth | None:
-    if inputs.campaign_db_status != "complete" or ev.has_any_success_request:
-        return None
-    # Preserve _measurement_domain's domain (e.g. BACKEND_STARTUP); do not mask
-    # startup failures as generic MEASUREMENT_BODY when lifecycle is complete.
-    _lifecycle_domain = measurement_failure_domain or FailureDomain.MEASUREMENT_BODY
-    _msg = "Campaign lifecycle completed without successful measurement requests."
-    if ev.configs_degraded > 0 and ev.configs_completed > 0:
-        return _OutcomeSynth(CampaignOutcomeKind.DEGRADED, _lifecycle_domain, _msg)
-    return _OutcomeSynth(
-        CampaignOutcomeKind.INSUFFICIENT_EVIDENCE, _lifecycle_domain, _msg
-    )
 
 
 def _outcome_gate_no_measurement_evidence(
@@ -405,20 +389,13 @@ def _synthesize_outcome(
 ) -> _OutcomeSynth:
     ev = inputs.evidence
 
-    # True no-evidence / not-started before lifecycle “complete but no success” — avoids
-    # conflating absent evidence with a finished lifecycle that never produced successes.
+    # Measurement verdict owns measurement truth; runner ``campaign_db_status`` is not
+    # an independent scientific gate here (see synthesis order).
     r = _outcome_gate_no_measurement_evidence(measurement, measurement_failure_domain)
     if r is not None:
         return r
-    # Active measurement failure before lifecycle gate: complete DB status must not
-    # downgrade FAILED measurement to insufficient-evidence when requests were attempted.
     r = _outcome_gate_measurement_failed(
         inputs, measurement, measurement_failure_domain
-    )
-    if r is not None:
-        return r
-    r = _outcome_gate_lifecycle_complete_no_success(
-        inputs, ev, measurement_failure_domain
     )
     if r is not None:
         return r

@@ -2937,11 +2937,11 @@ def run_campaign(
                 )
 
     if _user_interrupted:
-        with get_connection(_eff_db_path) as _intr_conn:
-            _me_intr = _fetch_campaign_evidence_summary(
-                _intr_conn, effective_campaign_id
-            )
         try:
+            with get_connection(_eff_db_path) as _intr_conn:
+                _me_intr = _fetch_campaign_evidence_summary(
+                    _intr_conn, effective_campaign_id
+                )
             _finalize_interrupt_post_run_review(
                 campaign_id=campaign_id,
                 effective_campaign_id=effective_campaign_id,
@@ -2955,10 +2955,12 @@ def run_campaign(
                 run_start_time=_run_start_time,
             )
         except Exception as exc:
-            logger.exception("Interrupted campaign final review failed")
+            logger.exception(
+                "Interrupted campaign closeout failed (best-effort final review)"
+            )
             console.print(
-                "[yellow]Interrupted — post-run review could not be rendered "
-                f"({type(exc).__name__}).[/yellow]"
+                "[yellow]Interrupted — closeout or post-run review failed "
+                f"({type(exc).__name__}); exiting with code 130.[/yellow]"
             )
             raise SystemExit(130) from exc
         raise SystemExit(130)
