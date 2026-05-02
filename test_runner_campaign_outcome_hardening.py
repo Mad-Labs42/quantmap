@@ -203,7 +203,7 @@ def test_runner_exit_nonzero_when_report_ok_but_no_measurement_success(
     )
     monkeypatch.setattr(
         "src.report.generate_report",
-        lambda *args, **kwargs: tmp_path / "campaign-summary.md",
+        lambda *args, **kwargs: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
     )
 
     captured_models: list = []
@@ -316,3 +316,24 @@ def test_runner_primary_report_failure_preserves_measurement_verdict(
     assert rm.failure_cause and "Primary report generation failed" in rm.failure_cause
     assert "Post-campaign analysis failed" not in (rm.failure_cause or "")
     assert rm.failure_remediation and "Review logs" in rm.failure_remediation
+
+
+def test_keyboard_interrupt_exits_130_not_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """KeyboardInterrupt during measurement must yield nonzero exit (130), not code 0."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+
+    def _interrupt(*_a: object, **_k: object) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_run_config", _interrupt)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+    assert exc.value.code == 130

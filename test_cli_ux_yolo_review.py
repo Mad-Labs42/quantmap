@@ -109,7 +109,7 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     monkeypatch.setattr("src.score.score_campaign", _fake_score)
     monkeypatch.setattr(
         "src.report.generate_report",
-        lambda *args, **kwargs: tmp_path / "campaign-summary.md",
+        lambda *args, **kwargs: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
     )
     monkeypatch.setattr(
         "src.report_campaign.generate_campaign_report",

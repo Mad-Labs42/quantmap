@@ -2730,7 +2730,7 @@ def run_campaign(
             console.print(
                 "\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]"
             )
-            return
+            sys.exit(130)
         except Exception as exc:
             campaign_exit_state = "FAILED"
             campaign_exit_detail = str(exc)

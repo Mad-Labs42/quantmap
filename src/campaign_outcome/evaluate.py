@@ -226,15 +226,18 @@ def _synthesize_outcome(
     ev = inputs.evidence
 
     if inputs.campaign_db_status == "complete" and not ev.has_any_success_request:
+        # Preserve _measurement_domain's domain (e.g. BACKEND_STARTUP); do not mask
+        # startup failures as generic MEASUREMENT_BODY when lifecycle is complete.
+        _lifecycle_domain = measurement_failure_domain or FailureDomain.MEASUREMENT_BODY
         if ev.configs_degraded > 0 and ev.configs_completed > 0:
             return (
                 CampaignOutcomeKind.DEGRADED,
-                FailureDomain.MEASUREMENT_BODY,
+                _lifecycle_domain,
                 "Campaign lifecycle completed without successful measurement requests.",
             )
         return (
             CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
-            FailureDomain.MEASUREMENT_BODY,
+            _lifecycle_domain,
             "Campaign lifecycle completed without successful measurement requests.",
         )
 

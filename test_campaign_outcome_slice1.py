@@ -116,6 +116,7 @@ def test_abort_maps_to_aborted():
 
 
 def test_backend_startup_distinct_from_measurement_body():
+    """Startup vs body domain while DB reflects a finished lifecycle (complete)."""
     ev_startup = _base_evidence(
         has_any_success_request=False,
         cycles_attempted=2,
@@ -125,13 +126,14 @@ def test_backend_startup_distinct_from_measurement_body():
     inp_b = CampaignOutcomeInputs(
         campaign_id="c",
         effective_campaign_id="c",
-        campaign_db_status="running",
+        campaign_db_status="complete",
         last_backend_failure_reason="startup_timeout",
         scoring_completed=False,
         evidence=ev_startup,
     )
     out_b = evaluate_campaign_outcome(inp_b)
     assert out_b.failure_domain == FailureDomain.BACKEND_STARTUP
+    assert out_b.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
 
     ev_body = _base_evidence(
         has_any_success_request=False,
@@ -142,12 +144,33 @@ def test_backend_startup_distinct_from_measurement_body():
     inp_body = CampaignOutcomeInputs(
         campaign_id="c",
         effective_campaign_id="c",
-        campaign_db_status="running",
+        campaign_db_status="complete",
         scoring_completed=False,
         evidence=ev_body,
     )
     out_body = evaluate_campaign_outcome(inp_body)
     assert out_body.failure_domain == FailureDomain.MEASUREMENT_BODY
+
+
+def test_lifecycle_complete_no_success_measurement_body_without_startup_signal():
+    """Ordinary no-success body failure stays MEASUREMENT_BODY when lifecycle complete."""
+    ev = _base_evidence(
+        campaign_db_status="complete",
+        has_any_success_request=False,
+        cycles_attempted=2,
+        cycles_invalid=2,
+        cycles_complete=0,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        campaign_db_status="complete",
+        last_backend_failure_reason=None,
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
 
 
 def test_happy_path_success_style():
