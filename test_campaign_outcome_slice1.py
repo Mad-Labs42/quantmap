@@ -274,6 +274,29 @@ def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_compl
     assert out.failure_detail == "No measurement evidence to score."
 
 
+def test_planned_configs_with_no_cycles_are_no_evidence_not_not_started() -> None:
+    ev = _base_evidence(
+        configs_total=2,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            evidence=ev,
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.NO_EVIDENCE
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
+    assert out.failure_detail == "No measurement evidence to score."
+
+
 def test_happy_path_success_style():
     inp = CampaignOutcomeInputs(
         campaign_id="c",
@@ -546,6 +569,36 @@ def test_report_status_failed_overrides_stale_report_ok_true() -> None:
     assert out.report_ok is False
     assert not out.allows_success_style_review
     assert not out.allows_recommendation_authority
+
+
+@pytest.mark.parametrize(
+    ("report_ok", "expected_post_run", "expected_kind", "expected_report_ok"),
+    [
+        (True, PostRunVerdict.REPORT_SUCCEEDED, CampaignOutcomeKind.SUCCESS, True),
+        (False, PostRunVerdict.REPORT_FAILED, CampaignOutcomeKind.PARTIAL, False),
+    ],
+)
+def test_unknown_report_status_falls_back_to_legacy_report_ok(
+    report_ok: bool,
+    expected_post_run: PostRunVerdict,
+    expected_kind: CampaignOutcomeKind,
+    expected_report_ok: bool,
+) -> None:
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=report_ok,
+            report_status="publishing",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.post_run == expected_post_run
+    assert out.outcome_kind == expected_kind
+    assert out.report_ok is expected_report_ok
 
 
 def test_synthesized_abort_reason_propagates_to_campaign_outcome(
