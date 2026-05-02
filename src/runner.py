@@ -45,6 +45,7 @@ USAGE:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import hashlib
@@ -90,6 +91,17 @@ from src.artifact_paths import (  # noqa: E402
     report_paths,
 )
 from src.artifact_registry import register_artifact  # noqa: E402
+from src.campaign_outcome import (  # noqa: E402
+    CampaignEvidenceSummary,
+    CampaignOutcomeInputs,
+    evaluate_campaign_outcome,
+    project_final_review,
+)
+from src.campaign_outcome.contracts import (  # noqa: E402
+    CampaignOutcome,
+    FinalReviewMetricsSnapshot,
+    FinalReviewReadModel,
+)
 
 # Rich components
 from rich.console import Console  # type: ignore[import]  # noqa: E402
@@ -98,6 +110,17 @@ from rich.table import Table  # type: ignore[import]  # noqa: E402
 
 console = ui.get_console()
 logger = logging.getLogger(__name__)
+
+
+def _exit_code_for_campaign_outcome(outcome: CampaignOutcome) -> int:
+    """Return the process exit code after campaign finalization (not UI rendering).
+
+    Slice 1 contract: ``0`` only when ``outcome.allows_success_style_review``;
+    otherwise ``1``. Kept as a single helper so exit semantics can evolve without
+    mixing the process boundary with Rich/console details.
+    """
+    return 0 if outcome.allows_success_style_review else 1
+
 
 BASELINE_YAML = _campaign_definition.BASELINE_YAML
 CAMPAIGNS_DIR = _campaign_definition.CAMPAIGNS_DIR
@@ -126,6 +149,7 @@ STATE_FILE = STATE_DIR / "progress.json"
 # ---------------------------------------------------------------------------
 # Artifact registration helpers
 # ---------------------------------------------------------------------------
+
 
 def _register_raw_telemetry_artifact(
     db_path: Path,
@@ -168,7 +192,9 @@ def _register_raw_telemetry_artifact(
     )
 
     if raw_tel_status == "complete" and raw_tel_sha:
-        logger.info("Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16])
+        logger.info(
+            "Registered raw_telemetry_jsonl artifact (hash: %s)", raw_tel_sha[:16]
+        )
     elif raw_tel_status == "missing":
         logger.error("raw_telemetry_jsonl file completely missing at registration!")
     else:
@@ -206,6 +232,7 @@ def _register_run_reports_failure_artifact(
 # Per-baseline lab root derivation
 # ---------------------------------------------------------------------------
 
+
 def _derive_lab_root(baseline_path: Path) -> Path:
     """
     Derive the effective lab root for a given baseline file.
@@ -230,6 +257,7 @@ def _derive_lab_root(baseline_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Effective run identity for targeted executions
 # ---------------------------------------------------------------------------
+
 
 def _derive_effective_campaign_id(
     campaign_id: str,
@@ -289,6 +317,7 @@ class CampaignAbortError(RuntimeError):
 # Campaign listing
 # ---------------------------------------------------------------------------
 
+
 def list_campaigns() -> None:
     """
     Print a summary table of all campaigns in CONFIGS_DIR/campaigns/.
@@ -339,7 +368,9 @@ def list_campaigns() -> None:
 
     from src.run_plan import MODE_LABELS as _ML  # noqa: PLC0415
 
-    tbl = Table(show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80)
+    tbl = Table(
+        show_header=True, header_style="bold", box=None, pad_edge=False, min_width=80
+    )
     tbl.add_column("Campaign", style="cyan", no_wrap=True)
     tbl.add_column("Mode", no_wrap=True)
     tbl.add_column("Measurement", no_wrap=True)
@@ -386,7 +417,9 @@ def list_campaigns() -> None:
         if execution_environment_json:
             try:
                 execution_environment = json.loads(str(execution_environment_json))
-                support_tier = str(execution_environment.get("support_tier") or "unknown")
+                support_tier = str(
+                    execution_environment.get("support_tier") or "unknown"
+                )
             except Exception:
                 support_tier = "unreadable"
         tbl.add_row(
@@ -407,6 +440,7 @@ def list_campaigns() -> None:
     console.print()
 
     from src import ui  # noqa: PLC0415
+
     ui.print_next_actions(
         [
             "quantmap explain <campaign-id> --evidence",
@@ -420,6 +454,7 @@ def list_campaigns() -> None:
 # ---------------------------------------------------------------------------
 # Request scheduling
 # ---------------------------------------------------------------------------
+
 
 def _build_request_schedule(
     cycle_number: int,
@@ -446,7 +481,9 @@ def _build_request_schedule(
 
         path = request_files.get(req_type)
         if path is None:
-            raise ValueError(f"Request file for '{req_type}' not found in request_files map")
+            raise ValueError(
+                f"Request file for '{req_type}' not found in request_files map"
+            )
 
         schedule.append((req_idx, req_type, path))
 
@@ -456,6 +493,7 @@ def _build_request_schedule(
 # ---------------------------------------------------------------------------
 # Crash recovery state
 # ---------------------------------------------------------------------------
+
 
 def _read_progress(state_file: Path) -> dict[str, Any]:
     """Read crash recovery state. Returns empty dict if none exists."""
@@ -477,6 +515,7 @@ def _write_progress(state: dict[str, Any], state_dir: Path, state_file: Path) ->
     state is preserved until the new write is fully committed.
     """
     import os  # noqa: PLC0415 — already imported at module level but safe to re-import
+
     state_dir.mkdir(parents=True, exist_ok=True)
     tmp_file = state_file.with_suffix(".tmp")
     with open(tmp_file, "w", encoding="utf-8") as f:
@@ -492,6 +531,7 @@ def _clear_progress(state_file: Path) -> None:
     a partial write from making the file unreadable on the next run.
     """
     import os  # noqa: PLC0415
+
     if state_file.is_file():
         tmp_file = state_file.with_suffix(".tmp")
         with open(tmp_file, "w", encoding="utf-8") as f:
@@ -502,6 +542,7 @@ def _clear_progress(state_file: Path) -> None:
 # ---------------------------------------------------------------------------
 # Cooldown
 # ---------------------------------------------------------------------------
+
 
 def _enforce_cooldown(
     lab_config: dict[str, Any],
@@ -527,7 +568,10 @@ def _enforce_cooldown(
 
     logger.info(
         "Cooldown started before %s (min=%ds, max=%ds, temp_target=%.0f°C)",
-        config_label, min_wait, max_wait, temp_target,
+        config_label,
+        min_wait,
+        max_wait,
+        temp_target,
     )
 
     check_interval = 10
@@ -558,14 +602,19 @@ def _enforce_cooldown(
             gpu_t = sample.gpu_temp_c or 0.0
 
             machine_cool = (
-                tele.is_machine_cool(target_temp_c=temp_target) if past_minimum else False
+                tele.is_machine_cool(target_temp_c=temp_target)
+                if past_minimum
+                else False
             )
 
             if past_minimum and machine_cool:
                 elapsed = now - start_mono
                 logger.info(
                     "Cooldown complete after %.0fs — CPU %.1f°C GPU %.1f°C (both below %.0f°C)",
-                    elapsed, cpu_t, gpu_t, temp_target,
+                    elapsed,
+                    cpu_t,
+                    gpu_t,
+                    temp_target,
                 )
                 break
 
@@ -587,12 +636,17 @@ def _enforce_cooldown(
             # INFO: every 30s — less noise for long cooldowns.
             logger.debug(
                 "Cooldown sample: cpu=%.1f°C gpu=%.1f°C elapsed=%.0fs",
-                cpu_t, gpu_t, now - start_mono,
+                cpu_t,
+                gpu_t,
+                now - start_mono,
             )
             if now - last_log >= 30:
                 logger.info(
                     "Cooldown: cpu=%.1f°C gpu=%.1f°C elapsed=%.0fs remaining=%.0fs",
-                    cpu_t, gpu_t, now - start_mono, deadline - now,
+                    cpu_t,
+                    gpu_t,
+                    now - start_mono,
+                    deadline - now,
                 )
                 last_log = now
 
@@ -600,13 +654,15 @@ def _enforce_cooldown(
         else:
             logger.warning(
                 "Cooldown hit max_wait (%ds) without reaching temp target (%.0f°C). Proceeding.",
-                max_wait, temp_target,
+                max_wait,
+                temp_target,
             )
 
 
 # ---------------------------------------------------------------------------
 # Apply CPU affinity
 # ---------------------------------------------------------------------------
+
 
 def _apply_cpu_affinity(pid: int, mask: str | None) -> bool:
     """
@@ -619,6 +675,7 @@ def _apply_cpu_affinity(pid: int, mask: str | None) -> bool:
 
     try:
         import psutil
+
         proc = psutil.Process(pid)
         # Parse mask like "0-15" into a list of CPU IDs
         cpus: list[int] = []
@@ -642,6 +699,7 @@ def _apply_cpu_affinity(pid: int, mask: str | None) -> bool:
 # Campaign validation flows
 # ---------------------------------------------------------------------------
 
+
 def validate_campaign(
     campaign_id: str,
     values_override: list | None = None,
@@ -662,13 +720,16 @@ def validate_campaign(
     # Effective campaign identity — same logic as run_campaign.
     # values_override is not yet validated here (check 3.5 does that), but the
     # helper is safe to call with any list; it only formats the string.
-    _eff_cid_val = _derive_effective_campaign_id(campaign_id, values_override, mode_flag)
+    _eff_cid_val = _derive_effective_campaign_id(
+        campaign_id, values_override, mode_flag
+    )
 
     _setup_logging(_eff_cid_val, logs_dir=_eff_logs_dir_val, log_prefix="validate")
     logger.info("Validating campaign: %s  (baseline=%s)", _eff_cid_val, baseline_path)
     if baseline_path != BASELINE_YAML:
         logger.info("INFO: --baseline override active: %s", baseline_path)
         from rich.markup import escape
+
         console.print(f"[dim]Active baseline: {escape(str(baseline_path))}[/dim]")
 
     if _eff_cid_val != campaign_id:
@@ -680,7 +741,9 @@ def validate_campaign(
             _val_scope_reason = "--values scope"
         logger.info(
             "Effective run ID (%s): %s  (parent campaign: %s)",
-            _val_scope_reason, _eff_cid_val, campaign_id,
+            _val_scope_reason,
+            _eff_cid_val,
+            campaign_id,
         )
         console.print(
             f"[yellow]Effective run ID:[/yellow] {_eff_cid_val}  "
@@ -699,7 +762,9 @@ def validate_campaign(
         status = "[green]PASS[/green]" if passed else "[bold red]FAIL[/bold red]"
         msg = f"  {status}  {label}" + (f"  — {detail}" if detail else "")
         console.print(msg)
-        log_msg = f"  {'PASS' if passed else 'FAIL'}  {label}" + (f"  — {detail}" if detail else "")
+        log_msg = f"  {'PASS' if passed else 'FAIL'}  {label}" + (
+            f"  — {detail}" if detail else ""
+        )
         (logger.info if passed else logger.error)(log_msg)
         return passed
 
@@ -716,7 +781,12 @@ def validate_campaign(
     # 2. campaign YAML
     try:
         campaign = load_campaign(campaign_id)
-        ok = _check("campaign YAML loads", True, str(CAMPAIGNS_DIR / f"{campaign_id}.yaml")) and ok
+        ok = (
+            _check(
+                "campaign YAML loads", True, str(CAMPAIGNS_DIR / f"{campaign_id}.yaml")
+            )
+            and ok
+        )
     except Exception as exc:
         _check("campaign YAML loads", False, str(exc))
         return False  # can't continue without campaign
@@ -725,8 +795,14 @@ def validate_campaign(
     try:
         variable = validate_campaign_purity(baseline, campaign)
         values = campaign.get("values", [])
-        ok = _check("campaign purity (one variable)", True,
-                    f"variable={variable!r}, {len(values)} values: {values}") and ok
+        ok = (
+            _check(
+                "campaign purity (one variable)",
+                True,
+                f"variable={variable!r}, {len(values)} values: {values}",
+            )
+            and ok
+        )
     except CampaignPurityViolationError as exc:
         ok = _check("campaign purity (one variable)", False, str(exc)) and ok
 
@@ -734,15 +810,18 @@ def validate_campaign(
     if values_override is not None:
         campaign_values_all = campaign.get("values", [])
         bad_vals = [v for v in values_override if v not in campaign_values_all]
-        ok = _check(
-            "--values override: all values present in campaign",
-            len(bad_vals) == 0,
-            (
-                f"using {len(values_override)} of {len(campaign_values_all)} values: {values_override}"
-                if not bad_vals
-                else f"invalid: {bad_vals}; campaign has: {campaign_values_all}"
-            ),
-        ) and ok
+        ok = (
+            _check(
+                "--values override: all values present in campaign",
+                len(bad_vals) == 0,
+                (
+                    f"using {len(values_override)} of {len(campaign_values_all)} values: {values_override}"
+                    if not bad_vals
+                    else f"invalid: {bad_vals}; campaign has: {campaign_values_all}"
+                ),
+            )
+            and ok
+        )
         _check(
             "effective run ID",
             True,
@@ -776,16 +855,25 @@ def validate_campaign(
     # 4. Request files
     req_cfg = baseline.get("requests", {})
     if not req_cfg:
-        ok = _check("request files defined in baseline.yaml", False,
-                    "baseline.yaml has no 'requests:' section") and ok
+        ok = (
+            _check(
+                "request files defined in baseline.yaml",
+                False,
+                "baseline.yaml has no 'requests:' section",
+            )
+            and ok
+        )
     else:
         for req_name, rel_path in req_cfg.items():
             full_path = _REPO_ROOT / rel_path
-            ok = _check(
-                f"request file: {req_name}",
-                full_path.is_file(),
-                str(full_path),
-            ) and ok
+            ok = (
+                _check(
+                    f"request file: {req_name}",
+                    full_path.is_file(),
+                    str(full_path),
+                )
+                and ok
+            )
 
     # 5. Runtime binaries — server binary and first model shard
     #
@@ -808,15 +896,20 @@ def validate_campaign(
     # immediately obvious whether the env var was picked up or not.
     if bin_exists:
         bin_detail = f"{bin_size / 1024:.0f} KB"
-        bin_detail += ", executable" if bin_executable else ", NOT executable — missing chmod +x?"
+        bin_detail += (
+            ", executable" if bin_executable else ", NOT executable — missing chmod +x?"
+        )
     else:
         bin_detail = f"QUANTMAP_SERVER_BIN env = {os.environ.get('QUANTMAP_SERVER_BIN', '<not set>')}"
 
-    ok = _check(
-        f"server binary: {_server_bin}",
-        bin_exists and bin_nonempty,
-        bin_detail,
-    ) and ok
+    ok = (
+        _check(
+            f"server binary: {_server_bin}",
+            bin_exists and bin_nonempty,
+            bin_detail,
+        )
+        and ok
+    )
     if bin_exists and bin_nonempty and not bin_executable:
         # Non-fatal on Windows (X_OK is extension-based and always true for .exe),
         # but a genuine warning on Linux/macOS where chmod +x may have been forgotten.
@@ -835,7 +928,7 @@ def validate_campaign(
     #       (header-shard layout — confirms weight files are present)
     model_exists = _model_path.is_file()
     model_size_bytes = _model_path.stat().st_size if model_exists else 0
-    model_size_gb = model_size_bytes / (1024 ** 3)
+    model_size_gb = model_size_bytes / (1024**3)
     model_plausible = model_size_gb > 0.1  # >100 MB — standard layout
 
     shard2_detail = ""
@@ -848,67 +941,94 @@ def validate_campaign(
                 shard2_bytes = shard2_path.stat().st_size
                 if shard2_bytes > 100 * 1024 * 1024:  # >100 MB
                     model_plausible = True
-                    shard2_gb = shard2_bytes / (1024 ** 3)
-                    shard2_detail = f"; shard 2 present ({shard2_gb:.1f} GB) — header-shard layout"
+                    shard2_gb = shard2_bytes / (1024**3)
+                    shard2_detail = (
+                        f"; shard 2 present ({shard2_gb:.1f} GB) — header-shard layout"
+                    )
 
     # Same pattern as the binary check: path in the label so it leads the line.
     if model_exists:
-        if model_size_bytes < 1024 ** 2:
+        if model_size_bytes < 1024**2:
             size_str = f"{model_size_bytes / 1024:.0f} KB"
-        elif model_size_bytes < 1024 ** 3:
-            size_str = f"{model_size_bytes / 1024 ** 2:.1f} MB"
+        elif model_size_bytes < 1024**3:
+            size_str = f"{model_size_bytes / 1024**2:.1f} MB"
         else:
             size_str = f"{model_size_gb:.1f} GB"
         model_detail = size_str + shard2_detail
         if not model_plausible:
-            model_detail += " — expected >100 MB for a real GGUF shard; set QUANTMAP_MODEL_PATH"
+            model_detail += (
+                " — expected >100 MB for a real GGUF shard; set QUANTMAP_MODEL_PATH"
+            )
     else:
         model_detail = f"QUANTMAP_MODEL_PATH env = {os.environ.get('QUANTMAP_MODEL_PATH', '<not set>')}"
 
-    ok = _check(
-        f"model shard 1: {_model_path}",
-        model_exists and model_plausible,
-        model_detail,
-    ) and ok
+    ok = (
+        _check(
+            f"model shard 1: {_model_path}",
+            model_exists and model_plausible,
+            model_detail,
+        )
+        and ok
+    )
 
     # 6. Baseline completeness
     lab = baseline.get("lab", {})
-    for key in ("cycles_per_config", "requests_per_cycle", "cooldown_between_configs_s"):
-        ok = _check(
-            f"baseline.yaml lab.{key} present",
-            key in lab,
-            f"value={lab.get(key, '<MISSING>')!r}",
-        ) and ok
+    for key in (
+        "cycles_per_config",
+        "requests_per_cycle",
+        "cooldown_between_configs_s",
+    ):
+        ok = (
+            _check(
+                f"baseline.yaml lab.{key} present",
+                key in lab,
+                f"value={lab.get(key, '<MISSING>')!r}",
+            )
+            and ok
+        )
 
     ref = baseline.get("reference", {})
     for key in ("warm_tg_median_ts", "warm_ttft_median_ms", "cold_ttft_ms"):
-        ok = _check(
-            f"baseline.yaml reference.{key} present",
-            key in ref,
-            f"value={ref.get(key, '<MISSING>')!r}",
-        ) and ok
+        ok = (
+            _check(
+                f"baseline.yaml reference.{key} present",
+                key in ref,
+                f"value={ref.get(key, '<MISSING>')!r}",
+            )
+            and ok
+        )
 
     # 7. elimination_overrides keys (if present)
     overrides = campaign.get("elimination_overrides", {})
     if overrides:
         valid_keys = set(ELIMINATION_FILTERS.keys())
         for key in overrides:
-            ok = _check(
-                f"elimination_overrides.{key} is a known filter",
-                key in valid_keys,
-                f"valid keys: {sorted(valid_keys)}" if key not in valid_keys else "",
-            ) and ok
+            ok = (
+                _check(
+                    f"elimination_overrides.{key} is a known filter",
+                    key in valid_keys,
+                    f"valid keys: {sorted(valid_keys)}"
+                    if key not in valid_keys
+                    else "",
+                )
+                and ok
+            )
 
     # 8. oom_boundary_sweep: values must be ascending
     if campaign.get("oom_boundary_sweep", False):
         values = campaign.get("values", [])
         is_sorted = values == sorted(values)
-        ok = _check(
-            "oom_boundary_sweep: values ascending",
-            is_sorted,
-            f"values must be in ascending order for early termination to be correct; "
-            f"got {values}" if not is_sorted else f"{values}",
-        ) and ok
+        ok = (
+            _check(
+                "oom_boundary_sweep: values ascending",
+                is_sorted,
+                f"values must be in ascending order for early termination to be correct; "
+                f"got {values}"
+                if not is_sorted
+                else f"{values}",
+            )
+            and ok
+        )
 
     # 9. Environment checks
     _run_preflight_checks(_server_bin, _model_path, _eff_lab_root_val, is_dry_run=True)
@@ -942,7 +1062,9 @@ def validate_campaign(
             source_parts.append(f"cycles from Standard mode default ({cycles})")
         if "requests_per_cycle" in campaign:
             source_parts.append(f"requests from campaign YAML ({reqs})")
-        source_note = f"  [dim]({'; '.join(source_parts)})[/dim]" if source_parts else ""
+        source_note = (
+            f"  [dim]({'; '.join(source_parts)})[/dim]" if source_parts else ""
+        )
 
         warm_per_cycle = reqs - 1  # first request each cycle is cold
         warm_samples = len(configs) and (cycles * warm_per_cycle)
@@ -981,15 +1103,232 @@ def validate_campaign(
                 )
         logger.info("Validation passed: %s", campaign_id)
     else:
-        console.print("[bold red]Validation FAILED — fix errors above before running.[/bold red]")
+        console.print(
+            "[bold red]Validation FAILED — fix errors above before running.[/bold red]"
+        )
         logger.error("Validation failed: %s", campaign_id)
 
     return ok
 
 
 # ---------------------------------------------------------------------------
+# Campaign evidence (runner-side; feeds campaign_outcome inputs)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_campaign_evidence_summary(
+    conn: sqlite3.Connection,
+    campaign_id: str,
+) -> CampaignEvidenceSummary:
+    """Aggregate measurement-truth counters from the lab DB for the evaluator.
+
+    SQL-only: sums config/cycle status rows and counts successful requests tied to
+    completed cycles. Does not interpret campaign outcome — ``evaluate_campaign_outcome``
+    consumes the resulting ``CampaignEvidenceSummary``.
+    """
+    row_cfg = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            COALESCE(SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END), 0) AS completed,
+            COALESCE(SUM(CASE WHEN status = 'oom' THEN 1 ELSE 0 END), 0) AS oom,
+            COALESCE(SUM(CASE WHEN status = 'skipped_oom' THEN 1 ELSE 0 END), 0) AS skipped_oom,
+            COALESCE(SUM(CASE WHEN status = 'degraded' THEN 1 ELSE 0 END), 0) AS degraded
+        FROM configs
+        WHERE campaign_id=?
+        """,
+        (campaign_id,),
+    ).fetchone()
+
+    row_cyc = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS attempted,
+            COALESCE(SUM(CASE WHEN status = 'complete' THEN 1 ELSE 0 END), 0) AS complete,
+            COALESCE(SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END), 0) AS invalid
+        FROM cycles
+        WHERE campaign_id=?
+        """,
+        (campaign_id,),
+    ).fetchone()
+
+    row_req = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM requests r
+        JOIN cycles c ON r.cycle_id = c.id
+        WHERE r.campaign_id=?
+          AND r.outcome='success'
+          AND r.cycle_status='complete'
+          AND c.status='complete'
+        """,
+        (campaign_id,),
+    ).fetchone()
+
+    has_success = int(row_req[0] if row_req else 0) > 0
+
+    return CampaignEvidenceSummary(
+        configs_total=int(row_cfg[0] if row_cfg else 0),
+        configs_completed=int(row_cfg[1] if row_cfg else 0),
+        configs_oom=int(row_cfg[2] if row_cfg else 0),
+        configs_skipped_oom=int(row_cfg[3] if row_cfg else 0),
+        configs_degraded=int(row_cfg[4] if row_cfg else 0),
+        cycles_attempted=int(row_cyc[0] if row_cyc else 0),
+        cycles_complete=int(row_cyc[1] if row_cyc else 0),
+        cycles_invalid=int(row_cyc[2] if row_cyc else 0),
+        has_any_success_request=has_success,
+    )
+
+
+def _render_campaign_post_run_review_screen(
+    *,
+    effective_campaign_id: str,
+    read_model: FinalReviewReadModel,
+    lab_root: Path,
+    model_identity: str,
+    db_path: Path,
+    yolo_mode: bool,
+    artifact_ok_map: dict[str, bool | None],
+) -> None:
+    """Diagnostics path + artifact presentation + post-run review UI (shared seam).
+
+    DB-backed statuses belong on ``CampaignOutcomeInputs``; ``artifact_ok_map``
+    only adjusts review-screen labels for known artifact types.
+    """
+    _diagnostics_path: str | None = None
+    try:
+        _eff_diagnostics_folder = artifact_dir(
+            lab_root,
+            "logs",
+            model_identity,
+            effective_campaign_id,
+            create=False,
+        )
+        _diagnostics_path = str(_eff_diagnostics_folder)
+    except Exception as _diag_exc:
+        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
+
+    _artifact_list: list[dict] | None = None
+    try:
+        _artifact_list = get_campaign_artifact_paths(
+            lab_root, effective_campaign_id, db_path=db_path
+        )
+        if _artifact_list is not None:
+            for _art in _artifact_list:
+                _mapped_ok = artifact_ok_map.get(_art["artifact_type"])
+                if _mapped_ok is False:
+                    _art["db_status"] = "failed"
+                    _art["exists"] = False
+    except Exception as _art_list_exc:
+        logger.warning(
+            "Could not retrieve artifact paths for review screen: %s", _art_list_exc
+        )
+
+    ui.render_post_run_review_from_read_model(
+        campaign_id=effective_campaign_id,
+        read_model=read_model,
+        artifacts=_artifact_list,
+        diagnostics_path=_diagnostics_path,
+        yolo_mode=yolo_mode,
+    )
+
+
+def _finalize_interrupt_post_run_review(
+    *,
+    campaign_id: str,
+    effective_campaign_id: str,
+    measurement_evidence: CampaignEvidenceSummary,
+    measurement_hints: dict[str, Any],
+    db_path: Path,
+    lab_root: Path,
+    model_identity: str,
+    yolo_mode: bool,
+    run_plan: RunPlan,
+    run_start_time: float,
+) -> None:
+    """Evaluate + project + render for KeyboardInterrupt (no process exit).
+
+    Caller must immediately terminate the process with interrupt exit code 130.
+    Caller must not run analysis/report/export — this path skips those stages.
+    """
+    failure_cause = None
+    failure_remediation = None
+    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
+    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
+    with get_connection(db_path) as _camp_conn:
+        _camp_row = _camp_conn.execute(
+            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
+            (effective_campaign_id,),
+        ).fetchone()
+    _camp_status = (
+        str(_camp_row["status"])
+        if _camp_row and _camp_row["status"] is not None
+        else None
+    )
+    _camp_analysis = (
+        str(_camp_row["analysis_status"])
+        if _camp_row and _camp_row["analysis_status"] is not None
+        else None
+    )
+    _camp_report = (
+        str(_camp_row["report_status"])
+        if _camp_row and _camp_row["report_status"] is not None
+        else None
+    )
+    _camp_failure_reason = (
+        str(_camp_row["failure_reason"])
+        if _camp_row and _camp_row["failure_reason"] is not None
+        else None
+    )
+    _outcome_inputs = CampaignOutcomeInputs(
+        campaign_id=campaign_id,
+        effective_campaign_id=effective_campaign_id,
+        campaign_db_status=_camp_status,
+        analysis_status=_camp_analysis,
+        report_status=_camp_report,
+        failure_reason=_camp_failure_reason,
+        user_interrupted=True,
+        evidence=measurement_evidence,
+        scoring_completed=False,
+        passing_count=0,
+        eliminated_count=0,
+        unrankable_count=0,
+        winner_config_id=None,
+        unrankable_reason=None,
+        report_ok=False,
+        run_reports_ok=None,
+        metadata_ok=None,
+        last_backend_failure_reason=_last_br_val,
+    )
+    _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
+    _review_read_model = project_final_review(
+        _campaign_outcome,
+        metrics=FinalReviewMetricsSnapshot(
+            elapsed_seconds=time.monotonic() - run_start_time,
+            run_mode=run_plan.run_mode,
+        ),
+        runner_failure_cause=failure_cause,
+        runner_failure_remediation=failure_remediation,
+    )
+    _render_campaign_post_run_review_screen(
+        effective_campaign_id=effective_campaign_id,
+        read_model=_review_read_model,
+        lab_root=lab_root,
+        model_identity=model_identity,
+        db_path=db_path,
+        yolo_mode=yolo_mode,
+        artifact_ok_map={
+            ARTIFACT_CAMPAIGN_SUMMARY: False,
+            ARTIFACT_RUN_REPORTS: False,
+            ARTIFACT_METADATA: False,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
 # Single cycle execution
 # ---------------------------------------------------------------------------
+
 
 def _run_cycle(
     conn: sqlite3.Connection,
@@ -1003,6 +1342,7 @@ def _run_cycle(
     console: Console,
     logs_dir: Path | None = None,
     raw_telemetry_jsonl_path: Path | None = None,
+    measurement_hints: dict[str, Any] | None = None,
 ) -> tuple[bool, list[dict]]:
     """
     Run one cycle (server start + N requests).
@@ -1061,11 +1401,15 @@ def _run_cycle(
                     logger.warning(
                         "CPU affinity NOT applied for config %s (pid=%d mask='%s') — "
                         "proceeding without affinity; results may show more variability.",
-                        config_id, server_pid, cpu_affinity_mask,
+                        config_id,
+                        server_pid,
+                        cpu_affinity_mask,
                     )
 
             # Update telemetry with the new server PID and cycle_id
-            collector.start(campaign_id, config_id, server_pid=server_pid, cycle_id=cycle_id)
+            collector.start(
+                campaign_id, config_id, server_pid=server_pid, cycle_id=cycle_id
+            )
 
             # Update cycle record with server details (Phase 2 Scoped)
             try:
@@ -1085,12 +1429,17 @@ def _run_cycle(
                 )
                 conn.commit()
             except Exception as exc:
-                raise RuntimeError(f"FATAL: Failed to update cycle {cycle_id} startup details: {exc}") from exc
+                raise RuntimeError(
+                    f"FATAL: Failed to update cycle {cycle_id} startup details: {exc}"
+                ) from exc
 
             logger.info(
                 "Cycle %d/%s started — server pid=%d port=%s no_warmup=%s",
-                cycle_number, config_id, server_pid,
-                session.port, session.no_warmup,
+                cycle_number,
+                config_id,
+                server_pid,
+                session.port,
+                session.no_warmup,
             )
 
             # --- Execute requests -------------------------------------------
@@ -1104,7 +1453,9 @@ def _run_cycle(
                         thermal_event = True
                         logger.error(
                             "THERMAL EVENT before req %d in cycle %d/%s — aborting cycle",
-                            req_idx, cycle_number, config_id,
+                            req_idx,
+                            cycle_number,
+                            config_id,
                         )
                         break
 
@@ -1139,7 +1490,8 @@ def _run_cycle(
                 # Write to raw-telemetry.jsonl (canonical merged stream)
                 if raw_telemetry_jsonl_path:
                     write_raw_jsonl(
-                        raw_telemetry_jsonl_path, result_dict,
+                        raw_telemetry_jsonl_path,
+                        result_dict,
                         stream="requests",
                     )
 
@@ -1148,13 +1500,17 @@ def _run_cycle(
                     write_request(conn, cycle_id, result_dict)
                     conn.commit()
                 except Exception as exc:
-                    raise RuntimeError(f"FATAL: Failed to write request result to DB: {exc}") from exc
+                    raise RuntimeError(
+                        f"FATAL: Failed to write request result to DB: {exc}"
+                    ) from exc
 
                 results.append(result_dict)
 
                 logger.info(
                     "req %d/%d %s outcome=%s ttft=%.1fms tg=%.2ft/s",
-                    req_idx, len(schedule), req_type,
+                    req_idx,
+                    len(schedule),
+                    req_type,
                     result.outcome.value,
                     result.ttft_ms or 0,
                     result.predicted_per_second or 0,
@@ -1200,27 +1556,35 @@ def _run_cycle(
                 cycle_id,
                 f"startup_failure: {startup_failure.reason.value}",
             )
+            if measurement_hints is not None:
+                measurement_hints["last_backend_failure_reason"] = (
+                    startup_failure.reason.value
+                )
             return False, []
 
         # Determine if this was an OOM
         is_oom = isinstance(exc, ServerOOMError)
         log_snippet = str(exc)
-        
+
         # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
         if not is_oom:
             try:
                 speed_short_path = request_files.get("speed_short")
                 if speed_short_path is not None:
-                    server_log = speed_short_path.parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
+                    server_log = (
+                        speed_short_path.parent.parent.parent / "logs"
+                    )  # approximation or we can just use the config's last srv log
                 # actually srv["log_file"] was defined inside the `with` block, we might not have it.
                 # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
             except Exception:
                 pass
-            
+
             # Use `server_log` if it is in locals and exists
             try:
-                if 'server_log' in locals() and server_log and server_log.is_file():
-                    tail = server_log.read_text(encoding="utf-8", errors="replace")[-3000:].lower()
+                if "server_log" in locals() and server_log and server_log.is_file():
+                    tail = server_log.read_text(encoding="utf-8", errors="replace")[
+                        -3000:
+                    ].lower()
                     if "out of memory" in tail:
                         is_oom = True
                         log_snippet = tail[-500:]
@@ -1232,11 +1596,13 @@ def _run_cycle(
             _mark_cycle_invalid(conn, cycle_id, "crash: OOM")
             raise ServerOOMError(
                 log_snippet=log_snippet,
-                log_path=server_log if 'server_log' in locals() else Path(),
+                log_path=server_log if "server_log" in locals() else Path(),
                 exit_code=getattr(exc, "exit_code", -1),
             )
 
-        logger.error("Cycle %d/%s crashed: %s", cycle_number, config_id, exc, exc_info=True)
+        logger.error(
+            "Cycle %d/%s crashed: %s", cycle_number, config_id, exc, exc_info=True
+        )
         # Mark existing results as invalid
         _mark_cycle_invalid(conn, cycle_id, f"crash: {exc}")
         return False, []
@@ -1246,7 +1612,10 @@ def _run_cycle(
         samples, snapshots = collector.stop()
         logger.debug(
             "Cycle %d/%s telemetry: %d samples, %d snapshots",
-            cycle_number, config_id, len(samples), len(snapshots),
+            cycle_number,
+            config_id,
+            len(samples),
+            len(snapshots),
         )
 
     # --- Post-cycle outcome -------------------------------------------------
@@ -1262,7 +1631,9 @@ def _run_cycle(
         )
         conn.commit()
     except Exception as exc:
-        raise RuntimeError(f"FATAL: Failed to mark cycle {cycle_id} complete: {exc}") from exc
+        raise RuntimeError(
+            f"FATAL: Failed to mark cycle {cycle_id} complete: {exc}"
+        ) from exc
 
     return False, results
 
@@ -1281,13 +1652,16 @@ def _mark_cycle_invalid(conn: sqlite3.Connection, cycle_id: int, reason: str) ->
         conn.commit()
     except Exception as exc:
         # Severity A (Fatal) — truth-bearing state write failed
-        raise RuntimeError(f"FATAL: Failed to mark cycle {cycle_id} invalid in DB: {exc}") from exc
+        raise RuntimeError(
+            f"FATAL: Failed to mark cycle {cycle_id} invalid in DB: {exc}"
+        ) from exc
     logger.warning("Cycle id=%d marked invalid: %s", cycle_id, reason)
 
 
 # ---------------------------------------------------------------------------
 # Single config execution
 # ---------------------------------------------------------------------------
+
 
 def _run_config(
     conn: sqlite3.Connection,
@@ -1304,6 +1678,7 @@ def _run_config(
     logs_dir: Path | None = None,
     environment_dir: Path | None = None,
     raw_telemetry_jsonl_path: Path | None = None,
+    measurement_hints: dict[str, Any] | None = None,
 ) -> bool | str:
     """
     Run all cycles for one config. Returns True if config completed without
@@ -1318,9 +1693,9 @@ def _run_config(
     (derived from the active lab root; fall back to module-level defaults).
     logs_dir: effective server log directory (namespaced when --baseline used).
     """
-    _eff_state_dir  = state_dir  if state_dir  is not None else STATE_DIR
+    _eff_state_dir = state_dir if state_dir is not None else STATE_DIR
     _eff_state_file = state_file if state_file is not None else STATE_FILE
-    _eff_logs_dir   = logs_dir  if logs_dir   is not None else LOGS_DIR
+    _eff_logs_dir = logs_dir if logs_dir is not None else LOGS_DIR
     if environment_dir is not None:
         _eff_environment_dir = environment_dir
     elif raw_telemetry_jsonl_path is not None:
@@ -1337,28 +1712,33 @@ def _run_config(
         _eff_environment_dir = STATE_DIR
     config_id = config["config_id"]
     cycles_per_config = lab_config.get("cycles_per_config", 5)
-    
+
     try:
         thermal_events_total = conn.execute(
             "SELECT COUNT(*) FROM telemetry WHERE config_id=? AND campaign_id=? AND (power_limit_throttling=1 OR cpu_temp_c >= 100.0)",
-            (config_id, campaign_id)
+            (config_id, campaign_id),
         ).fetchone()[0]
     except Exception:
         thermal_events_total = 0
-    
+
     all_results: list[dict] = []
 
     console.print(
         f"\n[bold cyan]Config:[/bold cyan] {config_id}  "
         f"[dim]({config['variable_name']}={config['variable_value']})[/dim]"
     )
-    logger.info("=== Starting config %s (%s=%s) ===",
-                config_id, config['variable_name'], config['variable_value'])
+    logger.info(
+        "=== Starting config %s (%s=%s) ===",
+        config_id,
+        config["variable_name"],
+        config["variable_value"],
+    )
 
     # Register config in DB (Phase 2 Scoped)
     try:
         full_config_json = json.dumps(config["full_config"])
         from src.server import get_production_command, get_runtime_env_summary  # noqa: PLC0415
+
         resolved_cmd = get_production_command(config["server_args"])
         runtime_env_json = json.dumps(get_runtime_env_summary())
         conn.execute(
@@ -1367,7 +1747,8 @@ def _run_config(
                 resolved_command, runtime_env_json, cpu_affinity_mask, status, started_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
             (
-                config_id, campaign_id,
+                config_id,
+                campaign_id,
                 config["variable_name"],
                 json.dumps(config["variable_value"]),
                 full_config_json,
@@ -1379,7 +1760,9 @@ def _run_config(
         )
         conn.commit()
     except Exception as exc:
-        raise RuntimeError(f"FATAL: Failed to register config {config_id} in DB: {exc}") from exc
+        raise RuntimeError(
+            f"FATAL: Failed to register config {config_id} in DB: {exc}"
+        ) from exc
 
     def _run_cycles() -> None:
         """Inner loop shared by both OOM-boundary and standard paths."""
@@ -1392,7 +1775,9 @@ def _run_config(
             _write_progress(progress_state, _eff_state_dir, _eff_state_file)
 
             console.print(f"  [bold]Cycle {cycle_number}/{cycles_per_config}[/bold]")
-            logger.info("--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id)
+            logger.info(
+                "--- Cycle %d/%d for %s ---", cycle_number, cycles_per_config, config_id
+            )
 
             # Register cycle in DB (Phase 2 Scoped)
             existing = conn.execute(
@@ -1406,7 +1791,9 @@ def _run_config(
                 if existing_status in ("complete", "invalid"):
                     logger.info(
                         "Cycle %d/%s already %s — skipping",
-                        cycle_number, config_id, existing_status,
+                        cycle_number,
+                        config_id,
+                        existing_status,
                     )
                     console.print(
                         f"  [dim]Cycle {cycle_number}/{cycles_per_config} "
@@ -1416,9 +1803,12 @@ def _run_config(
                 # Non-terminal: interrupted mid-run. Discard and restart.
                 logger.info(
                     "Cycle %d/%s found in state '%s' — discarding partial data and restarting",
-                    cycle_number, config_id, existing_status,
+                    cycle_number,
+                    config_id,
+                    existing_status,
                 )
                 from src.db import write_jsonl_marker  # noqa: PLC0415
+
                 if raw_telemetry_jsonl_path:
                     write_jsonl_marker(
                         raw_telemetry_jsonl_path,
@@ -1435,11 +1825,15 @@ def _run_config(
                     _cid = existing["id"]
                     conn.execute("DELETE FROM requests WHERE cycle_id=?", (_cid,))
                     conn.execute("DELETE FROM telemetry WHERE cycle_id=?", (_cid,))
-                    conn.execute("DELETE FROM background_snapshots WHERE cycle_id=?", (_cid,))
+                    conn.execute(
+                        "DELETE FROM background_snapshots WHERE cycle_id=?", (_cid,)
+                    )
                     conn.execute("DELETE FROM cycles WHERE id=?", (_cid,))
                     conn.commit()
                 except Exception as exc:
-                    raise RuntimeError(f"FATAL: Failed to clean up partial cycle data: {exc}") from exc
+                    raise RuntimeError(
+                        f"FATAL: Failed to clean up partial cycle data: {exc}"
+                    ) from exc
 
             try:
                 cur = conn.execute(
@@ -1450,17 +1844,24 @@ def _run_config(
                 cycle_id = cast(int, cur.lastrowid)
                 conn.commit()
             except Exception as exc:
-                raise RuntimeError(f"FATAL: Failed to insert pending cycle in DB: {exc}") from exc
+                raise RuntimeError(
+                    f"FATAL: Failed to insert pending cycle in DB: {exc}"
+                ) from exc
 
             # Capture run context before cycle execution begins (one per cycle).
             # Failure is non-fatal: log it and let the cycle proceed.
-            _ctx_path = _eff_environment_dir / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
+            _ctx_path = (
+                _eff_environment_dir
+                / f"{config_id}_cycle{cycle_number:02d}_run_context.json"
+            )
             try:
                 from src.run_context import create_run_context  # noqa: PLC0415
                 from src.server import MODEL_PATH as _ctx_model_path  # noqa: PLC0415
+
                 logger.info(
                     "Capturing run context for cycle %d/%s ...",
-                    cycle_number, config_id,
+                    cycle_number,
+                    config_id,
                 )
                 _ctx = create_run_context(model_path=str(_ctx_model_path))
                 _ctx_path.write_text(json.dumps(_ctx, indent=2), encoding="utf-8")
@@ -1468,7 +1869,9 @@ def _run_config(
             except Exception as _ctx_exc:
                 logger.warning(
                     "Run context capture failed — cycle %d/%s will proceed without it: %s",
-                    cycle_number, config_id, _ctx_exc,
+                    cycle_number,
+                    config_id,
+                    _ctx_exc,
                 )
 
             thermal_event, results = _run_cycle(
@@ -1483,13 +1886,16 @@ def _run_config(
                 console=console,
                 logs_dir=_eff_logs_dir,
                 raw_telemetry_jsonl_path=raw_telemetry_jsonl_path,
+                measurement_hints=measurement_hints,
             )
 
             if thermal_event:
                 thermal_events_total += 1
                 logger.warning(
                     "Thermal event in cycle %d/%s (total events this config: %d)",
-                    cycle_number, config_id, thermal_events_total,
+                    cycle_number,
+                    config_id,
+                    thermal_events_total,
                 )
                 # Continue to next cycle — thermal events are recorded but don't abort
                 # the config (they disqualify the cycle and affect scoring)
@@ -1497,10 +1903,17 @@ def _run_config(
             all_results.extend(results)
 
     from src.server import ServerOOMError  # noqa: PLC0415
+
     try:
         _run_cycles()
     except ServerOOMError as exc:
         logger.error("Config %s: OOM during server startup — %s", config_id, exc)
+        if measurement_hints is not None:
+            from src.backends.contracts import BackendFailureReason  # noqa: PLC0415
+
+            measurement_hints["last_backend_failure_reason"] = (
+                BackendFailureReason.GPU_OOM.value
+            )
         try:
             conn.execute(
                 "UPDATE configs SET status='oom', failure_detail=? "
@@ -1509,7 +1922,9 @@ def _run_config(
             )
             conn.commit()
         except Exception as db_exc:
-            raise RuntimeError(f"FATAL: Failed to update config {config_id} status to 'oom': {db_exc}") from db_exc
+            raise RuntimeError(
+                f"FATAL: Failed to update config {config_id} status to 'oom': {db_exc}"
+            ) from db_exc
         console.print(
             f"  [bold red]OOM:[/bold red] {config_id} — server ran out of GPU memory\n"
             f"  [dim]{exc.log_snippet.splitlines()[0][:120]}[/dim]"
@@ -1531,7 +1946,9 @@ def _run_config(
         )
         conn.commit()
     except Exception as exc:
-        raise RuntimeError(f"FATAL: Failed to mark config {config_id} complete: {exc}") from exc
+        raise RuntimeError(
+            f"FATAL: Failed to mark config {config_id} complete: {exc}"
+        ) from exc
 
     # Update progress state
     completed = progress_state.get("completed_configs", [])
@@ -1560,7 +1977,10 @@ def _run_config(
         logger.info(
             "Config %s complete: %d warm speed_short results, median TG=%.2f t/s, "
             "thermal_events=%d",
-            config_id, len(warm_tgs), median_tg, thermal_events_total,
+            config_id,
+            len(warm_tgs),
+            median_tg,
+            thermal_events_total,
         )
         console.print(
             f"  [green]Done:[/green] {len(warm_tgs)} warm results, "
@@ -1569,7 +1989,9 @@ def _run_config(
         )
     else:
         logger.warning("Config %s: no valid warm speed_short results", config_id)
-        console.print(f"  [yellow]Warning:[/yellow] No valid warm results for {config_id}")
+        console.print(
+            f"  [yellow]Warning:[/yellow] No valid warm results for {config_id}"
+        )
 
     return True
 
@@ -1577,6 +1999,7 @@ def _run_config(
 # ---------------------------------------------------------------------------
 # Main campaign runner
 # ---------------------------------------------------------------------------
+
 
 def run_campaign(
     campaign_id: str,
@@ -1604,13 +2027,15 @@ def run_campaign(
     """
     _effective_lab_root = _derive_lab_root(baseline_path)
     _eff_results_dir = _effective_lab_root / "results"
-    _eff_logs_dir    = _effective_lab_root / "logs"
-    _eff_db_dir      = _effective_lab_root / "db"
-    _eff_state_dir   = _effective_lab_root / "state"
-    _eff_db_path     = _eff_db_dir / "lab.sqlite"
-    _eff_state_file  = _eff_state_dir / "progress.json"
+    _eff_logs_dir = _effective_lab_root / "logs"
+    _eff_db_dir = _effective_lab_root / "db"
+    _eff_state_dir = _effective_lab_root / "state"
+    _eff_db_path = _eff_db_dir / "lab.sqlite"
+    _eff_state_file = _eff_state_dir / "progress.json"
 
-    effective_campaign_id = _derive_effective_campaign_id(campaign_id, values_override, mode_flag)
+    effective_campaign_id = _derive_effective_campaign_id(
+        campaign_id, values_override, mode_flag
+    )
 
     _run_start_time = time.monotonic()
 
@@ -1618,7 +2043,9 @@ def run_campaign(
     logger.info("=" * 70)
     logger.info(
         "QuantMap campaign starting: %s  dry_run=%s  baseline=%s",
-        effective_campaign_id, dry_run, baseline_path,
+        effective_campaign_id,
+        dry_run,
+        baseline_path,
     )
     if effective_campaign_id != campaign_id:
         if mode_flag == "quick":
@@ -1629,7 +2056,9 @@ def run_campaign(
             _scope_reason = "--values scope"
         logger.info(
             "Effective run ID (%s): %s  (parent campaign: %s)",
-            _scope_reason, effective_campaign_id, campaign_id,
+            _scope_reason,
+            effective_campaign_id,
+            campaign_id,
         )
         console.print(
             f"[yellow]Effective run ID:[/yellow] {effective_campaign_id}  "
@@ -1637,11 +2066,10 @@ def run_campaign(
         )
     if _effective_lab_root != LAB_ROOT:
         logger.info(
-            "Lab root (namespaced): %s", _effective_lab_root,
+            "Lab root (namespaced): %s",
+            _effective_lab_root,
         )
-        console.print(
-            f"[dim]Lab root (namespaced): {_effective_lab_root}[/dim]"
-        )
+        console.print(f"[dim]Lab root (namespaced): {_effective_lab_root}[/dim]")
     else:
         logger.info("Lab root (default): %s", _effective_lab_root)
     logger.info("=" * 70)
@@ -1676,7 +2104,9 @@ def run_campaign(
         configs = [c for c in configs if c["variable_value"] in values_override]
         logger.info(
             "--values override: using %d/%d configs (values=%s)",
-            len(configs), original_count, values_override,
+            len(configs),
+            original_count,
+            values_override,
         )
         console.print(
             f"[yellow]--values override:[/yellow] {len(configs)} of "
@@ -1701,13 +2131,15 @@ def run_campaign(
     if "cycles_per_config" in campaign:
         logger.info(
             "Campaign YAML overrides cycles_per_config: %d → %d",
-            lab_config.get("cycles_per_config", 3), campaign["cycles_per_config"],
+            lab_config.get("cycles_per_config", 3),
+            campaign["cycles_per_config"],
         )
         lab_config["cycles_per_config"] = campaign["cycles_per_config"]
     if "requests_per_cycle" in campaign:
         logger.info(
             "Campaign YAML overrides requests_per_cycle: %d → %d",
-            lab_config.get("requests_per_cycle", 6), campaign["requests_per_cycle"],
+            lab_config.get("requests_per_cycle", 6),
+            campaign["requests_per_cycle"],
         )
         lab_config["requests_per_cycle"] = campaign["requests_per_cycle"]
 
@@ -1718,27 +2150,31 @@ def run_campaign(
         lab_config["cycles_per_config"] = STANDARD_CYCLES_PER_CONFIG
         logger.info(
             "--mode standard: overriding cycles_per_config %d → %d (STANDARD_CYCLES_PER_CONFIG)",
-            _before, STANDARD_CYCLES_PER_CONFIG,
+            _before,
+            STANDARD_CYCLES_PER_CONFIG,
         )
     elif mode_flag == "quick" and cycles_override is None:
         _before = lab_config.get("cycles_per_config", 5)
         lab_config["cycles_per_config"] = QUICK_CYCLES_PER_CONFIG
         logger.info(
             "--mode quick: overriding cycles_per_config %d -> %d (QUICK_CYCLES_PER_CONFIG)",
-            _before, QUICK_CYCLES_PER_CONFIG,
+            _before,
+            QUICK_CYCLES_PER_CONFIG,
         )
 
     # Layer 3: CLI flags override everything
     if cycles_override is not None:
         logger.info(
             "CLI --cycles overrides cycles_per_config: %d → %d",
-            lab_config.get("cycles_per_config", 3), cycles_override,
+            lab_config.get("cycles_per_config", 3),
+            cycles_override,
         )
         lab_config["cycles_per_config"] = cycles_override
     if requests_per_cycle_override is not None:
         logger.info(
             "CLI --requests-per-cycle overrides requests_per_cycle: %d → %d",
-            lab_config.get("requests_per_cycle", 6), requests_per_cycle_override,
+            lab_config.get("requests_per_cycle", 6),
+            requests_per_cycle_override,
         )
         lab_config["requests_per_cycle"] = requests_per_cycle_override
 
@@ -1790,8 +2226,10 @@ def run_campaign(
     )
     logger.info(
         "Run plan: mode=%s  effective_id=%s  configs=%d  cycles=%d  reqs=%d",
-        run_plan.run_mode, run_plan.effective_campaign_id,
-        len(run_plan.selected_configs), run_plan.cycles_per_config,
+        run_plan.run_mode,
+        run_plan.effective_campaign_id,
+        len(run_plan.selected_configs),
+        run_plan.cycles_per_config,
         run_plan.requests_per_cycle,
     )
 
@@ -1839,24 +2277,19 @@ def run_campaign(
             sys.exit(1)
 
         _mode_label = run_plan.mode_label
-        _mode_desc  = run_plan.mode_description
+        _mode_desc = run_plan.mode_description
         summary_lines = [
             f"DRY RUN — {campaign_id}",
             "  Readiness scope:  structural validation only — telemetry/runtime readiness is not proven",
             "  Next readiness:   run 'quantmap doctor' or 'quantmap status' before measurement",
             f"  Mode:              {_mode_label} — {_mode_desc}",
             f"  Baseline:          {baseline_path}",
-            f"  Lab root:          {_effective_lab_root}" + (
-                "  [namespaced]" if _effective_lab_root != LAB_ROOT else "  [default]"
-            ),
+            f"  Lab root:          {_effective_lab_root}"
+            + ("  [namespaced]" if _effective_lab_root != LAB_ROOT else "  [default]"),
         ]
         if effective_campaign_id != campaign_id:
-            summary_lines.append(
-                f"  Effective run ID:  {effective_campaign_id}"
-            )
-            summary_lines.append(
-                f"  Parent campaign:   {campaign_id}"
-            )
+            summary_lines.append(f"  Effective run ID:  {effective_campaign_id}")
+            summary_lines.append(f"  Parent campaign:   {campaign_id}")
         _all_vals = run_plan.all_campaign_values
         _sel_vals = run_plan.selected_values
         _untested = run_plan.untested_values
@@ -1865,9 +2298,7 @@ def run_campaign(
             f"  Tested values:     {_sel_vals}  ({len(_sel_vals)} of {len(_all_vals)} total)",
         ]
         if _untested:
-            summary_lines.append(
-                f"  Skipped values:    {_untested}  (not in this run)"
-            )
+            summary_lines.append(f"  Skipped values:    {_untested}  (not in this run)")
         if run_plan.filter_overrides:
             summary_lines.append(
                 f"  Filter overrides:  {run_plan.filter_overrides}  [{_mode_label} mode]"
@@ -1927,10 +2358,13 @@ def run_campaign(
     console.print("[bold]Running telemetry startup check...[/bold]")
     try:
         from src.telemetry_policy import enforce_current_run_readiness  # noqa: PLC0415
+
         enforce_current_run_readiness()
         console.print("[green]OK Telemetry startup check passed[/green]")
     except tele.TelemetryStartupError as exc:
-        console.print(f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}")
+        console.print(
+            f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}"
+        )
         logger.critical("Campaign aborted: %s", exc)
         sys.exit(1)
 
@@ -1940,6 +2374,7 @@ def run_campaign(
     # Import the resolved paths from server.py so we check the same binary and
     # model that will actually be used, respecting .env overrides.
     from src.server import SERVER_BIN as _sb_pre, MODEL_PATH as _mp_pre  # noqa: PLC0415
+
     _run_preflight_checks(_sb_pre, _mp_pre, _effective_lab_root)
 
     # -------------------------------------------------------------------------
@@ -1948,7 +2383,9 @@ def run_campaign(
     for d in [_eff_results_dir, _eff_logs_dir, _eff_db_dir, _eff_state_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    model_cfg = baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    model_cfg = (
+        baseline.get("model", {}) if isinstance(baseline.get("model", {}), dict) else {}
+    )
     model_identity = infer_model_identity(
         model_name=model_cfg.get("name"),
         model_path=model_cfg.get("path"),
@@ -1982,7 +2419,8 @@ def run_campaign(
     # active measurement phase. Sub-functions (_run_config, _run_cycle) reuse this connection.
     conn = get_connection(_eff_db_path)
     try:
-
+        _user_interrupted = False
+        measurement_hints: dict[str, Any] = {}
         # -------------------------------------------------------------------------
         # Register or resume campaign in DB (Phase 2 Scoped)
         # -------------------------------------------------------------------------
@@ -2009,14 +2447,18 @@ def run_campaign(
                         variable,
                         campaign.get("type", "primary_sweep"),
                         run_plan.run_mode,
-                        now_iso, now_iso,
-                        baseline_sha, campaign_sha,
+                        now_iso,
+                        now_iso,
+                        baseline_sha,
+                        campaign_sha,
                         campaign.get("rationale", ""),
                     ),
                 )
                 conn.commit()
             except Exception as exc:
-                raise RuntimeError(f"FATAL: Failed to register campaign {effective_campaign_id} in DB: {exc}") from exc
+                raise RuntimeError(
+                    f"FATAL: Failed to register campaign {effective_campaign_id} in DB: {exc}"
+                ) from exc
             logger.info("Campaign %s registered in database", effective_campaign_id)
         elif existing["status"] == "complete" and not resume:
             # U7: clarify what --resume actually does (skips completed configs,
@@ -2032,10 +2474,10 @@ def run_campaign(
         # will proceed. Early exits must not mutate the append-only evidence stream.
         _run_start_iso = datetime.now(timezone.utc).isoformat()
         _sentinel = {
-            "_run_separator":  True,
-            "_stream":         "separator",
-            "campaign_id":     effective_campaign_id,
-            "run_started_at":  _run_start_iso,
+            "_run_separator": True,
+            "_stream": "separator",
+            "campaign_id": effective_campaign_id,
+            "run_started_at": _run_start_iso,
         }
         write_raw_jsonl(raw_telemetry_jsonl_path, _sentinel)
         telemetry_stream_started = True
@@ -2043,6 +2485,7 @@ def run_campaign(
         # Forensics: Mark the start of a resumed run in the logs.
         if resume and existing is not None:
             from src.db import write_jsonl_marker  # noqa: PLC0415
+
             write_jsonl_marker(
                 raw_telemetry_jsonl_path,
                 "RESUME_CAMPAIGN",
@@ -2070,7 +2513,9 @@ def run_campaign(
             campaign_yaml_path=campaign_yaml_path,
             baseline_yaml_path=baseline_path,
             sampling_params=sampling_params,
-            cpu_affinity_policy=campaign.get("cpu_affinity_details", {}).get("default", "all_cores"),
+            cpu_affinity_policy=campaign.get("cpu_affinity_details", {}).get(
+                "default", "all_cores"
+            ),
             baseline=baseline,
             quantmap_identity=capture_quantmap_identity(),
             run_plan_snapshot=run_plan.to_snapshot_dict(),
@@ -2081,9 +2526,12 @@ def run_campaign(
         # Provider-specific NVML access lives behind the Phase 3 helper.
         try:
             from src.telemetry_nvml import get_gpu_vram_total_mb  # noqa: PLC0415
+
             snap["gpu_vram_total_mb"] = get_gpu_vram_total_mb()
             if snap["gpu_vram_total_mb"] is not None:
-                logger.info("gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"])
+                logger.info(
+                    "gpu_vram_total_mb captured: %.0f MB", snap["gpu_vram_total_mb"]
+                )
         except Exception as _exc:  # noqa: BLE001
             snap["gpu_vram_total_mb"] = None
             logger.warning("Could not capture gpu_vram_total_mb: %s", _exc)
@@ -2103,7 +2551,9 @@ def run_campaign(
                 )
                 conn.commit()
             except Exception as exc:
-                raise RuntimeError(f"FATAL: Failed to write campaign start snapshot: {exc}") from exc
+                raise RuntimeError(
+                    f"FATAL: Failed to write campaign start snapshot: {exc}"
+                ) from exc
         else:
             logger.debug(
                 "campaign_start_snapshot already exists for %s — preserving original",
@@ -2115,7 +2565,8 @@ def run_campaign(
         # that can be inspected or diffed without opening SQLite. (L1/U6 fix)
         canonical_campaign_yaml = (
             _existing_snap["campaign_yaml_content"]
-            if _existing_snap is not None and _existing_snap["campaign_yaml_content"] is not None
+            if _existing_snap is not None
+            and _existing_snap["campaign_yaml_content"] is not None
             else snap.get("campaign_yaml_content") or ""
         )
         yaml_snapshot_path = campaign_environment_dir / "campaign_yaml_snapshot.yaml"
@@ -2137,10 +2588,14 @@ def run_campaign(
 
             execution_environment = {}
             try:
-                execution_environment = json.loads(str(snap.get("execution_environment_json") or "{}"))
+                execution_environment = json.loads(
+                    str(snap.get("execution_environment_json") or "{}")
+                )
             except Exception:
                 execution_environment = {}
-            assert_backend_execution_allowed(_server_bin, execution_environment=execution_environment)
+            assert_backend_execution_allowed(
+                _server_bin, execution_environment=execution_environment
+            )
         except Exception as exc:
             from src.backend_execution_policy import BackendExecutionPolicyError  # noqa: PLC0415
 
@@ -2157,9 +2612,18 @@ def run_campaign(
                 "diagnostic": exc.assessment.diagnostic,
             }
             try:
-                write_raw_jsonl(raw_telemetry_jsonl_path, {"_backend_execution_policy_block": True, "_stream": "marker", **marker})
+                write_raw_jsonl(
+                    raw_telemetry_jsonl_path,
+                    {
+                        "_backend_execution_policy_block": True,
+                        "_stream": "marker",
+                        **marker,
+                    },
+                )
             except Exception as marker_exc:
-                logger.warning("Could not write backend execution policy marker: %s", marker_exc)
+                logger.warning(
+                    "Could not write backend execution policy marker: %s", marker_exc
+                )
 
             now_fail = datetime.now(timezone.utc).isoformat()
             conn.execute(
@@ -2210,7 +2674,9 @@ def run_campaign(
         )
         logger.info(
             "Campaign %s: variable=%s, %d configs, %d cycles each",
-            effective_campaign_id, variable, len(configs),
+            effective_campaign_id,
+            variable,
+            len(configs),
             lab_config.get("cycles_per_config", 5),
         )
 
@@ -2218,10 +2684,14 @@ def run_campaign(
         # Load crash recovery state
         # -------------------------------------------------------------------------
         progress_state = _read_progress(_eff_state_file) if resume else {}
-        if progress_state.get("campaign_id") and progress_state["campaign_id"] != effective_campaign_id:
+        if (
+            progress_state.get("campaign_id")
+            and progress_state["campaign_id"] != effective_campaign_id
+        ):
             logger.warning(
                 "progress.json is for a different campaign (%s vs %s) — starting fresh",
-                progress_state["campaign_id"], effective_campaign_id,
+                progress_state["campaign_id"],
+                effective_campaign_id,
             )
             progress_state = {}
 
@@ -2230,7 +2700,11 @@ def run_campaign(
         completed_config_ids = set(progress_state["completed_configs"])
 
         if completed_config_ids:
-            remaining = [c["config_id"] for c in configs if c["config_id"] not in completed_config_ids]
+            remaining = [
+                c["config_id"]
+                for c in configs
+                if c["config_id"] not in completed_config_ids
+            ]
             console.print(
                 f"[yellow]Resuming campaign {effective_campaign_id}: "
                 f"{len(completed_config_ids)}/{len(configs)} configs already complete, "
@@ -2245,7 +2719,10 @@ def run_campaign(
                 remaining,
             )
         else:
-            logger.info("Starting campaign %s fresh (no prior progress state found)", effective_campaign_id)
+            logger.info(
+                "Starting campaign %s fresh (no prior progress state found)",
+                effective_campaign_id,
+            )
 
         # -------------------------------------------------------------------------
         # Initialize telemetry collector
@@ -2288,8 +2765,11 @@ def run_campaign(
                 )
                 logger.info(
                     "Starting config %d/%d: %s (variable=%s, value=%s)",
-                    i + 1, len(configs), config_id,
-                    config.get("variable_name"), config.get("variable_value"),
+                    i + 1,
+                    len(configs),
+                    config_id,
+                    config.get("variable_name"),
+                    config.get("variable_value"),
                 )
 
                 # Cooldown between configs (skip before very first)
@@ -2312,6 +2792,7 @@ def run_campaign(
                     state_file=_eff_state_file,
                     logs_dir=_eff_logs_dir,
                     environment_dir=campaign_environment_dir,
+                    measurement_hints=measurement_hints,
                 )
 
                 if oom_boundary_sweep:
@@ -2321,7 +2802,8 @@ def run_campaign(
                             logger.warning(
                                 "OOM on config %s (consecutive=%d) — "
                                 "continuing to next config to confirm boundary",
-                                config_id, consecutive_ooms,
+                                config_id,
+                                consecutive_ooms,
                             )
                             console.print(
                                 f"  [yellow]OOM ({consecutive_ooms}/2) — "
@@ -2331,7 +2813,8 @@ def run_campaign(
                             logger.error(
                                 "OOM confirmed on config %s (consecutive=%d) — "
                                 "VRAM ceiling established; terminating sweep",
-                                config_id, consecutive_ooms,
+                                config_id,
+                                consecutive_ooms,
                             )
                             console.print(
                                 "\n[bold red]OOM boundary confirmed[/bold red] "
@@ -2340,9 +2823,11 @@ def run_campaign(
                             )
                             # Mark all remaining configs skipped_oom in DB + progress
                             # BEFORE break, so crash recovery skips them on resume.
-                            remaining_configs = configs[i + 1:]
+                            remaining_configs = configs[i + 1 :]
                             if remaining_configs:
-                                detail = "boundary confirmed by 2 consecutive OOM failures"
+                                detail = (
+                                    "boundary confirmed by 2 consecutive OOM failures"
+                                )
                                 try:
                                     for rc in remaining_configs:
                                         conn.execute(
@@ -2351,7 +2836,8 @@ def run_campaign(
                                                 config_values_json, status, failure_detail, started_at)
                                                VALUES (?, ?, ?, ?, ?, 'skipped_oom', ?, ?)""",
                                             (
-                                                rc["config_id"], effective_campaign_id,
+                                                rc["config_id"],
+                                                effective_campaign_id,
                                                 rc["variable_name"],
                                                 json.dumps(rc["variable_value"]),
                                                 json.dumps(rc["full_config"]),
@@ -2361,17 +2847,24 @@ def run_campaign(
                                         )
                                     conn.commit()
                                 except Exception as exc:
-                                    raise RuntimeError(f"FATAL: Failed to mark OOM-skipped configs in DB: {exc}") from exc
-                                skipped_ids = [rc["config_id"] for rc in remaining_configs]
+                                    raise RuntimeError(
+                                        f"FATAL: Failed to mark OOM-skipped configs in DB: {exc}"
+                                    ) from exc
+                                skipped_ids = [
+                                    rc["config_id"] for rc in remaining_configs
+                                ]
                                 completed = progress_state.get("completed_configs", [])
                                 for sid in skipped_ids:
                                     if sid not in completed:
                                         completed.append(sid)
                                 progress_state["completed_configs"] = completed
-                                _write_progress(progress_state, _eff_state_dir, _eff_state_file)
+                                _write_progress(
+                                    progress_state, _eff_state_dir, _eff_state_file
+                                )
                                 logger.info(
                                     "Marked %d configs as skipped_oom: %s",
-                                    len(skipped_ids), skipped_ids,
+                                    len(skipped_ids),
+                                    skipped_ids,
                                 )
                             break
                     else:
@@ -2379,25 +2872,37 @@ def run_campaign(
                             logger.info(
                                 "Config %s succeeded after %d OOM(s) — prior OOM was transient; "
                                 "resetting consecutive_ooms counter",
-                                config_id, consecutive_ooms,
+                                config_id,
+                                consecutive_ooms,
                             )
                         consecutive_ooms = 0
 
         except KeyboardInterrupt:
             campaign_exit_state = "INTERRUPTED"
             campaign_exit_detail = "Interrupted by user"
-            logger.warning("Campaign %s interrupted by user (KeyboardInterrupt)", effective_campaign_id)
-            console.print("\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]")
-            return
+            logger.warning(
+                "Campaign %s interrupted by user (KeyboardInterrupt)",
+                effective_campaign_id,
+            )
+            console.print(
+                "\n[yellow]Interrupted. Progress saved — resume with --resume[/yellow]"
+            )
+            _user_interrupted = True
         except Exception as exc:
             campaign_exit_state = "FAILED"
             campaign_exit_detail = str(exc)
-            logger.critical("Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True)
+            logger.critical(
+                "Campaign %s fatal error: %s", effective_campaign_id, exc, exc_info=True
+            )
             console.print(f"[bold red]Fatal error: {exc}[/bold red]")
             try:
                 conn.execute(
                     "UPDATE campaigns SET status='failed', failed_at=?, failure_reason=? WHERE id=?",
-                    (datetime.now(timezone.utc).isoformat(), str(exc), effective_campaign_id),
+                    (
+                        datetime.now(timezone.utc).isoformat(),
+                        str(exc),
+                        effective_campaign_id,
+                    ),
                 )
                 conn.commit()
             except Exception as db_exc:
@@ -2408,6 +2913,7 @@ def run_campaign(
         tele.shutdown()
         # Phase 2: Close scoped connection safely
         import contextlib
+
         with contextlib.suppress(Exception):
             conn.close()
 
@@ -2415,10 +2921,11 @@ def run_campaign(
         if raw_telemetry_jsonl_path and telemetry_stream_started:
             try:
                 from src.db import write_jsonl_marker  # noqa: PLC0415
+
                 write_jsonl_marker(
                     raw_telemetry_jsonl_path,
                     f"RUN_{campaign_exit_state}",
-                    {"details": campaign_exit_detail}
+                    {"details": campaign_exit_detail},
                 )
             except Exception as m_exc:
                 logger.warning("Could not append terminal marker: %s", m_exc)
@@ -2430,17 +2937,52 @@ def run_campaign(
                     raw_telemetry_jsonl_path,
                 )
             except Exception as _art_exc:
-                logger.warning("Could not register raw_telemetry_jsonl artifact: %s", _art_exc)
+                logger.warning(
+                    "Could not register raw_telemetry_jsonl artifact: %s", _art_exc
+                )
+
+    if _user_interrupted:
+        try:
+            with get_connection(_eff_db_path) as _intr_conn:
+                _me_intr = _fetch_campaign_evidence_summary(
+                    _intr_conn, effective_campaign_id
+                )
+            _finalize_interrupt_post_run_review(
+                campaign_id=campaign_id,
+                effective_campaign_id=effective_campaign_id,
+                measurement_evidence=_me_intr,
+                measurement_hints=measurement_hints,
+                db_path=_eff_db_path,
+                lab_root=_effective_lab_root,
+                model_identity=model_identity,
+                yolo_mode=yolo_mode,
+                run_plan=run_plan,
+                run_start_time=_run_start_time,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Interrupted campaign closeout failed (best-effort final review)"
+            )
+            console.print(
+                "[yellow]Interrupted — closeout or post-run review failed "
+                f"({type(exc).__name__}); exiting with code 130.[/yellow]"
+            )
+            raise SystemExit(130) from exc
+        raise SystemExit(130)
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)
     # -------------------------------------------------------------------------
+    measurement_evidence: CampaignEvidenceSummary
     with get_connection(_eff_db_path) as conn_final:
         conn_final.execute(
             "UPDATE campaigns SET status='complete', completed_at=? WHERE id=?",
             (datetime.now(timezone.utc).isoformat(), effective_campaign_id),
         )
         conn_final.commit()
+        measurement_evidence = _fetch_campaign_evidence_summary(
+            conn_final, effective_campaign_id
+        )
 
     _clear_progress(_eff_state_file)
 
@@ -2448,10 +2990,9 @@ def run_campaign(
 
     # Run analysis + scoring + report
     # Failure here does NOT mean data was lost — raw.jsonl and lab.sqlite are
-    # intact and rescore.py can replay the pipeline at any time. However, the
-    # runner MUST exit non-zero so automation (CI pipelines, batch scripts) can
-    # detect the failure. Exiting 0 when the report failed to generate is data
-    # falsification from the caller's perspective. (L5 fix)
+    # intact and rescore.py can replay the pipeline at any time.
+    # Process exit after final review follows CampaignOutcome.allows_success_style_review
+    # (not raw report_ok alone); report_ok remains evidence for the evaluator only.
     failure_cause = None
     failure_remediation = None
     report_ok = False
@@ -2463,6 +3004,7 @@ def run_campaign(
     _configs_total: int | None = None
     _configs_valid: int | None = None
     _configs_eliminated: int | None = None
+    scores: dict[str, Any] | None = None
     try:
         from src.score import score_campaign
         from src.report import generate_report
@@ -2475,10 +3017,14 @@ def run_campaign(
         yaml_filter_overrides = campaign.get("elimination_overrides") or {}
         effective_filter_overrides: dict | None = None
         if run_plan.filter_overrides or yaml_filter_overrides:
-            effective_filter_overrides = {**(run_plan.filter_overrides or {}), **yaml_filter_overrides}
+            effective_filter_overrides = {
+                **(run_plan.filter_overrides or {}),
+                **yaml_filter_overrides,
+            }
             logger.info(
                 "Effective filter overrides (mode=%s + campaign YAML): %s",
-                run_plan.run_mode, effective_filter_overrides,
+                run_plan.run_mode,
+                effective_filter_overrides,
             )
 
         # effective_campaign_id is the DB key for this run.  For full runs it
@@ -2503,7 +3049,9 @@ def run_campaign(
             _status_conn.commit()
 
         scores = score_campaign(
-            effective_campaign_id, _eff_db_path, baseline,
+            effective_campaign_id,
+            _eff_db_path,
+            baseline,
             campaign=campaign,
             filter_overrides=effective_filter_overrides,
             current_input=True,
@@ -2516,7 +3064,11 @@ def run_campaign(
         _winner_tg = None
         if _winner_config_id is not None:
             _passing = scores.get("passing", {})
-            _winner_stats = _passing.get(_winner_config_id, {}) if isinstance(_passing, dict) else {}
+            _winner_stats = (
+                _passing.get(_winner_config_id, {})
+                if isinstance(_passing, dict)
+                else {}
+            )
             _winner_tg_raw = _winner_stats.get("warm_tg_median")
             if isinstance(_winner_tg_raw, (int, float)):
                 _winner_tg = float(_winner_tg_raw)
@@ -2548,8 +3100,11 @@ def run_campaign(
                 build_effective_filter_policy,
                 build_override_layers,
             )
+
             _scoring_profile = scores.get("scoring_profile")
-            _base_gates: dict = dict(_scoring_profile.gate_overrides) if _scoring_profile else {}
+            _base_gates: dict = (
+                dict(_scoring_profile.gate_overrides) if _scoring_profile else {}
+            )
             _snap_id = scores.get("methodology_snapshot_id")
             _efp_base_source: dict = {
                 "source": "methodology_snapshot" if _snap_id else "unknown",
@@ -2591,12 +3146,17 @@ def run_campaign(
         except Exception as _efp_exc:
             logger.warning(
                 "Could not persist effective_filter_policy_json for %s (non-fatal): %s",
-                effective_campaign_id, _efp_exc,
+                effective_campaign_id,
+                _efp_exc,
             )
 
         with console.status("Generating artifacts..."):
             generate_report(
-                effective_campaign_id, _eff_db_path, baseline, scores, stats,
+                effective_campaign_id,
+                _eff_db_path,
+                baseline,
+                scores,
+                stats,
                 campaign=campaign,
                 lab_root=_effective_lab_root,
                 run_plan=run_plan,
@@ -2608,22 +3168,31 @@ def run_campaign(
         v2_ok = True
         try:
             from src.report_campaign import generate_campaign_report  # noqa: PLC0415
+
             generate_campaign_report(
-                effective_campaign_id, _eff_db_path, baseline, scores, stats,
+                effective_campaign_id,
+                _eff_db_path,
+                baseline,
+                scores,
+                stats,
                 campaign=campaign,
                 lab_root=_effective_lab_root,
             )
         except Exception as _v2_exc:
             v2_ok = False
-            logger.warning(
-                "run-reports.md generation failed (non-fatal): %s", _v2_exc
-            )
+            logger.warning("run-reports.md generation failed (non-fatal): %s", _v2_exc)
             try:
                 _v2_path = report_paths(
-                    _effective_lab_root, model_identity, effective_campaign_id, create=False
+                    _effective_lab_root,
+                    model_identity,
+                    effective_campaign_id,
+                    create=False,
                 ).get(
                     ARTIFACT_RUN_REPORTS,
-                    _effective_lab_root / "results" / effective_campaign_id / FILENAME_RUN_REPORTS,
+                    _effective_lab_root
+                    / "results"
+                    / effective_campaign_id
+                    / FILENAME_RUN_REPORTS,
                 )
                 _register_run_reports_failure_artifact(
                     _eff_db_path,
@@ -2632,12 +3201,15 @@ def run_campaign(
                     _v2_exc,
                 )
             except Exception as _art_exc:
-                logger.warning("Could not record run-reports.md failure artifact: %s", _art_exc)
+                logger.warning(
+                    "Could not record run-reports.md failure artifact: %s", _art_exc
+                )
 
         # Generate metadata.json (4th formal artifact).
         # Non-fatal — failures are logged and registered in DB as failed status.
         try:
             from src.export import generate_metadata_json  # noqa: PLC0415
+
             generate_metadata_json(
                 effective_campaign_id,
                 _eff_db_path,
@@ -2674,9 +3246,14 @@ def run_campaign(
             _status_conn.commit()
 
     except Exception as exc:
-        logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
-        failure_cause = "Post-campaign analysis failed."
-        failure_remediation = "Run 'quantmap rescore' to retry analysis."
+        if analysis_ok:
+            logger.error("Report/export generation failed: %s", exc, exc_info=True)
+            failure_cause = "Report/export generation failed."
+            failure_remediation = "Review logs and lab artifacts; measurement data may remain valid in the database."
+        else:
+            logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
+            failure_cause = "Post-campaign analysis failed."
+            failure_remediation = "Run 'quantmap rescore' to retry analysis."
         with get_connection(_eff_db_path) as _status_conn:
             now_status = datetime.now(timezone.utc).isoformat()
             if analysis_ok:
@@ -2706,53 +3283,68 @@ def run_campaign(
                 )
             _status_conn.commit()
 
-    # -------------------------------------------------------------------------
-    # Post-run review screen
-    # -------------------------------------------------------------------------
-    _diagnostics_path: str | None = None
-    try:
-        _eff_diagnostics_folder = artifact_dir(
-            _effective_lab_root,
-            "logs",
-            model_identity,
-            effective_campaign_id,
-            create=False,
-        )
-        _diagnostics_path = str(_eff_diagnostics_folder)
-    except Exception as _diag_exc:
-        logger.warning("Could not resolve diagnostics path: %s", _diag_exc)
-
-    # Collect canonical artifact paths for the review screen.
-    # get_campaign_artifact_paths is read-only: DB + filesystem discovery, no writes.
-    # Called after all artifact writers finish so DB rows are present.
-    _artifact_list: list[dict] | None = None
-    try:
-        _artifact_list = get_campaign_artifact_paths(
-            _effective_lab_root, effective_campaign_id, db_path=_eff_db_path
-        )
-        if _artifact_list is not None:
-            _art_ok_map = {
-                ARTIFACT_CAMPAIGN_SUMMARY: report_ok,
-                ARTIFACT_RUN_REPORTS: v2_ok,
-                ARTIFACT_METADATA: meta_ok,
-            }
-            for _art in _artifact_list:
-                _mapped_ok = _art_ok_map.get(_art["artifact_type"])
-                if _mapped_ok is False:
-                    _art["db_status"] = "failed"
-                    _art["exists"] = False
-    except Exception as _art_list_exc:
-        logger.warning("Could not retrieve artifact paths for review screen: %s", _art_list_exc)
-
-    ui.render_post_run_review(
-        campaign_id=effective_campaign_id,
+    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
+    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
+    with get_connection(_eff_db_path) as _camp_conn:
+        _camp_row = _camp_conn.execute(
+            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
+            (effective_campaign_id,),
+        ).fetchone()
+    _camp_status = (
+        str(_camp_row["status"])
+        if _camp_row and _camp_row["status"] is not None
+        else None
+    )
+    _camp_analysis = (
+        str(_camp_row["analysis_status"])
+        if _camp_row and _camp_row["analysis_status"] is not None
+        else None
+    )
+    _camp_report = (
+        str(_camp_row["report_status"])
+        if _camp_row and _camp_row["report_status"] is not None
+        else None
+    )
+    _camp_failure_reason = (
+        str(_camp_row["failure_reason"])
+        if _camp_row and _camp_row["failure_reason"] is not None
+        else None
+    )
+    _unrankable_count = (
+        len(scores["unrankable"])
+        if scores and isinstance(scores.get("unrankable"), dict)
+        else 0
+    )
+    # Status lanes live on CampaignOutcomeInputs; evidence carries measurement-derived
+    # counters plus scoring-phase enrichments only (rankable count / winner flag).
+    _evidence_for_outcome = dataclasses.replace(
+        measurement_evidence,
+        rankable_config_count=(_configs_valid if analysis_ok else None),
+        winner_present=_winner_config_id is not None,
+    )
+    _outcome_inputs = CampaignOutcomeInputs(
+        campaign_id=campaign_id,
+        effective_campaign_id=effective_campaign_id,
+        campaign_db_status=_camp_status,
+        analysis_status=_camp_analysis,
+        report_status=_camp_report,
+        failure_reason=_camp_failure_reason,
+        evidence=_evidence_for_outcome,
+        scoring_completed=analysis_ok,
+        passing_count=_configs_valid or 0,
+        eliminated_count=_configs_eliminated or 0,
+        unrankable_count=_unrankable_count,
+        winner_config_id=_winner_config_id,
+        unrankable_reason=None,
         report_ok=report_ok,
-        artifacts=_artifact_list,
-        diagnostics_path=_diagnostics_path,
-        yolo_mode=yolo_mode,
-        failure_cause=failure_cause,
-        failure_remediation=failure_remediation,
-        metrics=ui.PostRunReviewMetrics(
+        run_reports_ok=v2_ok,
+        metadata_ok=meta_ok,
+        last_backend_failure_reason=_last_br_val,
+    )
+    _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
+    _review_read_model = project_final_review(
+        _campaign_outcome,
+        metrics=FinalReviewMetricsSnapshot(
             winner_config_id=_winner_config_id,
             winner_tg=_winner_tg,
             configs_total=_configs_total,
@@ -2761,17 +3353,40 @@ def run_campaign(
             run_mode=run_plan.run_mode if run_plan else None,
             elapsed_seconds=time.monotonic() - _run_start_time,
         ),
+        runner_failure_cause=failure_cause,
+        runner_failure_remediation=failure_remediation,
     )
 
-    if not report_ok:
-        sys.exit(1)
+    _render_campaign_post_run_review_screen(
+        effective_campaign_id=effective_campaign_id,
+        read_model=_review_read_model,
+        lab_root=_effective_lab_root,
+        model_identity=model_identity,
+        db_path=_eff_db_path,
+        yolo_mode=yolo_mode,
+        artifact_ok_map={
+            ARTIFACT_CAMPAIGN_SUMMARY: report_ok,
+            ARTIFACT_RUN_REPORTS: v2_ok,
+            ARTIFACT_METADATA: meta_ok,
+        },
+    )
+
+    _final_exit = _exit_code_for_campaign_outcome(_campaign_outcome)
+    if _final_exit != 0:
+        sys.exit(_final_exit)
 
 
 # ---------------------------------------------------------------------------
 # Logging setup
 # ---------------------------------------------------------------------------
 
-def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: str = "runner", console_logging: bool = True) -> None:
+
+def _setup_logging(
+    campaign_id: str,
+    logs_dir: Path | None = None,
+    log_prefix: str = "runner",
+    console_logging: bool = True,
+) -> None:
     """Configure logging to both console and file.
 
     log_prefix controls the filename prefix:
@@ -2835,7 +3450,9 @@ def _setup_logging(campaign_id: str, logs_dir: Path | None = None, log_prefix: s
     logger.info("Log file: %s", log_file)
 
 
-def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False) -> None:
+def _run_preflight_checks(
+    server_bin: Path, model_path: Path, lab_root: Path, is_dry_run: bool = False
+) -> None:
     """Run environment checks and print a compact summary if issues are found."""
     from src import doctor
     from src.diagnostics import Status
@@ -2871,7 +3488,6 @@ def _run_preflight_checks(server_bin: Path, model_path: Path, lab_root: Path, is
             # but user requested it stay sharp. Skipping passes for now.
             pass
     console.print()
-
 
 
 def _parse_values_arg(raw: str) -> list[int | str]:
@@ -2913,10 +3529,12 @@ Examples:
     )
     parser.add_argument(
         "--campaign",
-        help="Campaign ID (matches configs/campaigns/{id}.yaml); required unless --list is used"
+        help="Campaign ID (matches configs/campaigns/{id}.yaml); required unless --list is used",
     )
     parser.add_argument(
-        "--baseline", default=None, metavar="PATH",
+        "--baseline",
+        default=None,
+        metavar="PATH",
         help=(
             "Path to a baseline YAML file (default: configs/baseline.yaml). "
             "Overrides the default for this run only — useful when benchmarking "
@@ -2924,35 +3542,50 @@ Examples:
         ),
     )
     parser.add_argument(
-        "--list", action="store_true",
-        help="Show all campaigns in the lab database (completed, running, pending) and exit"
+        "--list",
+        action="store_true",
+        help="Show all campaigns in the lab database (completed, running, pending) and exit",
     )
     parser.add_argument(
-        "--validate", action="store_true",
-        help="Check campaign YAML, request files, and baseline completeness without running"
+        "--validate",
+        action="store_true",
+        help="Check campaign YAML, request files, and baseline completeness without running",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Show what would be run without executing measurements"
+        "--dry-run",
+        action="store_true",
+        help="Show what would be run without executing measurements",
     )
     parser.add_argument(
-        "--resume", action="store_true", default=True,
-        help="Resume from crash recovery state (default: True)"
+        "--resume",
+        action="store_true",
+        default=True,
+        help="Resume from crash recovery state (default: True)",
     )
     parser.add_argument(
-        "--no-resume", action="store_false", dest="resume",
-        help="Start fresh, ignoring crash recovery state"
+        "--no-resume",
+        action="store_false",
+        dest="resume",
+        help="Start fresh, ignoring crash recovery state",
     )
     parser.add_argument(
-        "--cycles", type=int, default=None, metavar="N",
-        help="Override cycles_per_config (baseline.yaml and campaign YAML) for this run"
+        "--cycles",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override cycles_per_config (baseline.yaml and campaign YAML) for this run",
     )
     parser.add_argument(
-        "--requests-per-cycle", type=int, default=None, metavar="N",
-        help="Override requests_per_cycle (baseline.yaml and campaign YAML) for this run"
+        "--requests-per-cycle",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Override requests_per_cycle (baseline.yaml and campaign YAML) for this run",
     )
     parser.add_argument(
-        "--mode", default=None, choices=["full", "standard", "quick"],
+        "--mode",
+        default=None,
+        choices=["full", "standard", "quick"],
         metavar="MODE",
         help=(
             "Run mode: 'full' (default), 'standard', or 'quick'. "
@@ -2965,7 +3598,9 @@ Examples:
         ),
     )
     parser.add_argument(
-        "--values", default=None, metavar="VALUE_LIST",
+        "--values",
+        default=None,
+        metavar="VALUE_LIST",
         help=(
             "Comma-separated list of campaign variable values to test (e.g. 30 or 30,80,999). "
             "Triggers Custom mode: an isolated run scoped to exactly these values. "
@@ -3003,7 +3638,9 @@ if __name__ == "__main__":
     if args.values is not None:
         _values_override = _parse_values_arg(args.values)
         if not _values_override:
-            console.print("[bold red]error:[/bold red] --values is empty — provide at least one value")
+            console.print(
+                "[bold red]error:[/bold red] --values is empty — provide at least one value"
+            )
             sys.exit(2)
 
     # Resolve mode flag — None means Full (default); "full" is explicitly the default
@@ -3026,7 +3663,9 @@ if __name__ == "__main__":
         list_campaigns()
         sys.exit(0)
     if not args.campaign:
-        console.print(f"[bold red]{ui.SYM_FAIL} error:[/bold red] --campaign is required (or use --list to see campaigns)")
+        console.print(
+            f"[bold red]{ui.SYM_FAIL} error:[/bold red] --campaign is required (or use --list to see campaigns)"
+        )
         sys.exit(2)
     if args.validate:
         ok = validate_campaign(
