@@ -21,18 +21,18 @@ from src.campaign_outcome.projection import project_final_review
 
 
 def _base_evidence(**kwargs) -> CampaignEvidenceSummary:
-    defaults = dict(
-        configs_total=2,
-        configs_completed=2,
-        configs_oom=0,
-        configs_skipped_oom=0,
-        configs_degraded=0,
-        cycles_attempted=4,
-        cycles_complete=4,
-        cycles_invalid=0,
-        has_any_success_request=True,
-        campaign_db_status="complete",
-    )
+    defaults = {
+        "configs_total": 2,
+        "configs_completed": 2,
+        "configs_oom": 0,
+        "configs_skipped_oom": 0,
+        "configs_degraded": 0,
+        "cycles_attempted": 4,
+        "cycles_complete": 4,
+        "cycles_invalid": 0,
+        "has_any_success_request": True,
+        "campaign_db_status": "complete",
+    }
     defaults.update(kwargs)
     return CampaignEvidenceSummary(**defaults)
 
@@ -551,14 +551,14 @@ def test_distinct_failure_detail_analysis_branches():
 
 def test_distinct_failure_detail_report_branches():
     base_ev = _base_evidence()
-    common = dict(
-        campaign_id="c",
-        effective_campaign_id="c",
-        scoring_completed=True,
-        passing_count=1,
-        winner_config_id="w",
-        evidence=base_ev,
-    )
+    common = {
+        "campaign_id": "c",
+        "effective_campaign_id": "c",
+        "scoring_completed": True,
+        "passing_count": 1,
+        "winner_config_id": "w",
+        "evidence": base_ev,
+    }
     failed = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(**common, report_ok=False, report_status="failed")
     )

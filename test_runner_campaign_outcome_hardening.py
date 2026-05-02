@@ -23,6 +23,10 @@ from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMM
 from src.campaign_outcome.evaluate import evaluate_campaign_outcome
 
 
+def _raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> bool:
+    raise KeyboardInterrupt()
+
+
 def _minimal_run_campaign_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Console:
@@ -38,12 +42,10 @@ def _minimal_run_campaign_env(
     test_console = Console(file=buf, force_terminal=False, no_color=True, width=200)
     monkeypatch.setattr(runner, "console", test_console)
 
-    monkeypatch.setattr(runner, "_derive_lab_root", lambda _: tmp_path)
-    monkeypatch.setattr(
-        runner, "infer_model_identity", lambda *args, **kwargs: "test_model"
-    )
-    monkeypatch.setattr(runner, "_setup_logging", lambda *args, **kwargs: None)
-    monkeypatch.setattr(runner, "_run_preflight_checks", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runner, "_derive_lab_root", lambda _campaign: tmp_path)
+    monkeypatch.setattr(runner, "infer_model_identity", lambda *_a, **_k: "test_model")
+    for runner_attr in ("_setup_logging", "_run_preflight_checks"):
+        monkeypatch.setattr(runner, runner_attr, lambda *_a, **_k: None)
     monkeypatch.setattr(
         "src.telemetry_policy.enforce_current_run_readiness",
         lambda *args, **kwargs: None,
@@ -51,41 +53,34 @@ def _minimal_run_campaign_env(
     monkeypatch.setattr(
         runner,
         "artifact_dir",
-        lambda *args, **kwargs: (
-            tmp_path / "artifacts" / "logs" / "test_model" / "test_camp"
-        ),
+        lambda *_a, **_k: tmp_path / "artifacts" / "logs" / "test_model" / "test_camp",
     )
-    monkeypatch.setattr(runner, "_run_config", lambda *args, **kwargs: True)
-    monkeypatch.setattr(runner, "_hash_file", lambda *args, **kwargs: "abc")
-    monkeypatch.setattr(
-        "src.report_campaign.generate_campaign_report",
-        lambda *args, **kwargs: tmp_path / "run-reports.md",
-    )
-    monkeypatch.setattr(
-        "src.export.generate_metadata_json",
-        lambda *args, **kwargs: tmp_path / "metadata.json",
-    )
-    monkeypatch.setattr(
-        "src.trust_identity.summarize_report_artifact_status",
-        lambda *args, **kwargs: "complete",
-    )
+    monkeypatch.setattr(runner, "_run_config", lambda *_a, **_k: True)
+    monkeypatch.setattr(runner, "_hash_file", lambda *_a, **_k: "abc")
+    module_stub_values = {
+        "src.report_campaign.generate_campaign_report": tmp_path / "run-reports.md",
+        "src.export.generate_metadata_json": tmp_path / "metadata.json",
+        "src.trust_identity.summarize_report_artifact_status": "complete",
+    }
+    for target, value in module_stub_values.items():
+        monkeypatch.setattr(target, lambda *_a, _v=value, **_k: _v)
     monkeypatch.setattr("src.db.write_jsonl_marker", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.telemetry.shutdown", lambda: None)
 
-    campaign = {"id": "test_camp", "variable": "n_gpu_layers", "values": [10]}
-    baseline = {
+    campaign_value = {"id": "test_camp", "variable": "n_gpu_layers", "values": [10]}
+    baseline_value = {
         "requests": {"a": "a.json"},
         "lab": {"cycles_per_config": 1, "requests_per_cycle": 1},
     }
-    monkeypatch.setattr(runner, "load_campaign", lambda _: campaign)
-    monkeypatch.setattr(runner, "load_baseline", lambda _: baseline)
+    monkeypatch.setattr(runner, "load_campaign", lambda _campaign_id: campaign_value)
+    monkeypatch.setattr(runner, "load_baseline", lambda _path: baseline_value)
     monkeypatch.setattr(
         runner, "validate_campaign_purity", lambda *args: "n_gpu_layers"
     )
     monkeypatch.setattr(
         runner,
         "build_config_list",
-        lambda *args: [
+        lambda *_args: [
             {
                 "config_id": "test_10",
                 "variable_name": "n_gpu_layers",
@@ -122,9 +117,7 @@ def _minimal_run_campaign_env(
             "sha256": None,
         },
     ]
-    monkeypatch.setattr(
-        runner, "get_campaign_artifact_paths", lambda *args, **kwargs: _fake_artifacts
-    )
+    monkeypatch.setattr(runner, "get_campaign_artifact_paths", lambda *_a, **_k: _fake_artifacts)
 
     return test_console
 
@@ -458,7 +451,7 @@ def test_keyboard_interrupt_exits_130_when_finalize_raises(
     monkeypatch.setattr(
         runner,
         "_run_config",
-        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+        _raise_keyboard_interrupt,
     )
 
     def _boom(**kw: object) -> None:
@@ -498,7 +491,7 @@ def test_keyboard_interrupt_exits_130_when_evidence_fetch_fails(
     monkeypatch.setattr(
         runner,
         "_run_config",
-        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+        _raise_keyboard_interrupt,
     )
 
     def _locked_db(*_a: object, **_k: object):
@@ -536,7 +529,7 @@ def test_keyboard_interrupt_always_system_exit_130_when_finalize_returns_normall
     monkeypatch.setattr(
         runner,
         "_run_config",
-        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+        _raise_keyboard_interrupt,
     )
     monkeypatch.setattr(
         runner,

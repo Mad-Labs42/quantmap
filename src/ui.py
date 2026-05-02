@@ -282,14 +282,11 @@ QUANTMAP_THEME = Theme(
 _GLOBAL_CONSOLE: Console | None = None
 
 
-def get_console(
-    force_new: bool = False, force_utf8_if_bootstrap: bool = False
-) -> Console:
+def get_console(force_new: bool = False) -> Console:
     """Returns a unified, capability-aware rich.Console.
 
     Arguments:
         force_new: Always create a fresh instance.
-        force_utf8_if_bootstrap: Internal use for testing bootstrap states.
     """
     global _GLOBAL_CONSOLE
     if _GLOBAL_CONSOLE is not None and not force_new:
