@@ -194,6 +194,12 @@ class FinalReviewReadModel:
     Every boolean and headline here is already decided upstream (evaluator +
     projection). Callers render as-is; do not reinterpret DB or raw flags to
     change success vs failure messaging.
+
+    ``artifact_block_mode`` is decided in projection: ``full`` surfaces the
+    canonical artifact list for inspectable outcomes; ``diagnostics_only`` keeps
+    log/diagnostic guidance without presenting the bundle as trustworthy outputs;
+    ``hidden`` is reserved for rare cases where neither should appear (unused in
+    Slice 1 projection).
     """
 
     headline_status: str

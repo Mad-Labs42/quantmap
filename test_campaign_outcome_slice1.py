@@ -12,6 +12,7 @@ from src.campaign_outcome.contracts import (
     CampaignOutcomeInputs,
     CampaignOutcomeKind,
     FailureDomain,
+    FinalReviewReadModel,
     MeasurementPhaseVerdict,
     PostRunVerdict,
 )
@@ -579,6 +580,149 @@ def test_distinct_failure_detail_report_branches():
         partial.failure_detail
         == "Report bundle partially generated (secondary artifacts)."
     )
+
+
+def test_project_final_review_artifact_block_mode_reflects_outcome_truth() -> None:
+    """Projection picks artifact prominence from outcome kind — not filesystem state."""
+    happy = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(),
+        )
+    )
+    assert project_final_review(happy).artifact_block_mode == "full"
+
+    partial = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="failed",
+            evidence=_base_evidence(),
+        )
+    )
+    assert partial.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert project_final_review(partial).artifact_block_mode == "full"
+
+    degraded = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=0,
+            winner_config_id=None,
+            report_status="complete",
+            evidence=_base_evidence(configs_degraded=1),
+        )
+    )
+    assert degraded.outcome_kind == CampaignOutcomeKind.DEGRADED
+    assert project_final_review(degraded).artifact_block_mode == "full"
+
+    failed = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            evidence=_base_evidence(
+                has_any_success_request=False,
+                cycles_attempted=2,
+                cycles_invalid=2,
+                cycles_complete=0,
+            ),
+        )
+    )
+    assert failed.outcome_kind == CampaignOutcomeKind.FAILED
+    assert project_final_review(failed).artifact_block_mode == "diagnostics_only"
+
+    insufficient = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            evidence=CampaignEvidenceSummary(
+                configs_total=0,
+                configs_completed=0,
+                cycles_attempted=0,
+                cycles_complete=0,
+                cycles_invalid=0,
+                has_any_success_request=False,
+            ),
+        )
+    )
+    assert insufficient.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert project_final_review(insufficient).artifact_block_mode == "diagnostics_only"
+
+    aborted = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            user_interrupted=True,
+            evidence=_base_evidence(),
+        )
+    )
+    assert aborted.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert project_final_review(aborted).artifact_block_mode == "diagnostics_only"
+
+
+def test_render_post_run_review_from_read_model_skips_artifact_block_when_not_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UI stays presentation-only: artifact table follows read_model.artifact_block_mode."""
+    import src.ui as ui_module
+
+    artifact_calls: list[str] = []
+
+    def _capture_artifacts(*_a: object, **_k: object) -> None:
+        artifact_calls.append("render_artifact_block")
+
+    monkeypatch.setattr(ui_module, "render_artifact_block", _capture_artifacts)
+
+    artifacts = [{"artifact_type": "t", "filename": "f", "path": "/x", "exists": True}]
+    rm_diag = FinalReviewReadModel(
+        headline_status="Failed",
+        outcome_kind=CampaignOutcomeKind.FAILED,
+        show_next_actions=False,
+        success_style_diagnostics=False,
+        failure_cause="e",
+        failure_remediation=None,
+        report_generation_ok=False,
+        artifact_block_mode="diagnostics_only",
+    )
+    ui_module.render_post_run_review_from_read_model(
+        campaign_id="c",
+        read_model=rm_diag,
+        artifacts=artifacts,
+        diagnostics_path=None,
+    )
+    assert artifact_calls == []
+
+    rm_full = FinalReviewReadModel(
+        headline_status="Success",
+        outcome_kind=CampaignOutcomeKind.SUCCESS,
+        show_next_actions=True,
+        success_style_diagnostics=True,
+        failure_cause=None,
+        failure_remediation=None,
+        report_generation_ok=True,
+        artifact_block_mode="full",
+    )
+    ui_module.render_post_run_review_from_read_model(
+        campaign_id="c",
+        read_model=rm_full,
+        artifacts=artifacts,
+        diagnostics_path=None,
+    )
+    assert artifact_calls == ["render_artifact_block"]
 
 
 def test_projection_prefers_evaluator_failure_detail_over_runner_cause():

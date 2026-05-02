@@ -7,11 +7,32 @@ only selects headline copy, failure strings, and which optional sections apply.
 from __future__ import annotations
 
 from src.campaign_outcome.contracts import (
+    ArtifactBlockMode,
     CampaignOutcome,
     CampaignOutcomeKind,
     FinalReviewMetricsSnapshot,
     FinalReviewReadModel,
 )
+
+
+def _artifact_block_mode_for_outcome(outcome: CampaignOutcome) -> ArtifactBlockMode:
+    """Choose artifact-table prominence from evaluator outcome truth only.
+
+    A full artifact list signals that browsing lab outputs is a trustworthy review
+    surface. That is misleading for failed, aborted, or insufficient-evidence
+    campaigns even when files exist on disk. Partial and degraded outcomes still
+    warrant the bundle so operators can inspect limited-but-real evidence.
+
+    Slice 1 does not emit ``hidden`` from here; reserve it for future runner-fed
+    context when neither bundle nor diagnostics copy should appear.
+    """
+    if outcome.outcome_kind in (
+        CampaignOutcomeKind.SUCCESS,
+        CampaignOutcomeKind.PARTIAL,
+        CampaignOutcomeKind.DEGRADED,
+    ):
+        return "full"
+    return "diagnostics_only"
 
 
 _HEADLINE: dict[CampaignOutcomeKind, str] = {
@@ -33,9 +54,10 @@ def project_final_review(
 ) -> FinalReviewReadModel:
     """Translate ``CampaignOutcome`` into ``FinalReviewReadModel`` for the UI.
 
-    Chooses headline text and whether to show success-style sections from fields
-    already set by ``evaluate_campaign_outcome``. Optional runner-provided cause
-    strings are display-only fallbacks when ``failure_detail`` is empty.
+    Chooses headline text, success-style sections, and ``artifact_block_mode``
+    from fields already set by ``evaluate_campaign_outcome``. Optional
+    runner-provided cause strings are display-only fallbacks when
+    ``failure_detail`` is empty.
     """
     headline = _HEADLINE.get(outcome.outcome_kind, outcome.outcome_kind.value.title())
     show_next = outcome.allows_success_style_review
@@ -55,5 +77,5 @@ def project_final_review(
         failure_remediation=failure_remediation,
         report_generation_ok=outcome.report_ok,
         metrics=metrics,
-        artifact_block_mode="full",
+        artifact_block_mode=_artifact_block_mode_for_outcome(outcome),
     )
