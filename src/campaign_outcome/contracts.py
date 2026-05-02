@@ -1,4 +1,9 @@
-"""Frozen contracts for campaign outcome evaluation (Slice 1)."""
+"""Frozen contracts for campaign outcome evaluation (Slice 1).
+
+These types define evidence shapes, verdict enums, and read models for the
+finalization seam. They do not perform I/O; the runner supplies facts, the
+evaluator decides outcome truth, and projection/UI consume already-decided fields.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +15,8 @@ ArtifactBlockMode = Literal["full", "diagnostics_only", "hidden"]
 
 
 class CampaignLifecyclePhase(str, Enum):
+    """Lifecycle anchor recorded on the outcome snapshot (not a live runner state machine)."""
+
     PREFLIGHT = "preflight"
     CAMPAIGN_REGISTERED = "campaign_registered"
     MEASUREMENT = "measurement"
@@ -19,6 +26,8 @@ class CampaignLifecyclePhase(str, Enum):
 
 
 class MeasurementPhaseVerdict(str, Enum):
+    """Evaluator-owned verdict for the measurement phase from DB evidence + runner flags."""
+
     NOT_STARTED = "not_started"
     IN_PROGRESS = "in_progress"
     SUCCEEDED = "succeeded"
@@ -28,6 +37,8 @@ class MeasurementPhaseVerdict(str, Enum):
 
 
 class PostRunVerdict(str, Enum):
+    """Post-run pipeline verdict: analysis vs report branches depend on ``scoring_completed``."""
+
     NOT_REACHED = "not_reached"
     ANALYSIS_FAILED = "analysis_failed"
     ANALYSIS_SKIPPED = "analysis_skipped"
@@ -38,6 +49,8 @@ class PostRunVerdict(str, Enum):
 
 
 class CampaignOutcomeKind(str, Enum):
+    """Top-level campaign outcome classification decided only in ``evaluate_campaign_outcome``."""
+
     SUCCESS = "success"
     FAILED = "failed"
     ABORTED = "aborted"
@@ -47,6 +60,8 @@ class CampaignOutcomeKind(str, Enum):
 
 
 class AbortReason(str, Enum):
+    """Why an abort-style outcome was chosen (orthogonal to ``FailureDomain`` for some paths)."""
+
     USER_INTERRUPT = "user_interrupt"
     TELEMETRY_STARTUP = "telemetry_startup"
     BACKEND_EXECUTION_POLICY = "backend_execution_policy"
@@ -55,6 +70,8 @@ class AbortReason(str, Enum):
 
 
 class FailureDomain(str, Enum):
+    """Which subsystem owns the failure detail for diagnostics (not the outcome kind alone)."""
+
     CONTRACT_CONFIG_ENV = "contract_config_env"
     BACKEND_STARTUP = "backend_startup"
     MEASUREMENT_BODY = "measurement_body"
@@ -65,7 +82,12 @@ class FailureDomain(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class CampaignEvidenceSummary:
-    """Measurement-truth summary assembled by the runner (DB), not the evaluator."""
+    """Measurement facts aggregated from SQLite by the runner.
+
+    Counts configs/cycles/requests for lab truth lanes only. The evaluator uses
+    these counters together with runner flags; this struct does not declare
+    campaign success or failure by itself.
+    """
 
     configs_total: int = 0
     configs_completed: int = 0
@@ -85,12 +107,14 @@ class CampaignEvidenceSummary:
 
 @dataclass(frozen=True, slots=True)
 class CampaignOutcomeInputs:
-    """Facts supplied by the runner for ``evaluate_campaign_outcome`` only.
+    """Normalized bundle built by the runner for ``evaluate_campaign_outcome`` only.
 
-    ``report_ok`` means primary campaign-summary report generation
-    (``generate_report``) succeeded. When false, measurement and DB evidence
-    can still be valid — the evaluator must not treat this flag as erasing
-    measurement truth.
+    Includes DB-backed ``evidence`` plus operational flags (telemetry, policy,
+    fatal measurement). ``report_ok`` means primary campaign-summary report
+    generation (``generate_report``) succeeded; when false, measurement rows may
+    still be valid — the evaluator must not treat ``report_ok`` alone as
+    negating measurement truth. No UI or projection should infer outcome kind
+    from these fields without calling the evaluator.
     """
 
     campaign_id: str
@@ -119,13 +143,16 @@ class CampaignOutcomeInputs:
 
 @dataclass(frozen=True, slots=True)
 class CampaignOutcome:
-    """Structured outcome from the pure evaluator; UI renders, it does not decide.
+    """Authoritative outcome truth from the pure evaluator (no DB reads, no UI).
+
+    Projection maps this into ``FinalReviewReadModel``; the UI displays strings
+    and flags derived here — it must not re-decide ``outcome_kind`` or verdicts.
 
     ``allows_recommendation_authority`` is a narrow Slice-1 **user-facing review
-    gate** (measurement succeeded, scoring completed, rankable winner, primary
-    report OK for handoff-style messaging). It is not a scientific invalidation
-    of measurement rows; ``report_ok`` here gates that review surface only, not
-    whether raw measurement data in the lab DB is trustworthy.
+    gate** (measurement succeeded, scoring completed, rankable winner, normalized
+    post-run success for handoff-style messaging). It does not invalidate lab
+    measurement rows; ``report_ok`` on this object reflects inputs at decision
+    time and gates that review surface only.
     """
 
     outcome_kind: CampaignOutcomeKind
@@ -145,6 +172,12 @@ class CampaignOutcome:
 
 @dataclass(frozen=True, slots=True)
 class FinalReviewMetricsSnapshot:
+    """Optional winner/run metadata passed through to the post-run review layout.
+
+    Presentation-only numbers for Rich (winner TG, counts, mode, elapsed). They
+    do not override ``CampaignOutcome`` verdicts or recommendation authority.
+    """
+
     winner_config_id: str | None = None
     winner_tg: float | None = None
     configs_total: int | None = None
@@ -156,7 +189,12 @@ class FinalReviewMetricsSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class FinalReviewReadModel:
-    """Presentation DTO for post-run review; truth is decided in ``evaluate_campaign_outcome``."""
+    """Post-run review read model produced by ``project_final_review``.
+
+    Every boolean and headline here is already decided upstream (evaluator +
+    projection). Callers render as-is; do not reinterpret DB or raw flags to
+    change success vs failure messaging.
+    """
 
     headline_status: str
     outcome_kind: CampaignOutcomeKind

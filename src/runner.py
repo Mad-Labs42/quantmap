@@ -1119,7 +1119,12 @@ def _fetch_campaign_evidence_summary(
     conn: sqlite3.Connection,
     campaign_id: str,
 ) -> CampaignEvidenceSummary:
-    """Aggregate measurement-truth counters for outcome evaluation."""
+    """Aggregate measurement-truth counters from the lab DB for the evaluator.
+
+    SQL-only: sums config/cycle status rows and counts successful requests tied to
+    completed cycles. Does not interpret campaign outcome — ``evaluate_campaign_outcome``
+    consumes the resulting ``CampaignEvidenceSummary``.
+    """
     row_cfg = conn.execute(
         """
         SELECT

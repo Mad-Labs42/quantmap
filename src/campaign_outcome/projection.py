@@ -1,4 +1,8 @@
-"""Project CampaignOutcome into a UI-facing read model (no ui imports)."""
+"""Projection layer: map evaluator-owned ``CampaignOutcome`` into presentation data.
+
+Does not consult the database or raw runner flags. Does not change outcome truth —
+only selects headline copy, failure strings, and which optional sections apply.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +31,12 @@ def project_final_review(
     runner_failure_cause: str | None = None,
     runner_failure_remediation: str | None = None,
 ) -> FinalReviewReadModel:
-    """Map outcome + optional runner strings into a presentation read model."""
+    """Translate ``CampaignOutcome`` into ``FinalReviewReadModel`` for the UI.
+
+    Chooses headline text and whether to show success-style sections from fields
+    already set by ``evaluate_campaign_outcome``. Optional runner-provided cause
+    strings are display-only fallbacks when ``failure_detail`` is empty.
+    """
     headline = _HEADLINE.get(outcome.outcome_kind, outcome.outcome_kind.value.title())
     show_next = outcome.allows_success_style_review
     success_diag = outcome.allows_success_style_review

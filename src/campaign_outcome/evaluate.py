@@ -1,4 +1,9 @@
-"""Pure campaign outcome evaluation."""
+"""Pure campaign outcome evaluation (Slice 1).
+
+``evaluate_campaign_outcome`` is the only place that decides ``CampaignOutcome``
+truth from ``CampaignOutcomeInputs``. It must not read the database or render
+UI; callers supply aggregated evidence and status fields from the runner.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +25,13 @@ _OutcomeSynth = tuple[CampaignOutcomeKind, FailureDomain | None, str | None]
 
 
 def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
-    """Derive structured outcome from runner-provided inputs only (no I/O)."""
+    """Decide campaign outcome truth from normalized runner evidence.
+
+    Uses flags and ``inputs.evidence`` only — no SQLite, filesystem, or console.
+    Measurement verdicts, post-run verdicts (including explicit ``report_status``
+    when scoring completed), failure domain/detail, abort reasons, and review
+    authority gates are all resolved here in a fixed precedence order.
+    """
     phase = CampaignLifecyclePhase.FINALIZATION
     ev = inputs.evidence
 
@@ -128,6 +139,11 @@ def _finalize(
     abort: AbortReason | None,
     report_ok: bool | None,
 ) -> CampaignOutcome:
+    """Build a terminal ``CampaignOutcome`` for abort/fatal paths.
+
+    Success-style review and recommendation authority are forced off; callers
+    rely on this invariant for early exits without duplicating gate logic.
+    """
     evidence_out = dataclasses.replace(
         inputs.evidence,
         campaign_db_status=inputs.campaign_db_status,

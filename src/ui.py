@@ -619,6 +619,11 @@ def _render_post_run_diagnostics_block(
 def _render_post_run_review_core(
     con: Console, ctx: _PostRunReviewRenderContext
 ) -> None:
+    """Emit Rich layout for post-run review from a fully built render context.
+
+    Presentation-only: does not evaluate outcomes or touch the DB; ``ctx`` flags
+    are already derived from the read model or legacy binary inputs.
+    """
     _render_post_run_header_and_yolo(con, ctx.campaign_id, ctx.yolo_mode)
     _render_post_run_status_line(con, ctx)
     _maybe_render_report_generation_subline(con, ctx)
@@ -716,10 +721,12 @@ def render_post_run_review_from_read_model(
     yolo_mode: bool = False,
     target_console: Console | None = None,
 ) -> None:
-    """Render post-run review from an explicit outcome read model (Slice 1).
+    """Render post-run review from ``FinalReviewReadModel`` (Slice 1 seam).
 
-    Presentation-only: uses ``read_model.metrics`` (``FinalReviewMetricsSnapshot``)
-    as-is; no DB I/O or sys.exit.
+    Maps evaluator/projection fields into layout context only — does not infer
+    success vs failure from raw ``report_ok`` or DB state. Uses
+    ``read_model.metrics`` (``FinalReviewMetricsSnapshot``) as-is; no DB I/O or
+    ``sys.exit``.
     """
     con = target_console or get_console()
     _color = _OUTCOME_STATUS_STYLE.get(read_model.outcome_kind, "red")
