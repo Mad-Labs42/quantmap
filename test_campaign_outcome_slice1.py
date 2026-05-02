@@ -15,8 +15,7 @@ from src.campaign_outcome.contracts import (
     MeasurementPhaseVerdict,
     PostRunVerdict,
 )
-import src.campaign_outcome.evaluate as evaluate_module
-from src.campaign_outcome.evaluate import evaluate_campaign_outcome
+import src.campaign_outcome.evaluate as outcome_evaluate
 from src.campaign_outcome.projection import project_final_review
 
 
@@ -49,7 +48,7 @@ def test_report_ok_true_does_not_mask_invalid_campaign():
             has_any_success_request=False, cycles_attempted=0, configs_completed=0
         ),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind != CampaignOutcomeKind.SUCCESS
     assert not out.allows_success_style_review
 
@@ -65,7 +64,7 @@ def test_report_failure_does_not_erase_measurement_truth():
         winner_config_id="cfg_a",
         evidence=ev,
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert out.failure_domain == FailureDomain.POST_RUN_PIPELINE
@@ -81,7 +80,7 @@ def test_no_valid_config_blocks_success_style_review():
         winner_config_id=None,
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
     assert not out.allows_success_style_review
     assert not out.allows_recommendation_authority
@@ -98,7 +97,7 @@ def test_final_review_read_model_not_raw_report_ok():
         winner_config_id="w",
         evidence=ev,
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     rm = project_final_review(out)
     assert rm.headline_status != "Success"
     assert rm.report_generation_ok is False
@@ -111,7 +110,7 @@ def test_abort_maps_to_aborted():
         user_interrupted=True,
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.ABORTED
     assert out.abort == AbortReason.USER_INTERRUPT
 
@@ -134,7 +133,7 @@ def test_pre_measurement_startup_blocks_are_abort_outcomes(
         evidence=_base_evidence(has_any_success_request=True),
         **{flag_name: True},
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.ABORTED
     assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
     assert out.abort == abort_reason
@@ -153,7 +152,7 @@ def test_fatal_measurement_exception_is_failed_measurement_outcome() -> None:
         report_ok=True,
         evidence=_base_evidence(has_any_success_request=True),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.FAILED
     assert out.measurement == MeasurementPhaseVerdict.FAILED
     assert out.post_run == PostRunVerdict.NOT_REACHED
@@ -178,7 +177,7 @@ def test_backend_startup_distinct_from_measurement_body():
         scoring_completed=False,
         evidence=ev_startup,
     )
-    out_b = evaluate_campaign_outcome(inp_b)
+    out_b = outcome_evaluate.evaluate_campaign_outcome(inp_b)
     assert out_b.failure_domain == FailureDomain.BACKEND_STARTUP
     assert out_b.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
 
@@ -195,7 +194,7 @@ def test_backend_startup_distinct_from_measurement_body():
         scoring_completed=False,
         evidence=ev_body,
     )
-    out_body = evaluate_campaign_outcome(inp_body)
+    out_body = outcome_evaluate.evaluate_campaign_outcome(inp_body)
     assert out_body.failure_domain == FailureDomain.MEASUREMENT_BODY
 
 
@@ -216,7 +215,7 @@ def test_lifecycle_complete_no_success_measurement_body_without_startup_signal()
         scoring_completed=False,
         evidence=ev,
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
 
 
@@ -231,7 +230,7 @@ def test_happy_path_success_style():
         report_status="complete",
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
     assert out.allows_success_style_review
     assert out.allows_recommendation_authority
@@ -250,7 +249,7 @@ def test_lifecycle_complete_does_not_imply_outcome_success():
         winner_config_id="x",
         evidence=_base_evidence(has_any_success_request=False, configs_completed=2),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind in (
         CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
         CampaignOutcomeKind.DEGRADED,
@@ -268,7 +267,7 @@ def test_partial_evidence_partial_outcome():
         winner_config_id="w",
         evidence=_base_evidence(cycles_invalid=1),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.measurement == MeasurementPhaseVerdict.PARTIAL
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert not out.allows_success_style_review
@@ -286,7 +285,7 @@ def test_report_ok_true_with_report_status_failed_not_success_style():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.post_run == PostRunVerdict.REPORT_FAILED
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert not out.allows_success_style_review
@@ -304,7 +303,7 @@ def test_report_ok_true_with_report_status_skipped_not_success_style():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.post_run == PostRunVerdict.REPORT_SKIPPED
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert not out.allows_success_style_review
@@ -322,14 +321,14 @@ def test_report_status_partial_not_success_style():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.post_run == PostRunVerdict.REPORT_PARTIAL
     assert not out.allows_success_style_review
 
 
 def test_report_status_complete_overrides_stale_report_ok_false():
     """Explicit ``report_status=complete`` wins over a stale ``report_ok=False`` bit."""
-    out = evaluate_campaign_outcome(
+    out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
             effective_campaign_id="c",
@@ -351,16 +350,16 @@ def test_synthesized_abort_reason_propagates_to_campaign_outcome(
 ) -> None:
     """Synthesis may attach ``abort``; main path must not discard it (future-proofing)."""
 
-    def _fake_synth(*args: object, **kwargs: object) -> evaluate_module._OutcomeSynth:
-        return evaluate_module._OutcomeSynth(
+    def _fake_synth(*args: object, **kwargs: object) -> outcome_evaluate._OutcomeSynth:
+        return outcome_evaluate._OutcomeSynth(
             CampaignOutcomeKind.ABORTED,
             FailureDomain.CONTRACT_CONFIG_ENV,
             "synthetic abort detail",
             AbortReason.UNKNOWN,
         )
 
-    monkeypatch.setattr(evaluate_module, "_synthesize_outcome", _fake_synth)
-    out = evaluate_campaign_outcome(
+    monkeypatch.setattr(outcome_evaluate, "_synthesize_outcome", _fake_synth)
+    out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
             effective_campaign_id="c",
@@ -381,7 +380,7 @@ def test_synthesized_abort_reason_propagates_to_campaign_outcome(
 
 def test_distinct_failure_detail_analysis_branches():
     base_ev = _base_evidence()
-    failed = evaluate_campaign_outcome(
+    failed = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
             effective_campaign_id="c",
@@ -390,7 +389,7 @@ def test_distinct_failure_detail_analysis_branches():
             evidence=base_ev,
         )
     )
-    skipped = evaluate_campaign_outcome(
+    skipped = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
             effective_campaign_id="c",
@@ -399,7 +398,7 @@ def test_distinct_failure_detail_analysis_branches():
             evidence=base_ev,
         )
     )
-    not_reached = evaluate_campaign_outcome(
+    not_reached = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
             effective_campaign_id="c",
@@ -426,13 +425,13 @@ def test_distinct_failure_detail_report_branches():
         winner_config_id="w",
         evidence=base_ev,
     )
-    failed = evaluate_campaign_outcome(
+    failed = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(**common, report_ok=False, report_status="failed")
     )
-    skipped = evaluate_campaign_outcome(
+    skipped = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(**common, report_ok=False, report_status="skipped")
     )
-    partial = evaluate_campaign_outcome(
+    partial = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(**common, report_ok=True, report_status="partial")
     )
     assert (
@@ -460,7 +459,7 @@ def test_projection_prefers_evaluator_failure_detail_over_runner_cause():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     rm = project_final_review(
         out,
         runner_failure_cause="Runner-only misleading cause.",
@@ -482,7 +481,7 @@ def test_artifact_report_failure_is_not_measurement_failure():
         run_reports_ok=False,
         evidence=_base_evidence(),
     )
-    out = evaluate_campaign_outcome(inp)
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert out.post_run == PostRunVerdict.REPORT_PARTIAL
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
@@ -499,7 +498,7 @@ def test_recommendation_authority_requires_more_than_report_ok_alone():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    good = evaluate_campaign_outcome(inp)
+    good = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert good.allows_recommendation_authority
 
     no_winner = CampaignOutcomeInputs(
@@ -511,7 +510,7 @@ def test_recommendation_authority_requires_more_than_report_ok_alone():
         winner_config_id=None,
         evidence=_base_evidence(),
     )
-    assert not evaluate_campaign_outcome(no_winner).allows_recommendation_authority
+    assert not outcome_evaluate.evaluate_campaign_outcome(no_winner).allows_recommendation_authority
 
     bad_report = CampaignOutcomeInputs(
         campaign_id="c",
@@ -522,7 +521,7 @@ def test_recommendation_authority_requires_more_than_report_ok_alone():
         winner_config_id="w",
         evidence=_base_evidence(),
     )
-    br = evaluate_campaign_outcome(bad_report)
+    br = outcome_evaluate.evaluate_campaign_outcome(bad_report)
     assert br.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert not br.allows_recommendation_authority
 
