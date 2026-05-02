@@ -427,7 +427,12 @@ _OUTCOME_STATUS_STYLE: dict[CampaignOutcomeKind, str] = {
 
 @dataclass(frozen=True, slots=True)
 class _PostRunReviewRenderContext:
-    """Presentation-only inputs assembled by each entrypoint — no truth computation."""
+    """Presentation-only inputs assembled by each entrypoint — no truth computation.
+
+    ``show_next_actions`` is evaluator/projection-owned. ``PARTIAL`` outcomes
+    may still show next actions in the secondary-artifact-only carve-out while
+    rendering warning/failure details in parallel.
+    """
 
     campaign_id: str
     yolo_mode: bool

@@ -54,9 +54,11 @@ def project_final_review(
     """Translate ``CampaignOutcome`` into ``FinalReviewReadModel`` for the UI.
 
     Chooses headline text, success-style sections, and ``artifact_block_mode``
-    from fields already set by ``evaluate_campaign_outcome``. Optional
-    runner-provided cause strings are display-only fallbacks when
-    ``failure_detail`` is empty.
+    from fields already set by ``evaluate_campaign_outcome``. A ``PARTIAL``
+    outcome may still expose next actions when evaluator marks it as the
+    secondary-artifact-only carve-out; warning copy remains visible via
+    ``failure_cause``. Optional runner-provided cause strings are display-only
+    fallbacks when ``failure_detail`` is empty.
     """
     headline = _HEADLINE.get(outcome.outcome_kind, outcome.outcome_kind.value.title())
     show_next = outcome.allows_success_style_review

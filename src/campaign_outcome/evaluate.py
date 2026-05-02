@@ -107,9 +107,13 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         inputs=inputs,
     )
 
-    # Handoff-grade authority (Slice 1): requires terminal SUCCESS outcome kind,
-    # full measurement success (not PARTIAL), normalized post-run success,
-    # rankable winner, and negative gates.
+    # Success-style review is a process/UI gate: terminal SUCCESS is always
+    # allowed, and the evaluator also allows a narrow core-valid
+    # secondary-artifact PARTIAL carve-out.
+    #
+    # Recommendation authority is stricter and fail-closed. It can survive the
+    # same secondary-artifact PARTIAL carve-out only when measurement/scoring/
+    # winner truth remains valid and no abort flags are present.
     allows_rec = (
         allows_success
         and _measurement_supports_authority(measurement)
@@ -137,7 +141,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         abort=synth.abort,
         allows_success_style_review=allows_success,
         allows_recommendation_authority=allows_rec,
-        report_ok=inputs.report_ok,
+        report_ok=_effective_report_generation_ok(inputs, post_run),
         run_reports_ok=inputs.run_reports_ok,
         metadata_ok=inputs.metadata_ok,
         evidence_summary=evidence_out,
@@ -276,6 +280,26 @@ def _allows_success_style_review(
         post_run,
         allow_secondary_partial=True,
     )
+
+
+def _effective_report_generation_ok(
+    inputs: CampaignOutcomeInputs, post_run: PostRunVerdict
+) -> bool | None:
+    """Normalize primary-report truth from authoritative post-run verdict.
+
+    Structured post-run verdict owns report truth when available:
+      - REPORT_SUCCEEDED / REPORT_PARTIAL -> True (primary report succeeded)
+      - REPORT_FAILED -> False
+      - REPORT_SKIPPED -> None (report not attempted)
+    For non-report verdicts, keep legacy ``report_ok`` fallback.
+    """
+    if post_run in (PostRunVerdict.REPORT_SUCCEEDED, PostRunVerdict.REPORT_PARTIAL):
+        return True
+    if post_run == PostRunVerdict.REPORT_FAILED:
+        return False
+    if post_run == PostRunVerdict.REPORT_SKIPPED:
+        return None
+    return inputs.report_ok
 
 
 def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:

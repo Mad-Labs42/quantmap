@@ -110,11 +110,14 @@ class CampaignOutcomeInputs:
     """Normalized bundle built by the runner for ``evaluate_campaign_outcome`` only.
 
     Includes DB-backed ``evidence`` plus operational flags (telemetry, policy,
-    fatal measurement). ``report_ok`` means primary campaign-summary report
-    generation (``generate_report``) succeeded; when false, measurement rows may
-    still be valid — the evaluator must not treat ``report_ok`` alone as
-    negating measurement truth. No UI or projection should infer outcome kind
-    from these fields without calling the evaluator.
+    fatal measurement). ``report_status`` is the structured post-run authority
+    when present. ``report_ok`` is a legacy primary-report signal:
+      - ``True``: primary campaign summary generation succeeded
+      - ``False``: primary campaign summary generation failed
+      - ``None``: report generation was not attempted or is unknown (typically
+        abort/pre-report paths)
+    Measurement truth is independent; callers must not infer ``outcome_kind``
+    from these fields without passing through the evaluator.
     """
 
     campaign_id: str
@@ -148,11 +151,14 @@ class CampaignOutcome:
     Projection maps this into ``FinalReviewReadModel``; the UI displays strings
     and flags derived here — it must not re-decide ``outcome_kind`` or verdicts.
 
-    ``allows_recommendation_authority`` is a narrow Slice-1 **user-facing review
-    gate** (measurement succeeded, scoring completed, rankable winner, normalized
-    post-run success for handoff-style messaging). It does not invalidate lab
-    measurement rows; ``report_ok`` on this object reflects inputs at decision
-    time and gates that review surface only.
+    ``allows_success_style_review`` is a UI/process gate, not a synonym for
+    terminal ``SUCCESS``. It is true for terminal ``SUCCESS`` and for the narrow
+    core-valid secondary-artifact ``PARTIAL`` case.
+
+    ``allows_recommendation_authority`` is a strict recommendation gate. It can
+    survive secondary-artifact ``PARTIAL`` only when measurement/scoring/winner
+    and primary-report truth remain valid. It must fail closed for primary
+    report failure, incomplete measurement, no winner, abort, and interruption.
     """
 
     outcome_kind: CampaignOutcomeKind

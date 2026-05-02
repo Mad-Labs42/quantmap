@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import logging
 import sqlite3
@@ -395,6 +396,88 @@ def test_runner_secondary_report_failure_keeps_partial_warning_but_exits_zero(
         out = buf.getvalue()
         assert "Report generation: FAILED" not in out
         assert "Report bundle partially generated" in out
+
+
+def test_runner_secondary_report_failure_normalizes_stale_report_ok_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Structured report_status=partial wins if legacy report_ok was stale false."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_fetch_campaign_evidence_summary",
+        lambda *_a, **_k: CampaignEvidenceSummary(
+            configs_total=1,
+            configs_completed=1,
+            configs_oom=0,
+            configs_skipped_oom=0,
+            configs_degraded=0,
+            cycles_attempted=1,
+            cycles_complete=1,
+            cycles_invalid=0,
+            has_any_success_request=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.score.score_campaign",
+        lambda *_a, **_k: {
+            "winner": "test_10",
+            "effective_filters": {},
+            "stats": {"test_10": {}},
+            "passing": {"test_10": {"warm_tg_median": 100.0}},
+            "eliminated": {},
+            "unrankable": {},
+        },
+    )
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+    )
+
+    def _v2_fail(*_a: object, **_k: object) -> Path:
+        raise RuntimeError("secondary report failed")
+
+    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _v2_fail)
+    monkeypatch.setattr(
+        "src.trust_identity.summarize_report_artifact_status",
+        lambda *_a, **_k: "partial",
+    )
+
+    def _force_stale_report_ok(inp: CampaignOutcomeInputs):
+        return evaluate_campaign_outcome(dataclasses.replace(inp, report_ok=False))
+
+    monkeypatch.setattr(
+        runner,
+        "evaluate_campaign_outcome",
+        _force_stale_report_ok,
+    )
+
+    captured_models: list[object] = []
+    _real_render = ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs):
+        kwargs.pop("target_console", None)
+        captured_models.append(kwargs["read_model"])
+        return _real_render(**kwargs, target_console=con)
+
+    monkeypatch.setattr(runner.ui, "render_post_run_review_from_read_model", _capture_render)
+
+    runner.run_campaign(
+        campaign_id="test_camp",
+        dry_run=False,
+        yolo_mode=False,
+        baseline_path=tmp_path / "baseline.yaml",
+    )
+    assert captured_models
+    rm = captured_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert rm.show_next_actions
+    assert rm.report_generation_ok is True
+    buf = con.file
+    if hasattr(buf, "getvalue"):
+        out = buf.getvalue()
+        assert "Report generation: OK" in out
+        assert "Report generation: FAILED" not in out
 
 
 def test_runner_primary_report_failure_preserves_measurement_verdict(

@@ -462,6 +462,10 @@ def test_report_status_partial_keeps_partial_kind_but_allows_success_style_revie
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert out.allows_success_style_review
     assert out.allows_recommendation_authority
+    assert out.report_ok is True
+    rm = project_final_review(out)
+    assert rm.report_generation_ok is True
+    assert rm.failure_cause == "Report bundle partially generated (secondary artifacts)."
 
 
 def test_report_status_partial_without_winner_stays_non_success_style() -> None:
@@ -502,6 +506,46 @@ def test_report_status_complete_overrides_stale_report_ok_false():
     assert out.post_run == PostRunVerdict.REPORT_SUCCEEDED
     assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
     assert out.allows_recommendation_authority
+    assert out.report_ok is True
+
+
+def test_report_status_partial_overrides_stale_report_ok_false() -> None:
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=False,
+            report_status="partial",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.post_run == PostRunVerdict.REPORT_PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert out.allows_success_style_review
+    assert out.allows_recommendation_authority
+    assert out.report_ok is True
+
+
+def test_report_status_failed_overrides_stale_report_ok_true() -> None:
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            report_status="failed",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.post_run == PostRunVerdict.REPORT_FAILED
+    assert out.report_ok is False
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
 
 
 def test_synthesized_abort_reason_propagates_to_campaign_outcome(
