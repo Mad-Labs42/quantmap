@@ -53,7 +53,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
             failure_domain=None,
             failure_detail="Interrupted by user.",
             abort=AbortReason.USER_INTERRUPT,
-            report_ok=inputs.report_ok,
+            report_ok=None,
         )
 
     if inputs.telemetry_aborted_before_db:
@@ -65,7 +65,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
             failure_domain=FailureDomain.CONTRACT_CONFIG_ENV,
             failure_detail="Telemetry prerequisites not met before measurement.",
             abort=AbortReason.TELEMETRY_STARTUP,
-            report_ok=inputs.report_ok,
+            report_ok=None,
         )
 
     if inputs.backend_policy_blocked:
@@ -77,7 +77,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
             failure_domain=FailureDomain.CONTRACT_CONFIG_ENV,
             failure_detail="Backend execution policy blocked measurement startup.",
             abort=AbortReason.BACKEND_EXECUTION_POLICY,
-            report_ok=inputs.report_ok,
+            report_ok=None,
         )
 
     if inputs.fatal_exception_during_measurement:
@@ -100,7 +100,12 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         inputs, measurement, measurement_failure_domain, post_run
     )
 
-    allows_success = synth.kind == CampaignOutcomeKind.SUCCESS
+    allows_success = _allows_success_style_review(
+        outcome_kind=synth.kind,
+        measurement=measurement,
+        post_run=post_run,
+        inputs=inputs,
+    )
 
     # Handoff-grade authority (Slice 1): requires terminal SUCCESS outcome kind,
     # full measurement success (not PARTIAL), normalized post-run success,
@@ -109,7 +114,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         allows_success
         and _measurement_supports_authority(measurement)
         and ev.has_any_success_request
-        and _scoring_supports_authority(inputs, post_run)
+        and _scoring_supports_authority(inputs, post_run, allow_secondary_partial=True)
         and not inputs.user_interrupted
         and not inputs.telemetry_aborted_before_db
         and not inputs.backend_policy_blocked
@@ -235,13 +240,41 @@ def _measurement_supports_authority(m: MeasurementPhaseVerdict) -> bool:
 
 
 def _scoring_supports_authority(
-    inputs: CampaignOutcomeInputs, post_run: PostRunVerdict
+    inputs: CampaignOutcomeInputs,
+    post_run: PostRunVerdict,
+    *,
+    allow_secondary_partial: bool = False,
 ) -> bool:
+    allowed_post_run = {PostRunVerdict.REPORT_SUCCEEDED}
+    if allow_secondary_partial:
+        allowed_post_run.add(PostRunVerdict.REPORT_PARTIAL)
     return (
         inputs.scoring_completed
         and inputs.passing_count > 0
         and inputs.winner_config_id is not None
-        and post_run == PostRunVerdict.REPORT_SUCCEEDED
+        and post_run in allowed_post_run
+    )
+
+
+def _allows_success_style_review(
+    *,
+    outcome_kind: CampaignOutcomeKind,
+    measurement: MeasurementPhaseVerdict,
+    post_run: PostRunVerdict,
+    inputs: CampaignOutcomeInputs,
+) -> bool:
+    if outcome_kind == CampaignOutcomeKind.SUCCESS:
+        return True
+    if outcome_kind != CampaignOutcomeKind.PARTIAL:
+        return False
+    if measurement != MeasurementPhaseVerdict.SUCCEEDED:
+        return False
+    if post_run != PostRunVerdict.REPORT_PARTIAL:
+        return False
+    return _scoring_supports_authority(
+        inputs,
+        post_run,
+        allow_secondary_partial=True,
     )
 
 

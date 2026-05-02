@@ -114,6 +114,7 @@ def test_abort_maps_to_aborted():
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.ABORTED
     assert out.abort == AbortReason.USER_INTERRUPT
+    assert out.report_ok is None
 
 
 @pytest.mark.parametrize(
@@ -138,6 +139,7 @@ def test_pre_measurement_startup_blocks_are_abort_outcomes(
     assert out.outcome_kind == CampaignOutcomeKind.ABORTED
     assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
     assert out.abort == abort_reason
+    assert out.report_ok is None
     assert out.failure_domain == FailureDomain.CONTRACT_CONFIG_ENV
     assert not out.allows_success_style_review
     assert not out.allows_recommendation_authority
@@ -444,7 +446,7 @@ def test_report_ok_true_with_report_status_skipped_not_success_style():
     assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
 
 
-def test_report_status_partial_not_success_style():
+def test_report_status_partial_keeps_partial_kind_but_allows_success_style_review():
     inp = CampaignOutcomeInputs(
         campaign_id="c",
         effective_campaign_id="c",
@@ -457,7 +459,30 @@ def test_report_status_partial_not_success_style():
     )
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.post_run == PostRunVerdict.REPORT_PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert out.allows_success_style_review
+    assert out.allows_recommendation_authority
+
+
+def test_report_status_partial_without_winner_stays_non_success_style() -> None:
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            report_status="partial",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id=None,
+            evidence=_base_evidence(),
+        )
+    )
+    assert out.outcome_kind in (
+        CampaignOutcomeKind.INSUFFICIENT_EVIDENCE,
+        CampaignOutcomeKind.DEGRADED,
+    )
     assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
 
 
 def test_report_status_complete_overrides_stale_report_ok_false():
@@ -763,6 +788,8 @@ def test_artifact_report_failure_is_not_measurement_failure():
     assert out.post_run == PostRunVerdict.REPORT_PARTIAL
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert out.failure_domain == FailureDomain.ARTIFACT_PROJECTION
+    assert out.allows_success_style_review
+    assert out.allows_recommendation_authority
 
 
 def test_recommendation_authority_requires_more_than_report_ok_alone():

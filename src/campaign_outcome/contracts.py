@@ -135,7 +135,7 @@ class CampaignOutcomeInputs:
     unrankable_count: int = 0
     winner_config_id: str | None = None
     unrankable_reason: str | None = None
-    report_ok: bool = False
+    report_ok: bool | None = False
     run_reports_ok: bool | None = None
     metadata_ok: bool | None = None
     last_backend_failure_reason: str | None = None

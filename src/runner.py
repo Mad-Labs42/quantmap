@@ -1295,7 +1295,7 @@ def _finalize_interrupt_post_run_review(
         unrankable_count=0,
         winner_config_id=None,
         unrankable_reason=None,
-        report_ok=False,
+        report_ok=None,
         run_reports_ok=None,
         metadata_ok=None,
         last_backend_failure_reason=_last_br_val,

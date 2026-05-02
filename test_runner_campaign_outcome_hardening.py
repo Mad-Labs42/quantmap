@@ -163,6 +163,34 @@ def test_exit_code_helper_maps_success_style_only() -> None:
     assert runner._exit_code_for_campaign_outcome(bad) == 1
 
 
+def test_exit_code_helper_keeps_partial_measurement_nonzero() -> None:
+    partial_measurement = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            report_status="complete",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=CampaignEvidenceSummary(
+                configs_total=1,
+                configs_completed=1,
+                has_any_success_request=True,
+                cycles_attempted=2,
+                cycles_complete=1,
+                cycles_invalid=1,
+                configs_oom=0,
+                configs_skipped_oom=0,
+            ),
+        )
+    )
+    assert partial_measurement.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert partial_measurement.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not partial_measurement.allows_success_style_review
+    assert runner._exit_code_for_campaign_outcome(partial_measurement) == 1
+
+
 def test_fetch_campaign_evidence_summary_counts_only_complete_success_requests(
     tmp_path: Path,
 ) -> None:
@@ -297,6 +325,76 @@ def test_runner_exit_nonzero_when_report_ok_but_no_measurement_success(
     assert rm.outcome_kind != CampaignOutcomeKind.SUCCESS
     assert not rm.show_next_actions
     assert rm.report_generation_ok is True
+
+
+def test_runner_secondary_report_failure_keeps_partial_warning_but_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Secondary run-reports failure remains PARTIAL warning but keeps core success exit."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_fetch_campaign_evidence_summary",
+        lambda *_a, **_k: CampaignEvidenceSummary(
+            configs_total=1,
+            configs_completed=1,
+            configs_oom=0,
+            configs_skipped_oom=0,
+            configs_degraded=0,
+            cycles_attempted=1,
+            cycles_complete=1,
+            cycles_invalid=0,
+            has_any_success_request=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.score.score_campaign",
+        lambda *_a, **_k: {
+            "winner": "test_10",
+            "effective_filters": {},
+            "stats": {"test_10": {}},
+            "passing": {"test_10": {"warm_tg_median": 100.0}},
+            "eliminated": {},
+            "unrankable": {},
+        },
+    )
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+    )
+
+    def _v2_fail(*_a: object, **_k: object) -> Path:
+        raise RuntimeError("secondary report failed")
+
+    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _v2_fail)
+
+    captured_models: list[object] = []
+    _real_render = ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs):
+        kwargs.pop("target_console", None)
+        captured_models.append(kwargs["read_model"])
+        return _real_render(**kwargs, target_console=con)
+
+    monkeypatch.setattr(runner.ui, "render_post_run_review_from_read_model", _capture_render)
+
+    runner.run_campaign(
+        campaign_id="test_camp",
+        dry_run=False,
+        yolo_mode=False,
+        baseline_path=tmp_path / "baseline.yaml",
+    )
+    assert captured_models
+    rm = captured_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert rm.show_next_actions
+    assert rm.report_generation_ok is True
+    assert rm.failure_cause and "Report bundle partially generated" in rm.failure_cause
+    buf = con.file
+    if hasattr(buf, "getvalue"):
+        out = buf.getvalue()
+        assert "Report generation: FAILED" not in out
+        assert "Report bundle partially generated" in out
 
 
 def test_runner_primary_report_failure_preserves_measurement_verdict(
@@ -434,11 +532,13 @@ def test_keyboard_interrupt_exits_130_not_success(
     rm = captured_read_models[-1]
     assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
     assert not rm.show_next_actions
+    assert rm.report_generation_ok is None
     assert rm.failure_remediation and "--resume" in rm.failure_remediation
     buf = con.file
     if hasattr(buf, "getvalue"):
         out = buf.getvalue()
         assert "--resume" in out or "resume" in out.lower()
+        assert "Report generation: FAILED" not in out
 
 
 def test_keyboard_interrupt_exits_130_when_finalize_raises(

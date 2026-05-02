@@ -739,11 +739,17 @@ def render_post_run_review_from_read_model(
         read_headline_color=_color,
         show_report_generation_subline=(
             read_model.report_generation_ok is not None
-            and not read_model.show_next_actions
+            and (
+                not read_model.show_next_actions
+                or read_model.outcome_kind == CampaignOutcomeKind.PARTIAL
+            )
         ),
         report_generation_ok=read_model.report_generation_ok,
         metrics=metrics,
-        failure_emit=not read_model.show_next_actions,
+        failure_emit=(
+            (not read_model.show_next_actions)
+            or read_model.outcome_kind == CampaignOutcomeKind.PARTIAL
+        ),
         failure_cause=read_model.failure_cause,
         failure_remediation=read_model.failure_remediation,
         emit_unknown_cause_line=(
