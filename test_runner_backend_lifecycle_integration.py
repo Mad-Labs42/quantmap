@@ -4,7 +4,9 @@ from contextlib import contextmanager
 import json
 import os
 import sqlite3
+import sys
 import threading
+import types
 from pathlib import Path
 from typing import Any
 
@@ -208,6 +210,9 @@ def test_run_cycle_marks_non_oom_backend_startup_failure_invalid(monkeypatch) ->
     conn = _cycle_connection()
     collector = _Collector()
 
+    class _FakeServerOOMError(RuntimeError):
+        pass
+
     def _fail_startup(_request: BackendLaunchRequest):
         failure = BackendFailure(
             backend_kind=BackendKind.LLAMACPP,
@@ -216,6 +221,11 @@ def test_run_cycle_marks_non_oom_backend_startup_failure_invalid(monkeypatch) ->
         )
         raise BackendStartupError(failure)
 
+    monkeypatch.setitem(
+        sys.modules,
+        "src.server",
+        types.SimpleNamespace(ServerOOMError=_FakeServerOOMError),
+    )
     monkeypatch.setattr(backends, "start_backend_session", _fail_startup)
     monkeypatch.setattr(
         runner,
