@@ -79,18 +79,12 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
 
     allows_success = outcome_kind == CampaignOutcomeKind.SUCCESS
 
-    # Handoff-grade authority (Slice 1): not synonymous with "measurement rows
-    # exist" — requires rankable winner, completed scoring, and primary report OK.
-    # ``report_ok`` in this conjunction gates user-facing review authority only;
-    # it does not mean measurement evidence became scientifically invalid when false.
+    # Handoff-grade authority (Slice 1): requires full measurement success (not
+    # PARTIAL), normalized post-run success, rankable winner, and negative gates.
     allows_rec = (
-        measurement
-        in (MeasurementPhaseVerdict.SUCCEEDED, MeasurementPhaseVerdict.PARTIAL)
+        _measurement_supports_authority(measurement)
         and ev.has_any_success_request
-        and inputs.scoring_completed
-        and inputs.passing_count > 0
-        and inputs.winner_config_id is not None
-        and inputs.report_ok is True
+        and _scoring_supports_authority(inputs, post_run)
         and not inputs.user_interrupted
         and not inputs.telemetry_aborted_before_db
         and not inputs.backend_policy_blocked
@@ -183,17 +177,41 @@ def _measurement_domain(
     return MeasurementPhaseVerdict.FAILED, FailureDomain.MEASUREMENT_BODY
 
 
+def _measurement_supports_authority(m: MeasurementPhaseVerdict) -> bool:
+    return m == MeasurementPhaseVerdict.SUCCEEDED
+
+
+def _scoring_supports_authority(
+    inputs: CampaignOutcomeInputs, post_run: PostRunVerdict
+) -> bool:
+    return (
+        inputs.scoring_completed
+        and inputs.passing_count > 0
+        and inputs.winner_config_id is not None
+        and post_run == PostRunVerdict.REPORT_SUCCEEDED
+    )
+
+
 def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
+    analysis_s = (inputs.analysis_status or "").lower()
+    report_s = (inputs.report_status or "").lower()
+
     if not inputs.scoring_completed:
-        if inputs.analysis_status == "failed":
+        if analysis_s == "failed":
             return PostRunVerdict.ANALYSIS_FAILED
-        if inputs.analysis_status == "skipped":
+        if analysis_s == "skipped":
             return PostRunVerdict.ANALYSIS_SKIPPED
         return PostRunVerdict.NOT_REACHED
 
+    # Structured post-run/report status overrides raw report_ok (Slice 1 truth lane).
+    if report_s == "failed":
+        return PostRunVerdict.REPORT_FAILED
+    if report_s == "skipped":
+        return PostRunVerdict.REPORT_SKIPPED
+    if report_s == "partial":
+        return PostRunVerdict.REPORT_PARTIAL
+
     if inputs.report_ok:
-        if inputs.report_status == "partial":
-            return PostRunVerdict.REPORT_PARTIAL
         return PostRunVerdict.REPORT_SUCCEEDED
 
     return PostRunVerdict.REPORT_FAILED
@@ -243,12 +261,18 @@ def _synthesize_outcome(
             return (
                 CampaignOutcomeKind.FAILED,
                 FailureDomain.POST_RUN_PIPELINE,
-                "Analysis or scoring did not complete.",
+                "Post-campaign analysis failed.",
+            )
+        if post_run == PostRunVerdict.ANALYSIS_SKIPPED:
+            return (
+                CampaignOutcomeKind.FAILED,
+                FailureDomain.POST_RUN_PIPELINE,
+                "Post-campaign analysis was skipped.",
             )
         return (
             CampaignOutcomeKind.FAILED,
             FailureDomain.POST_RUN_PIPELINE,
-            "Analysis or scoring did not complete.",
+            "Post-campaign analysis and scoring did not complete.",
         )
 
     if inputs.passing_count <= 0 or inputs.winner_config_id is None:
@@ -264,11 +288,18 @@ def _synthesize_outcome(
             "No passing rankable configuration produced a winner.",
         )
 
-    if not inputs.report_ok:
+    if post_run == PostRunVerdict.REPORT_FAILED:
         return (
             CampaignOutcomeKind.PARTIAL,
             FailureDomain.POST_RUN_PIPELINE,
             "Primary report generation failed; measurement data remains valid.",
+        )
+
+    if post_run == PostRunVerdict.REPORT_SKIPPED:
+        return (
+            CampaignOutcomeKind.PARTIAL,
+            FailureDomain.POST_RUN_PIPELINE,
+            "Primary report generation was skipped; measurement data remains valid.",
         )
 
     if post_run == PostRunVerdict.REPORT_PARTIAL:

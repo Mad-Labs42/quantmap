@@ -18,6 +18,7 @@ from src.campaign_outcome.contracts import (
     FailureDomain,
     MeasurementPhaseVerdict,
 )
+from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
 from src.campaign_outcome.evaluate import evaluate_campaign_outcome
 
 
@@ -107,14 +108,14 @@ def _minimal_run_campaign_env(
 
     _fake_artifacts = [
         {
-            "artifact_type": "campaign_summary_md",
-            "filename": "campaign-summary.md",
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
             "path": tmp_path
             / "artifacts"
             / "reports"
             / "test_model"
             / "test_camp"
-            / "campaign-summary.md",
+            / FILENAME_CAMPAIGN_SUMMARY,
             "exists": True,
             "db_status": "complete",
             "sha256": None,
@@ -309,5 +310,9 @@ def test_runner_primary_report_failure_preserves_measurement_verdict(
     assert final_out.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert final_out.failure_domain == FailureDomain.POST_RUN_PIPELINE
     assert captured_models
-    assert not captured_models[-1].show_next_actions
-    assert captured_models[-1].report_generation_ok is False
+    rm = captured_models[-1]
+    assert not rm.show_next_actions
+    assert rm.report_generation_ok is False
+    assert rm.failure_cause and "Primary report generation failed" in rm.failure_cause
+    assert "Post-campaign analysis failed" not in (rm.failure_cause or "")
+    assert rm.failure_remediation and "Review logs" in rm.failure_remediation

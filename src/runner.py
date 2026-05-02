@@ -3060,9 +3060,14 @@ def run_campaign(
             _status_conn.commit()
 
     except Exception as exc:
-        logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
-        failure_cause = "Post-campaign analysis failed."
-        failure_remediation = "Run 'quantmap rescore' to retry analysis."
+        if analysis_ok:
+            logger.error("Report/export generation failed: %s", exc, exc_info=True)
+            failure_cause = "Report/export generation failed."
+            failure_remediation = "Review logs and lab artifacts; measurement data may remain valid in the database."
+        else:
+            logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
+            failure_cause = "Post-campaign analysis failed."
+            failure_remediation = "Run 'quantmap rescore' to retry analysis."
         with get_connection(_eff_db_path) as _status_conn:
             now_status = datetime.now(timezone.utc).isoformat()
             if analysis_ok:

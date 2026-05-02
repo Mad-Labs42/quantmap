@@ -6,7 +6,6 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from src.campaign_outcome import evaluate_campaign_outcome, project_final_review
 from src.campaign_outcome.contracts import (
     AbortReason,
     CampaignEvidenceSummary,
@@ -16,6 +15,8 @@ from src.campaign_outcome.contracts import (
     MeasurementPhaseVerdict,
     PostRunVerdict,
 )
+from src.campaign_outcome.evaluate import evaluate_campaign_outcome
+from src.campaign_outcome.projection import project_final_review
 
 
 def _base_evidence(**kwargs) -> CampaignEvidenceSummary:
@@ -201,6 +202,150 @@ def test_partial_evidence_partial_outcome():
     assert out.measurement == MeasurementPhaseVerdict.PARTIAL
     assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
     assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+def test_report_ok_true_with_report_status_failed_not_success_style():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="failed",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.post_run == PostRunVerdict.REPORT_FAILED
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not out.allows_success_style_review
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+
+
+def test_report_ok_true_with_report_status_skipped_not_success_style():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="skipped",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.post_run == PostRunVerdict.REPORT_SKIPPED
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not out.allows_success_style_review
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+
+
+def test_report_status_partial_not_success_style():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="partial",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.post_run == PostRunVerdict.REPORT_PARTIAL
+    assert not out.allows_success_style_review
+
+
+def test_distinct_failure_detail_analysis_branches():
+    base_ev = _base_evidence()
+    failed = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            analysis_status="failed",
+            evidence=base_ev,
+        )
+    )
+    skipped = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            analysis_status="skipped",
+            evidence=base_ev,
+        )
+    )
+    not_reached = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            scoring_completed=False,
+            analysis_status="running",
+            evidence=base_ev,
+        )
+    )
+    assert failed.failure_detail == "Post-campaign analysis failed."
+    assert skipped.failure_detail == "Post-campaign analysis was skipped."
+    assert (
+        not_reached.failure_detail
+        == "Post-campaign analysis and scoring did not complete."
+    )
+
+
+def test_distinct_failure_detail_report_branches():
+    base_ev = _base_evidence()
+    common = dict(
+        campaign_id="c",
+        effective_campaign_id="c",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=base_ev,
+    )
+    failed = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(**common, report_ok=False, report_status="failed")
+    )
+    skipped = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(**common, report_ok=False, report_status="skipped")
+    )
+    partial = evaluate_campaign_outcome(
+        CampaignOutcomeInputs(**common, report_ok=True, report_status="partial")
+    )
+    assert (
+        failed.failure_detail
+        == "Primary report generation failed; measurement data remains valid."
+    )
+    assert (
+        skipped.failure_detail
+        == "Primary report generation was skipped; measurement data remains valid."
+    )
+    assert (
+        partial.failure_detail
+        == "Report bundle partially generated (secondary artifacts)."
+    )
+
+
+def test_projection_prefers_evaluator_failure_detail_over_runner_cause():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=False,
+        report_status="failed",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    rm = project_final_review(
+        out,
+        runner_failure_cause="Runner-only misleading cause.",
+        runner_failure_remediation="Runner remediation.",
+    )
+    assert rm.failure_cause == out.failure_detail
+    assert "Runner-only misleading cause." not in (rm.failure_cause or "")
 
 
 def test_artifact_report_failure_is_not_measurement_failure():
@@ -267,7 +412,9 @@ def test_frozen_dataclasses_immutable():
 
 
 def test_campaign_outcome_package_root_api_surface() -> None:
-    import src.campaign_outcome as co
+    import importlib
+
+    co = importlib.import_module("src.campaign_outcome")
 
     expected = (
         "CampaignEvidenceSummary",

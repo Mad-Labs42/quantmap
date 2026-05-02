@@ -9,6 +9,7 @@ from rich.console import Console
 
 import src.runner as runner
 import src.ui as ui
+from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
 from src.campaign_outcome import CampaignEvidenceSummary
 
 
@@ -61,14 +62,14 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     # Return a fixed artifact list so the review screen's artifact block is exercised.
     _fake_artifacts = [
         {
-            "artifact_type": "campaign_summary_md",
-            "filename": "campaign-summary.md",
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
             "path": tmp_path
             / "artifacts"
             / "reports"
             / "test_model"
             / "test_camp"
-            / "campaign-summary.md",
+            / FILENAME_CAMPAIGN_SUMMARY,
             "exists": True,
             "db_status": "complete",
             "sha256": None,

@@ -32,6 +32,7 @@ class PostRunVerdict(str, Enum):
     ANALYSIS_FAILED = "analysis_failed"
     ANALYSIS_SKIPPED = "analysis_skipped"
     REPORT_FAILED = "report_failed"
+    REPORT_SKIPPED = "report_skipped"
     REPORT_PARTIAL = "report_partial"
     REPORT_SUCCEEDED = "report_succeeded"
 
