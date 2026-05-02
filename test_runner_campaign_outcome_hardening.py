@@ -19,7 +19,14 @@ from src.campaign_outcome.contracts import (
     FailureDomain,
     MeasurementPhaseVerdict,
 )
-from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
+from src.artifact_paths import (
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_METADATA,
+    ARTIFACT_RUN_REPORTS,
+    FILENAME_CAMPAIGN_SUMMARY,
+    FILENAME_METADATA,
+    FILENAME_RUN_REPORTS,
+)
 from src.campaign_outcome.evaluate import evaluate_campaign_outcome
 
 
@@ -127,6 +134,181 @@ def _minimal_run_campaign_env(
     )
 
     return test_console
+
+
+def _success_evidence(*_args: object, **_kwargs: object) -> CampaignEvidenceSummary:
+    return CampaignEvidenceSummary(
+        configs_total=1,
+        configs_completed=1,
+        configs_oom=0,
+        configs_skipped_oom=0,
+        configs_degraded=0,
+        cycles_attempted=1,
+        cycles_complete=1,
+        cycles_invalid=0,
+        has_any_success_request=True,
+    )
+
+
+def _success_scores() -> dict:
+    return {
+        "winner": "test_10",
+        "effective_filters": {},
+        "stats": {"test_10": {}},
+        "passing": {"test_10": {"warm_tg_median": 100.0}},
+        "eliminated": {},
+        "unrankable": {},
+    }
+
+
+def _capture_review_calls(
+    monkeypatch: pytest.MonkeyPatch, con: Console
+) -> list[dict]:
+    captured_calls: list[dict] = []
+    real_render = ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs):
+        kwargs.pop("target_console", None)
+        captured_calls.append(kwargs)
+        real_render(**kwargs, target_console=con)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _capture_render,
+    )
+    return captured_calls
+
+
+def test_runner_happy_path_returns_zero_and_projects_success_read_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full success finalization must return normally and keep evaluator-owned success truth."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_fetch_campaign_evidence_summary", _success_evidence)
+    monkeypatch.setattr("src.score.score_campaign", lambda *_a, **_k: _success_scores())
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+    )
+
+    captured_calls = _capture_review_calls(monkeypatch, con)
+    outcome_inputs: list[CampaignOutcomeInputs] = []
+    real_eval = runner.evaluate_campaign_outcome
+
+    def _capture_eval(inp: CampaignOutcomeInputs):
+        outcome_inputs.append(inp)
+        return real_eval(inp)
+
+    monkeypatch.setattr(runner, "evaluate_campaign_outcome", _capture_eval)
+
+    runner.run_campaign(
+        campaign_id="test_camp",
+        dry_run=False,
+        yolo_mode=False,
+        baseline_path=tmp_path / "baseline.yaml",
+    )
+
+    assert len(outcome_inputs) == 1
+    inp = outcome_inputs[0]
+    assert inp.report_ok is True
+    assert inp.run_reports_ok is True
+    assert inp.metadata_ok is True
+    assert inp.report_status == "complete"
+    assert inp.evidence.rankable_config_count == 1
+    assert inp.evidence.winner_present is True
+
+    assert captured_calls
+    rm = captured_calls[-1]["read_model"]
+    assert rm.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert rm.show_next_actions
+    assert rm.report_generation_ok is True
+
+
+def test_runner_marks_failed_secondary_artifacts_in_review_without_losing_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Secondary artifact failures are visible in review while measurement remains succeeded."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, "_fetch_campaign_evidence_summary", _success_evidence)
+    monkeypatch.setattr("src.score.score_campaign", lambda *_a, **_k: _success_scores())
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+    )
+
+    def _run_reports_boom(*_a: object, **_k: object) -> Path:
+        raise RuntimeError("run reports failed")
+
+    def _metadata_boom(*_a: object, **_k: object) -> Path:
+        raise RuntimeError("metadata failed")
+
+    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _run_reports_boom)
+    monkeypatch.setattr("src.export.generate_metadata_json", _metadata_boom)
+
+    fake_artifacts = [
+        {
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
+            "path": tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+        {
+            "artifact_type": ARTIFACT_RUN_REPORTS,
+            "filename": FILENAME_RUN_REPORTS,
+            "path": tmp_path / FILENAME_RUN_REPORTS,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+        {
+            "artifact_type": ARTIFACT_METADATA,
+            "filename": FILENAME_METADATA,
+            "path": tmp_path / FILENAME_METADATA,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+    ]
+    monkeypatch.setattr(
+        runner, "get_campaign_artifact_paths", lambda *args, **kwargs: fake_artifacts
+    )
+
+    captured_calls = _capture_review_calls(monkeypatch, con)
+    outcomes = []
+    real_eval = runner.evaluate_campaign_outcome
+
+    def _capture_eval(inp: CampaignOutcomeInputs):
+        outcome = real_eval(inp)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(runner, "evaluate_campaign_outcome", _capture_eval)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+
+    assert exc.value.code == 1
+    assert outcomes[-1].measurement == MeasurementPhaseVerdict.SUCCEEDED
+    assert outcomes[-1].outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert captured_calls
+
+    artifacts_by_type = {
+        item["artifact_type"]: item for item in captured_calls[-1]["artifacts"]
+    }
+    assert artifacts_by_type[ARTIFACT_CAMPAIGN_SUMMARY]["db_status"] == "complete"
+    assert artifacts_by_type[ARTIFACT_CAMPAIGN_SUMMARY]["exists"] is True
+    assert artifacts_by_type[ARTIFACT_RUN_REPORTS]["db_status"] == "failed"
+    assert artifacts_by_type[ARTIFACT_RUN_REPORTS]["exists"] is False
+    assert artifacts_by_type[ARTIFACT_METADATA]["db_status"] == "failed"
+    assert artifacts_by_type[ARTIFACT_METADATA]["exists"] is False
 
 
 def test_exit_code_helper_maps_success_style_only() -> None:
