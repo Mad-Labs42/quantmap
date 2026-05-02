@@ -86,6 +86,29 @@ def test_no_valid_config_blocks_success_style_review():
     assert not out.allows_recommendation_authority
 
 
+def test_degraded_evidence_without_rankable_winner_is_degraded_not_success():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="complete",
+        scoring_completed=True,
+        passing_count=0,
+        winner_config_id=None,
+        evidence=_base_evidence(configs_degraded=1),
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+    assert out.outcome_kind == CampaignOutcomeKind.DEGRADED
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
+    assert (
+        out.failure_detail
+        == "No rankable winner; instrumentation or evidence quality is degraded."
+    )
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
 def test_final_review_read_model_not_raw_report_ok():
     ev = _base_evidence()
     inp = CampaignOutcomeInputs(
@@ -113,6 +136,35 @@ def test_abort_maps_to_aborted():
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.outcome_kind == CampaignOutcomeKind.ABORTED
     assert out.abort == AbortReason.USER_INTERRUPT
+
+
+def test_abort_projection_synthesizes_cause_when_detail_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fake_synth(*args: object, **kwargs: object) -> outcome_evaluate._OutcomeSynth:
+        return outcome_evaluate._OutcomeSynth(
+            CampaignOutcomeKind.ABORTED,
+            FailureDomain.UNKNOWN,
+            None,
+            AbortReason.UNKNOWN,
+        )
+
+    monkeypatch.setattr(outcome_evaluate, "_synthesize_outcome", _fake_synth)
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            report_status="complete",
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    rm = project_final_review(out)
+    assert rm.failure_cause == "Aborted: unknown."
+    assert not rm.show_next_actions
 
 
 @pytest.mark.parametrize(
@@ -245,6 +297,27 @@ def test_complete_lifecycle_startup_failure_is_failed_not_insufficient_evidence(
     assert out.measurement == MeasurementPhaseVerdict.FAILED
     assert out.outcome_kind == CampaignOutcomeKind.FAILED
     assert out.failure_domain == FailureDomain.BACKEND_STARTUP
+
+
+def test_no_cycles_for_configured_campaign_is_no_evidence_not_not_started():
+    ev = CampaignEvidenceSummary(
+        configs_total=2,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.NO_EVIDENCE
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
 
 
 def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_complete():
