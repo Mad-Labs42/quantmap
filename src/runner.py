@@ -1154,8 +1154,13 @@ def _fetch_campaign_evidence_summary(
 
     row_req = conn.execute(
         """
-        SELECT COUNT(*) FROM requests
-        WHERE campaign_id=? AND outcome='success' AND cycle_status='complete'
+        SELECT COUNT(*)
+        FROM requests r
+        JOIN cycles c ON r.cycle_id = c.id
+        WHERE r.campaign_id=?
+          AND r.outcome='success'
+          AND r.cycle_status='complete'
+          AND c.status='complete'
         """,
         (campaign_id,),
     ).fetchone()

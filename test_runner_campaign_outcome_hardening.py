@@ -240,6 +240,49 @@ def test_fetch_campaign_evidence_summary_counts_only_complete_success_requests(
     )
 
 
+def test_fetch_campaign_evidence_summary_requires_completed_cycle_row(
+    tmp_path: Path,
+) -> None:
+    """A stale request cycle_status must not make an invalid cycle look successful."""
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO campaigns (id, name, created_at) VALUES ('camp', 'camp', '2026-04-25T12:00:00Z')"
+        )
+        conn.execute(
+            """
+            INSERT INTO configs
+                (id, campaign_id, variable_name, variable_value, config_values_json, status)
+            VALUES ('cfg', 'camp', 'n_gpu_layers', '10', '{}', 'complete')
+            """
+        )
+        cur = conn.execute(
+            """
+            INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
+            VALUES ('cfg', 'camp', 1, 'invalid')
+            """
+        )
+        invalid_cycle_id = cur.lastrowid
+        conn.execute(
+            """
+            INSERT INTO requests
+                (cycle_id, campaign_id, config_id, cycle_number, request_index,
+                 is_cold, request_type, outcome, cycle_status)
+            VALUES (?, 'camp', 'cfg', 1, 1, 0, 'speed_short', 'success', 'complete')
+            """,
+            (invalid_cycle_id,),
+        )
+        conn.commit()
+
+        summary = runner._fetch_campaign_evidence_summary(conn, "camp")
+
+    assert summary.has_any_success_request is False
+
+
 def test_runner_exit_nonzero_when_report_ok_but_no_measurement_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
