@@ -31,6 +31,9 @@ from src.campaign_outcome.contracts import (
     FinalReviewReadModel,
 )
 
+# Backwards-compatible name for the final-review metrics contract (no second DTO).
+PostRunReviewMetrics = FinalReviewMetricsSnapshot
+
 # ---------------------------------------------------------------------------
 # Capability Detection Logic
 # ---------------------------------------------------------------------------
@@ -73,26 +76,8 @@ SYM_DIVIDER: str = "━" if not USE_ASCII else "-"
 
 
 # ---------------------------------------------------------------------------
-# Post-run review presentation DTO
+# Post-run review presentation (metrics type: PostRunReviewMetrics alias above)
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class PostRunReviewMetrics:
-    """Lightweight presentation DTO for config summary metadata.
-
-    Grouped to keep render_post_run_review parameter count under Sonar's
-    13-parameter limit.  All fields are optional — the renderer silently
-    omits any section for which data is absent.
-    """
-
-    winner_config_id: str | None = None
-    winner_tg: float | None = None
-    configs_total: int | None = None
-    configs_valid: int | None = None
-    configs_eliminated: int | None = None
-    run_mode: str | None = None
-    elapsed_seconds: float | None = None
 
 
 def render_acpm_plan_preview(
@@ -509,33 +494,38 @@ def _render_post_run_failure_section(
         con.print("Cause: Unknown.")
 
 
-def _render_post_run_config_summary_and_meta(
-    con: Console, metrics: PostRunReviewMetrics | None
-) -> None:
-    _has_config_summary = False
-    if (
+def _post_run_has_config_count_block(metrics: PostRunReviewMetrics | None) -> bool:
+    return (
         metrics is not None
         and metrics.configs_total is not None
         and metrics.configs_total > 0
-    ):
-        _has_config_summary = True
-        _parts: list[str] = [f"{metrics.configs_total} tested"]
-        if metrics.configs_valid is not None:
-            _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
-        if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
-            _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
-        con.print(f"Configs:  {' · '.join(_parts)}")
+    )
 
-        if metrics.winner_config_id is not None and metrics.winner_tg is not None:
-            con.print(
-                f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
-                f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
-            )
-        elif metrics.winner_config_id is not None:
-            con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
-        elif metrics.configs_valid is not None and metrics.configs_valid == 0:
-            con.print("[dim]No valid configs produced a score.[/dim]")
 
+def _render_post_run_configs_count_line(
+    con: Console, metrics: PostRunReviewMetrics
+) -> None:
+    _parts: list[str] = [f"{metrics.configs_total} tested"]
+    if metrics.configs_valid is not None:
+        _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
+    if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
+        _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
+    con.print(f"Configs:  {' · '.join(_parts)}")
+
+
+def _render_post_run_winner_lines(con: Console, metrics: PostRunReviewMetrics) -> None:
+    if metrics.winner_config_id is not None and metrics.winner_tg is not None:
+        con.print(
+            f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
+            f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
+        )
+    elif metrics.winner_config_id is not None:
+        con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
+    elif metrics.configs_valid is not None and metrics.configs_valid == 0:
+        con.print("[dim]No valid configs produced a score.[/dim]")
+
+
+def _post_run_meta_line_parts(metrics: PostRunReviewMetrics | None) -> list[str]:
     _meta_parts: list[str] = []
     if metrics is not None and metrics.run_mode is not None:
         _mode_label = _POST_RUN_MODE_LABELS.get(
@@ -545,9 +535,21 @@ def _render_post_run_config_summary_and_meta(
     if metrics is not None and metrics.elapsed_seconds is not None:
         _elapsed_str = _format_elapsed(metrics.elapsed_seconds)
         _meta_parts.append(f"Elapsed: [dim]{_elapsed_str}[/dim]")
+    return _meta_parts
+
+
+def _render_post_run_config_summary_and_meta(
+    con: Console, metrics: PostRunReviewMetrics | None
+) -> None:
+    has_config_block = _post_run_has_config_count_block(metrics)
+    if has_config_block and metrics is not None:
+        _render_post_run_configs_count_line(con, metrics)
+        _render_post_run_winner_lines(con, metrics)
+
+    _meta_parts = _post_run_meta_line_parts(metrics)
     if _meta_parts:
         con.print("  ".join(_meta_parts))
-    elif _has_config_summary:
+    elif has_config_block:
         con.print("")
 
 
@@ -583,20 +585,6 @@ def _maybe_render_report_generation_subline(
         return
     _rg = "OK" if ctx.report_generation_ok else "FAILED"
     con.print(f"[dim]Report generation: {_rg}[/dim]")
-
-
-def _final_review_snapshot_to_metrics(
-    m: FinalReviewMetricsSnapshot,
-) -> PostRunReviewMetrics:
-    return PostRunReviewMetrics(
-        winner_config_id=m.winner_config_id,
-        winner_tg=m.winner_tg,
-        configs_total=m.configs_total,
-        configs_valid=m.configs_valid,
-        configs_eliminated=m.configs_eliminated,
-        run_mode=m.run_mode,
-        elapsed_seconds=m.elapsed_seconds,
-    )
 
 
 def _render_post_run_diagnostics_block(
@@ -730,14 +718,12 @@ def render_post_run_review_from_read_model(
 ) -> None:
     """Render post-run review from an explicit outcome read model (Slice 1).
 
-    Presentation-only: maps ``FinalReviewMetricsSnapshot`` to ``PostRunReviewMetrics``
-    at this edge; no DB I/O or sys.exit.
+    Presentation-only: uses ``read_model.metrics`` (``FinalReviewMetricsSnapshot``)
+    as-is; no DB I/O or sys.exit.
     """
     con = target_console or get_console()
     _color = _OUTCOME_STATUS_STYLE.get(read_model.outcome_kind, "red")
-    metrics: PostRunReviewMetrics | None = None
-    if read_model.metrics is not None:
-        metrics = _final_review_snapshot_to_metrics(read_model.metrics)
+    metrics: PostRunReviewMetrics | None = read_model.metrics
 
     fc = read_model.failure_cause.strip() if read_model.failure_cause else ""
     ctx = _PostRunReviewRenderContext(
