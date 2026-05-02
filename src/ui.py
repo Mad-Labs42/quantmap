@@ -25,7 +25,11 @@ from src.artifact_paths import (
     ARTIFACT_RAW_TELEMETRY,
     ARTIFACT_RUN_REPORTS,
 )
-from src.campaign_outcome.contracts import CampaignOutcomeKind, FinalReviewReadModel
+from src.campaign_outcome.contracts import (
+    CampaignOutcomeKind,
+    FinalReviewMetricsSnapshot,
+    FinalReviewReadModel,
+)
 
 # ---------------------------------------------------------------------------
 # Capability Detection Logic
@@ -420,6 +424,244 @@ def render_artifact_block(
     console.print("")
 
 
+# --- Post-run review: shared presentation ---------------------------------
+
+_POST_RUN_MODE_LABELS: dict[str, str] = {
+    "full": "Full",
+    "quick": "Quick",
+    "standard": "Standard",
+    "custom": "Custom",
+}
+
+_OUTCOME_STATUS_STYLE: dict[CampaignOutcomeKind, str] = {
+    CampaignOutcomeKind.SUCCESS: "green",
+    CampaignOutcomeKind.FAILED: "red",
+    CampaignOutcomeKind.ABORTED: "red",
+    CampaignOutcomeKind.PARTIAL: "yellow",
+    CampaignOutcomeKind.DEGRADED: "yellow",
+    CampaignOutcomeKind.INSUFFICIENT_EVIDENCE: "yellow",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class _PostRunReviewRenderContext:
+    """Presentation-only inputs assembled by each entrypoint — no truth computation."""
+
+    campaign_id: str
+    yolo_mode: bool
+    use_legacy_binary_status: bool
+    legacy_report_ok: bool
+    read_headline_status: str
+    read_headline_color: str
+    show_report_generation_subline: bool
+    report_generation_ok: bool | None
+    metrics: PostRunReviewMetrics | None
+    failure_emit: bool
+    failure_cause: str | None
+    failure_remediation: str | None
+    emit_unknown_cause_line: bool
+    emit_artifact_block: bool
+    artifacts: list[dict] | None
+    show_next_actions: bool
+    diagnostics_path: str | None
+    diagnostics_success_style: bool
+    diagnostics_dim_prefer_cause_line: bool
+
+
+def _norm_sentence_post_run(text: str) -> str:
+    text = text.strip()
+    if not text:
+        return text
+    return text if text[-1] in (".", "!", "?") else f"{text}."
+
+
+def _render_post_run_blocker_detail(
+    con: Console,
+    failure_cause_stripped: str,
+    failure_remediation: str | None,
+) -> None:
+    from rich.markup import escape as _escape  # noqa: PLC0415
+
+    con.print("The following blocker was identified:\n")
+    con.print(f"- Cause: {_norm_sentence_post_run(_escape(failure_cause_stripped))}")
+    if failure_remediation and failure_remediation.strip():
+        con.print(
+            f"  Suggested fix: {_norm_sentence_post_run(_escape(failure_remediation.strip()))}"
+        )
+
+
+def _render_post_run_failure_section(
+    con: Console,
+    *,
+    failure_emit: bool,
+    failure_cause_stripped: str,
+    failure_remediation: str | None,
+    emit_unknown_cause_line: bool,
+) -> None:
+    if not failure_emit:
+        return
+    con.print("")
+    if failure_cause_stripped:
+        _render_post_run_blocker_detail(
+            con, failure_cause_stripped, failure_remediation
+        )
+    elif emit_unknown_cause_line:
+        con.print("Cause: Unknown.")
+
+
+def _render_post_run_config_summary_and_meta(
+    con: Console, metrics: PostRunReviewMetrics | None
+) -> None:
+    _has_config_summary = False
+    if (
+        metrics is not None
+        and metrics.configs_total is not None
+        and metrics.configs_total > 0
+    ):
+        _has_config_summary = True
+        _parts: list[str] = [f"{metrics.configs_total} tested"]
+        if metrics.configs_valid is not None:
+            _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
+        if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
+            _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
+        con.print(f"Configs:  {' · '.join(_parts)}")
+
+        if metrics.winner_config_id is not None and metrics.winner_tg is not None:
+            con.print(
+                f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
+                f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
+            )
+        elif metrics.winner_config_id is not None:
+            con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
+        elif metrics.configs_valid is not None and metrics.configs_valid == 0:
+            con.print("[dim]No valid configs produced a score.[/dim]")
+
+    _meta_parts: list[str] = []
+    if metrics is not None and metrics.run_mode is not None:
+        _mode_label = _POST_RUN_MODE_LABELS.get(
+            metrics.run_mode, metrics.run_mode.title()
+        )
+        _meta_parts.append(f"Mode: [dim]{_mode_label}[/dim]")
+    if metrics is not None and metrics.elapsed_seconds is not None:
+        _elapsed_str = _format_elapsed(metrics.elapsed_seconds)
+        _meta_parts.append(f"Elapsed: [dim]{_elapsed_str}[/dim]")
+    if _meta_parts:
+        con.print("  ".join(_meta_parts))
+    elif _has_config_summary:
+        con.print("")
+
+
+def _render_post_run_header_and_yolo(
+    con: Console, campaign_id: str, yolo_mode: bool
+) -> None:
+    con.print(f"\n[bold]Campaign review — {campaign_id}[/bold]")
+    if yolo_mode:
+        con.print("[bold yellow]YOLO Mode Active[/bold yellow]")
+        con.print(
+            "[yellow]Validation requirements were relaxed because the user "
+            "chose to continue after a trust warning.[/yellow]"
+        )
+
+
+def _render_post_run_status_line(
+    con: Console, ctx: _PostRunReviewRenderContext
+) -> None:
+    if ctx.use_legacy_binary_status:
+        if ctx.legacy_report_ok:
+            con.print("Status:  [bold green]Success[/bold green]")
+        else:
+            con.print("Status:  [bold red]Failed[/bold red]")
+        return
+    color = ctx.read_headline_color
+    con.print(f"Status:  [bold {color}]{ctx.read_headline_status}[/bold {color}]")
+
+
+def _maybe_render_report_generation_subline(
+    con: Console, ctx: _PostRunReviewRenderContext
+) -> None:
+    if not ctx.show_report_generation_subline or ctx.report_generation_ok is None:
+        return
+    _rg = "OK" if ctx.report_generation_ok else "FAILED"
+    con.print(f"[dim]Report generation: {_rg}[/dim]")
+
+
+def _final_review_snapshot_to_metrics(
+    m: FinalReviewMetricsSnapshot,
+) -> PostRunReviewMetrics:
+    return PostRunReviewMetrics(
+        winner_config_id=m.winner_config_id,
+        winner_tg=m.winner_tg,
+        configs_total=m.configs_total,
+        configs_valid=m.configs_valid,
+        configs_eliminated=m.configs_eliminated,
+        run_mode=m.run_mode,
+        elapsed_seconds=m.elapsed_seconds,
+    )
+
+
+def _render_post_run_diagnostics_block(
+    con: Console, ctx: _PostRunReviewRenderContext
+) -> None:
+    if ctx.diagnostics_path is None:
+        return
+    from rich.markup import escape  # noqa: PLC0415
+
+    safe_path = escape(str(ctx.diagnostics_path))
+    fc_stripped = ctx.failure_cause.strip() if ctx.failure_cause else ""
+    dim_use_cause = ctx.diagnostics_dim_prefer_cause_line and bool(fc_stripped)
+
+    if ctx.diagnostics_success_style:
+        con.print(
+            f"\n[dim]Internal diagnostic files were retained for debugging.\n"
+            f"By default, they are not included in the user-facing artifact list.\n"
+            f"If you would like to view them, you may do so at:\n"
+            f"{safe_path}[/dim]"
+        )
+        return
+    if dim_use_cause:
+        con.print(
+            f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]"
+        )
+    else:
+        con.print(
+            f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]"
+        )
+
+
+def _render_post_run_review_core(
+    con: Console, ctx: _PostRunReviewRenderContext
+) -> None:
+    _render_post_run_header_and_yolo(con, ctx.campaign_id, ctx.yolo_mode)
+    _render_post_run_status_line(con, ctx)
+    _maybe_render_report_generation_subline(con, ctx)
+    _render_post_run_config_summary_and_meta(con, ctx.metrics)
+
+    fc_strip = ctx.failure_cause.strip() if ctx.failure_cause else ""
+    _render_post_run_failure_section(
+        con,
+        failure_emit=ctx.failure_emit,
+        failure_cause_stripped=fc_strip,
+        failure_remediation=ctx.failure_remediation,
+        emit_unknown_cause_line=ctx.emit_unknown_cause_line,
+    )
+
+    if ctx.emit_artifact_block and ctx.artifacts is not None:
+        render_artifact_block(ctx.campaign_id, ctx.artifacts, target_console=con)
+
+    if ctx.show_next_actions:
+        print_next_actions(
+            [
+                f"quantmap explain {ctx.campaign_id} --evidence",
+                f"quantmap artifacts {ctx.campaign_id}",
+                "quantmap list",
+            ],
+            title="Next actions",
+            target_console=con,
+        )
+
+    _render_post_run_diagnostics_block(con, ctx)
+
+
 def render_post_run_review(
     campaign_id: str,
     report_ok: bool,
@@ -453,136 +695,29 @@ def render_post_run_review(
         target_console:      Console to render to (defaults to global console).
     """
     con = target_console or get_console()
-
-    _MODE_LABELS: dict[str, str] = {
-        "full": "Full",
-        "quick": "Quick",
-        "standard": "Standard",
-        "custom": "Custom",
-    }
-
-    # Campaign review header
-    con.print(f"\n[bold]Campaign review — {campaign_id}[/bold]")
-
-    # YOLO active notice — shown above the review when explicitly activated.
-    if yolo_mode:
-        con.print("[bold yellow]YOLO Mode Active[/bold yellow]")
-        con.print(
-            "[yellow]Validation requirements were relaxed because the user "
-            "chose to continue after a trust warning.[/yellow]"
-        )
-
-    # Status line
-    if report_ok:
-        con.print("Status:  [bold green]Success[/bold green]")
-    else:
-        con.print("Status:  [bold red]Failed[/bold red]")
-
-    # Config summary
-    _has_config_summary = False
-    if (
-        metrics is not None
-        and metrics.configs_total is not None
-        and metrics.configs_total > 0
-    ):
-        _has_config_summary = True
-        _parts: list[str] = [f"{metrics.configs_total} tested"]
-        if metrics.configs_valid is not None:
-            _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
-        if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
-            _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
-        con.print(f"Configs:  {' · '.join(_parts)}")
-
-        if metrics.winner_config_id is not None and metrics.winner_tg is not None:
-            con.print(
-                f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
-                f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
-            )
-        elif metrics.winner_config_id is not None:
-            con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
-        elif metrics.configs_valid is not None and metrics.configs_valid == 0:
-            con.print("[dim]No valid configs produced a score.[/dim]")
-
-    # Mode and elapsed time
-    _meta_parts: list[str] = []
-    if metrics is not None and metrics.run_mode is not None:
-        _mode_label = _MODE_LABELS.get(metrics.run_mode, metrics.run_mode.title())
-        _meta_parts.append(f"Mode: [dim]{_mode_label}[/dim]")
-    if metrics is not None and metrics.elapsed_seconds is not None:
-        _elapsed_str = _format_elapsed(metrics.elapsed_seconds)
-        _meta_parts.append(f"Elapsed: [dim]{_elapsed_str}[/dim]")
-    if _meta_parts:
-        con.print("  ".join(_meta_parts))
-    elif _has_config_summary:
-        con.print("")  # blank line after config summary when no meta line
-
-    # Failure detail block
-    failure_cause_stripped = failure_cause.strip() if failure_cause is not None else ""
-    if not report_ok:
-        con.print("")
-        if failure_cause_stripped:
-            from rich.markup import escape as _escape  # noqa: PLC0415
-
-            def _norm(text: str) -> str:
-                text = text.strip()
-                if not text:
-                    return text
-                return text if text[-1] in (".", "!", "?") else f"{text}."
-
-            con.print("The following blocker was identified:\n")
-            con.print(f"- Cause: {_norm(_escape(failure_cause_stripped))}")
-            if failure_remediation and failure_remediation.strip():
-                con.print(f"  Suggested fix: {_norm(_escape(failure_remediation))}")
-        else:
-            con.print("Cause: Unknown.")
-
-    # Artifact block — only when artifact data is available.
-    if artifacts is not None:
-        render_artifact_block(campaign_id, artifacts, target_console=con)
-
-    # Next actions — show only when the run succeeded.
-    if report_ok:
-        print_next_actions(
-            [
-                f"quantmap explain {campaign_id} --evidence",
-                f"quantmap artifacts {campaign_id}",
-                "quantmap list",
-            ],
-            title="Next actions",
-            target_console=con,
-        )
-
-    # Internal diagnostics notice
-    if diagnostics_path is not None:
-        from rich.markup import escape  # noqa: PLC0415
-
-        safe_path = escape(str(diagnostics_path))
-        if report_ok:
-            con.print(
-                f"\n[dim]Internal diagnostic files were retained for debugging.\n"
-                f"By default, they are not included in the user-facing artifact list.\n"
-                f"If you would like to view them, you may do so at:\n"
-                f"{safe_path}[/dim]"
-            )
-        else:
-            if failure_cause_stripped:
-                con.print(
-                    f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]"
-                )
-            else:
-                con.print(
-                    f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]"
-                )
-
-
-_OUTCOME_STATUS_STYLE: dict[CampaignOutcomeKind, str] = {
-    CampaignOutcomeKind.SUCCESS: "green",
-    CampaignOutcomeKind.FAILED: "red",
-    CampaignOutcomeKind.ABORTED: "red",
-    CampaignOutcomeKind.PARTIAL: "yellow",
-    CampaignOutcomeKind.DEGRADED: "yellow",
-    CampaignOutcomeKind.INSUFFICIENT_EVIDENCE: "yellow",
-}
+    fc = failure_cause.strip() if failure_cause else ""
+    ctx = _PostRunReviewRenderContext(
+        campaign_id=campaign_id,
+        yolo_mode=yolo_mode,
+        use_legacy_binary_status=True,
+        legacy_report_ok=report_ok,
+        read_headline_status="",
+        read_headline_color="green",
+        show_report_generation_subline=False,
+        report_generation_ok=None,
+        metrics=metrics,
+        failure_emit=not report_ok,
+        failure_cause=failure_cause,
+        failure_remediation=failure_remediation,
+        emit_unknown_cause_line=(not report_ok) and not fc,
+        emit_artifact_block=artifacts is not None,
+        artifacts=artifacts,
+        show_next_actions=report_ok,
+        diagnostics_path=diagnostics_path,
+        diagnostics_success_style=report_ok,
+        diagnostics_dim_prefer_cause_line=bool(fc),
+    )
+    _render_post_run_review_core(con, ctx)
 
 
 def render_post_run_review_from_read_model(
@@ -599,139 +734,43 @@ def render_post_run_review_from_read_model(
     at this edge; no DB I/O or sys.exit.
     """
     con = target_console or get_console()
-    _MODE_LABELS: dict[str, str] = {
-        "full": "Full",
-        "quick": "Quick",
-        "standard": "Standard",
-        "custom": "Custom",
-    }
-
-    con.print(f"\n[bold]Campaign review — {campaign_id}[/bold]")
-
-    if yolo_mode:
-        con.print("[bold yellow]YOLO Mode Active[/bold yellow]")
-        con.print(
-            "[yellow]Validation requirements were relaxed because the user "
-            "chose to continue after a trust warning.[/yellow]"
-        )
-
     _color = _OUTCOME_STATUS_STYLE.get(read_model.outcome_kind, "red")
-    con.print(f"Status:  [bold {_color}]{read_model.headline_status}[/bold {_color}]")
-
-    if read_model.report_generation_ok is not None and not read_model.show_next_actions:
-        _rg = "OK" if read_model.report_generation_ok else "FAILED"
-        con.print(f"[dim]Report generation: {_rg}[/dim]")
-
     metrics: PostRunReviewMetrics | None = None
     if read_model.metrics is not None:
-        m = read_model.metrics
-        metrics = PostRunReviewMetrics(
-            winner_config_id=m.winner_config_id,
-            winner_tg=m.winner_tg,
-            configs_total=m.configs_total,
-            configs_valid=m.configs_valid,
-            configs_eliminated=m.configs_eliminated,
-            run_mode=m.run_mode,
-            elapsed_seconds=m.elapsed_seconds,
-        )
+        metrics = _final_review_snapshot_to_metrics(read_model.metrics)
 
-    _has_config_summary = False
-    if (
-        metrics is not None
-        and metrics.configs_total is not None
-        and metrics.configs_total > 0
-    ):
-        _has_config_summary = True
-        _parts: list[str] = [f"{metrics.configs_total} tested"]
-        if metrics.configs_valid is not None:
-            _parts.append(f"[green]{metrics.configs_valid} valid[/green]")
-        if metrics.configs_eliminated is not None and metrics.configs_eliminated > 0:
-            _parts.append(f"[yellow]{metrics.configs_eliminated} eliminated[/yellow]")
-        con.print(f"Configs:  {' · '.join(_parts)}")
-
-        if metrics.winner_config_id is not None and metrics.winner_tg is not None:
-            con.print(
-                f"Best observed config: [bold]{metrics.winner_config_id}[/bold] "
-                f"· TG [bold green]{metrics.winner_tg:.2f}[/bold green] t/s"
-            )
-        elif metrics.winner_config_id is not None:
-            con.print(f"Best observed config: [bold]{metrics.winner_config_id}[/bold]")
-        elif metrics.configs_valid is not None and metrics.configs_valid == 0:
-            con.print("[dim]No valid configs produced a score.[/dim]")
-
-    _meta_parts: list[str] = []
-    if metrics is not None and metrics.run_mode is not None:
-        _mode_label = _MODE_LABELS.get(metrics.run_mode, metrics.run_mode.title())
-        _meta_parts.append(f"Mode: [dim]{_mode_label}[/dim]")
-    if metrics is not None and metrics.elapsed_seconds is not None:
-        _meta_parts.append(
-            f"Elapsed: [dim]{_format_elapsed(metrics.elapsed_seconds)}[/dim]"
-        )
-    if _meta_parts:
-        con.print("  ".join(_meta_parts))
-    elif _has_config_summary:
-        con.print("")
-
-    failure_cause_stripped = (
-        read_model.failure_cause.strip() if read_model.failure_cause is not None else ""
+    fc = read_model.failure_cause.strip() if read_model.failure_cause else ""
+    ctx = _PostRunReviewRenderContext(
+        campaign_id=campaign_id,
+        yolo_mode=yolo_mode,
+        use_legacy_binary_status=False,
+        legacy_report_ok=False,
+        read_headline_status=read_model.headline_status,
+        read_headline_color=_color,
+        show_report_generation_subline=(
+            read_model.report_generation_ok is not None
+            and not read_model.show_next_actions
+        ),
+        report_generation_ok=read_model.report_generation_ok,
+        metrics=metrics,
+        failure_emit=not read_model.show_next_actions,
+        failure_cause=read_model.failure_cause,
+        failure_remediation=read_model.failure_remediation,
+        emit_unknown_cause_line=(
+            (not read_model.show_next_actions)
+            and not fc
+            and read_model.outcome_kind != CampaignOutcomeKind.SUCCESS
+        ),
+        emit_artifact_block=(
+            read_model.artifact_block_mode == "full" and artifacts is not None
+        ),
+        artifacts=artifacts,
+        show_next_actions=read_model.show_next_actions,
+        diagnostics_path=diagnostics_path,
+        diagnostics_success_style=read_model.success_style_diagnostics,
+        diagnostics_dim_prefer_cause_line=bool(fc),
     )
-    if not read_model.show_next_actions:
-        con.print("")
-        if failure_cause_stripped:
-            from rich.markup import escape as _escape  # noqa: PLC0415
-
-            def _norm(text: str) -> str:
-                text = text.strip()
-                if not text:
-                    return text
-                return text if text[-1] in (".", "!", "?") else f"{text}."
-
-            con.print("The following blocker was identified:\n")
-            con.print(f"- Cause: {_norm(_escape(failure_cause_stripped))}")
-            if (
-                read_model.failure_remediation
-                and read_model.failure_remediation.strip()
-            ):
-                con.print(
-                    f"  Suggested fix: {_norm(_escape(read_model.failure_remediation.strip()))}"
-                )
-        elif read_model.outcome_kind != CampaignOutcomeKind.SUCCESS:
-            con.print("Cause: Unknown.")
-
-    if read_model.artifact_block_mode == "full" and artifacts is not None:
-        render_artifact_block(campaign_id, artifacts, target_console=con)
-
-    if read_model.show_next_actions:
-        print_next_actions(
-            [
-                f"quantmap explain {campaign_id} --evidence",
-                f"quantmap artifacts {campaign_id}",
-                "quantmap list",
-            ],
-            title="Next actions",
-            target_console=con,
-        )
-
-    if diagnostics_path is not None:
-        from rich.markup import escape  # noqa: PLC0415
-
-        safe_path = escape(str(diagnostics_path))
-        if read_model.success_style_diagnostics:
-            con.print(
-                f"\n[dim]Internal diagnostic files were retained for debugging.\n"
-                f"By default, they are not included in the user-facing artifact list.\n"
-                f"If you would like to view them, you may do so at:\n"
-                f"{safe_path}[/dim]"
-            )
-        else:
-            if failure_cause_stripped:
-                con.print(
-                    f"\n[dim]Internal diagnostics may provide more information: {safe_path}[/dim]"
-                )
-            else:
-                con.print(
-                    f"\n[dim]Internal diagnostics may help diagnose the issue: {safe_path}[/dim]"
-                )
+    _render_post_run_review_core(con, ctx)
 
 
 def _format_elapsed(seconds: float) -> str:
