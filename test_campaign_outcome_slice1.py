@@ -115,6 +115,113 @@ def test_abort_maps_to_aborted():
     assert out.abort == AbortReason.USER_INTERRUPT
 
 
+@pytest.mark.parametrize(
+    (
+        "flag",
+        "expected_abort",
+        "expected_measurement",
+        "expected_post_run",
+        "expected_domain",
+    ),
+    (
+        (
+            "telemetry_aborted_before_db",
+            AbortReason.TELEMETRY_STARTUP,
+            MeasurementPhaseVerdict.NOT_STARTED,
+            PostRunVerdict.NOT_REACHED,
+            FailureDomain.CONTRACT_CONFIG_ENV,
+        ),
+        (
+            "backend_policy_blocked",
+            AbortReason.BACKEND_EXECUTION_POLICY,
+            MeasurementPhaseVerdict.NOT_STARTED,
+            PostRunVerdict.ANALYSIS_SKIPPED,
+            FailureDomain.CONTRACT_CONFIG_ENV,
+        ),
+    ),
+)
+def test_startup_abort_gates_block_success_and_recommendation_authority(
+    flag,
+    expected_abort,
+    expected_measurement,
+    expected_post_run,
+    expected_domain,
+):
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="complete",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=_base_evidence(),
+        **{flag: True},
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert out.abort == expected_abort
+    assert out.measurement == expected_measurement
+    assert out.post_run == expected_post_run
+    assert out.failure_domain == expected_domain
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+def test_fatal_measurement_exception_uses_message_and_closes_authority_gates():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="complete",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        fatal_exception_during_measurement=True,
+        fatal_exception_message="worker crashed during warm request",
+        evidence=_base_evidence(),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.post_run == PostRunVerdict.NOT_REACHED
+    assert out.failure_domain == FailureDomain.UNKNOWN
+    assert out.failure_detail == "worker crashed during warm request"
+    assert out.abort is None
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+@pytest.mark.parametrize(
+    ("configs_total", "expected_measurement", "expected_domain"),
+    (
+        (0, MeasurementPhaseVerdict.NOT_STARTED, None),
+        (2, MeasurementPhaseVerdict.NO_EVIDENCE, FailureDomain.MEASUREMENT_BODY),
+    ),
+)
+def test_zero_progress_measurement_distinguishes_empty_plan_from_no_evidence(
+    configs_total,
+    expected_measurement,
+    expected_domain,
+):
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        evidence=_base_evidence(
+            configs_total=configs_total,
+            configs_completed=0,
+            cycles_attempted=0,
+            cycles_complete=0,
+            has_any_success_request=False,
+        ),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.measurement == expected_measurement
+    assert out.failure_domain == expected_domain
+    assert out.failure_detail == "No measurement evidence to score."
+
+
 def test_backend_startup_distinct_from_measurement_body():
     ev_startup = _base_evidence(
         has_any_success_request=False,

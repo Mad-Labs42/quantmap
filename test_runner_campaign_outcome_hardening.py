@@ -20,6 +20,7 @@ from src.campaign_outcome.contracts import (
 )
 from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
 from src.campaign_outcome.evaluate import evaluate_campaign_outcome
+from src.db import init_db, write_request
 
 
 def _minimal_run_campaign_env(
@@ -167,6 +168,103 @@ def test_exit_code_helper_maps_success_style_only() -> None:
         )
     )
     assert runner._exit_code_for_campaign_outcome(bad) == 1
+
+
+def test_fetch_campaign_evidence_summary_counts_only_complete_success_requests(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO campaigns (id, name, created_at) VALUES (?, ?, ?)",
+            ("camp", "camp", "2026-05-02T00:00:00Z"),
+        )
+        conn.executemany(
+            """
+            INSERT INTO configs
+                (id, campaign_id, variable_name, variable_value, config_values_json, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("cfg_complete", "camp", "n_gpu_layers", "10", "{}", "complete"),
+                ("cfg_degraded", "camp", "n_gpu_layers", "20", "{}", "degraded"),
+                ("cfg_oom", "camp", "n_gpu_layers", "30", "{}", "oom"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO cycles (config_id, campaign_id, cycle_number, status)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                ("cfg_complete", "camp", 1, "complete"),
+                ("cfg_degraded", "camp", 1, "invalid"),
+            ],
+        )
+        complete_cycle_id, invalid_cycle_id = [
+            row[0] for row in conn.execute("SELECT id FROM cycles ORDER BY id")
+        ]
+
+        base_request = {
+            "campaign_id": "camp",
+            "config_id": "cfg_complete",
+            "cycle_number": 1,
+            "request_index": 1,
+            "is_cold": 0,
+            "request_type": "speed_short",
+            "http_status": 200,
+            "ttft_ms": 1.0,
+            "total_wall_ms": 2.0,
+            "prompt_n": 1,
+            "prompt_ms": 1.0,
+            "prompt_per_second": 1.0,
+            "predicted_n": 1,
+            "predicted_ms": 1.0,
+            "predicted_per_second": 1.0,
+            "cache_n": 0,
+            "total_tokens": 2,
+            "server_pid": 123,
+            "resolved_command": "server",
+            "timestamp_start": "2026-05-02T00:00:01Z",
+            "error_detail": "",
+        }
+        write_request(
+            conn,
+            complete_cycle_id,
+            {**base_request, "outcome": "timeout", "cycle_status": "complete"},
+        )
+        write_request(
+            conn,
+            invalid_cycle_id,
+            {
+                **base_request,
+                "config_id": "cfg_degraded",
+                "outcome": "success",
+                "cycle_status": "invalid",
+            },
+        )
+        conn.commit()
+
+        no_complete_success = runner._fetch_campaign_evidence_summary(conn, "camp")
+        assert no_complete_success.configs_total == 3
+        assert no_complete_success.configs_completed == 1
+        assert no_complete_success.configs_oom == 1
+        assert no_complete_success.configs_degraded == 1
+        assert no_complete_success.cycles_attempted == 2
+        assert no_complete_success.cycles_complete == 1
+        assert no_complete_success.cycles_invalid == 1
+        assert not no_complete_success.has_any_success_request
+
+        write_request(
+            conn,
+            complete_cycle_id,
+            {**base_request, "outcome": "success", "cycle_status": "complete"},
+        )
+        conn.commit()
+
+        with_complete_success = runner._fetch_campaign_evidence_summary(conn, "camp")
+        assert with_complete_success.has_any_success_request
 
 
 def test_runner_exit_nonzero_when_report_ok_but_no_measurement_success(
