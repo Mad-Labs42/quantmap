@@ -441,6 +441,11 @@ def test_keyboard_interrupt_exits_130_not_success(
     rm = captured_read_models[-1]
     assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
     assert not rm.show_next_actions
+    assert rm.failure_remediation and "--resume" in rm.failure_remediation
+    buf = con.file
+    if hasattr(buf, "getvalue"):
+        out = buf.getvalue()
+        assert "--resume" in out or "resume" in out.lower()
 
 
 def test_keyboard_interrupt_exits_130_when_finalize_raises(

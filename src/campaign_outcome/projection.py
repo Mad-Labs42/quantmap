@@ -22,9 +22,8 @@ def _artifact_block_mode_for_outcome(outcome: CampaignOutcome) -> ArtifactBlockM
     surface. That is misleading for failed, aborted, or insufficient-evidence
     campaigns even when files exist on disk. Partial and degraded outcomes still
     warrant the bundle so operators can inspect limited-but-real evidence.
-
-    Slice 1 does not emit ``hidden`` from here; reserve it for future runner-fed
-    context when neither bundle nor diagnostics copy should appear.
+    All other outcomes use ``diagnostics_only`` (artifact table off; diagnostics
+    path and failure section still come from the render context).
     """
     if outcome.outcome_kind in (
         CampaignOutcomeKind.SUCCESS,

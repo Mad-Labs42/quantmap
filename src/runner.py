@@ -112,6 +112,11 @@ console = ui.get_console()
 logger = logging.getLogger(__name__)
 
 
+_INTERRUPT_FINAL_REVIEW_REMEDIATION = (
+    "Resume the interrupted campaign with --resume when you are ready."
+)
+
+
 def _exit_code_for_campaign_outcome(outcome: CampaignOutcome) -> int:
     """Return the process exit code after campaign finalization (not UI rendering).
 
@@ -1247,7 +1252,7 @@ def _finalize_interrupt_post_run_review(
     Caller must not run analysis/report/export — this path skips those stages.
     """
     failure_cause = None
-    failure_remediation = None
+    failure_remediation = _INTERRUPT_FINAL_REVIEW_REMEDIATION
     _last_br_raw = measurement_hints.get("last_backend_failure_reason")
     _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
     with get_connection(db_path) as _camp_conn:

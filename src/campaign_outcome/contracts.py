@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
-ArtifactBlockMode = Literal["full", "diagnostics_only", "hidden"]
+ArtifactBlockMode = Literal["full", "diagnostics_only"]
 
 
 class CampaignLifecyclePhase(str, Enum):
@@ -196,10 +196,9 @@ class FinalReviewReadModel:
     change success vs failure messaging.
 
     ``artifact_block_mode`` is decided in projection: ``full`` surfaces the
-    canonical artifact list for inspectable outcomes; ``diagnostics_only`` keeps
-    log/diagnostic guidance without presenting the bundle as trustworthy outputs;
-    ``hidden`` is reserved for rare cases where neither should appear (unused in
-    Slice 1 projection).
+    canonical artifact list for inspectable outcomes; ``diagnostics_only`` omits
+    that table while still allowing diagnostics paths and failure copy from the
+    runner (no separate “hidden” mode in Slice 1).
     """
 
     headline_status: str
