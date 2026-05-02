@@ -11,6 +11,16 @@ from pathlib import Path
 from rich.console import Console
 
 import src.ui as ui
+from src.artifact_paths import (
+    ARTIFACT_CAMPAIGN_SUMMARY,
+    ARTIFACT_METADATA,
+    ARTIFACT_RAW_TELEMETRY,
+    ARTIFACT_RUN_REPORTS,
+    FILENAME_CAMPAIGN_SUMMARY,
+    FILENAME_METADATA,
+    FILENAME_RAW_TELEMETRY,
+    FILENAME_RUN_REPORTS,
+)
 from src.ui import PostRunReviewMetrics
 
 
@@ -25,6 +35,7 @@ def _render(**kwargs) -> str:
 # ---------------------------------------------------------------------------
 # Diagnostics block
 # ---------------------------------------------------------------------------
+
 
 def test_diagnostics_path_appears_when_provided():
     out = _render(
@@ -47,6 +58,7 @@ def test_diagnostics_block_omitted_when_path_is_none():
 # YOLO mode
 # ---------------------------------------------------------------------------
 
+
 def test_no_yolo_text_on_normal_run():
     out = _render(campaign_id="X_test", report_ok=True, yolo_mode=False)
     assert "YOLO Mode Active" not in out
@@ -56,7 +68,10 @@ def test_no_yolo_text_on_normal_run():
 def test_yolo_text_appears_when_explicitly_set():
     out = _render(campaign_id="X_test", report_ok=True, yolo_mode=True)
     assert "YOLO Mode Active" in out
-    assert "Validation requirements were relaxed because the user chose to continue after a trust warning." in out
+    assert (
+        "Validation requirements were relaxed because the user chose to continue after a trust warning."
+        in out
+    )
 
 
 def test_yolo_default_is_false():
@@ -68,6 +83,7 @@ def test_yolo_default_is_false():
 # ---------------------------------------------------------------------------
 # Next actions block
 # ---------------------------------------------------------------------------
+
 
 def test_next_actions_shown_on_success():
     out = _render(campaign_id="TestCamp_01", report_ok=True)
@@ -86,12 +102,14 @@ def test_next_actions_hidden_on_failure():
 # Artifact block
 # ---------------------------------------------------------------------------
 
+
 def test_artifact_block_shown_when_provided():
     artifacts = [
         {
-            "artifact_type": "campaign_summary_md",
-            "filename": "campaign-summary.md",
-            "path": Path("/lab/artifacts/reports/model/TestCamp_01/campaign-summary.md"),
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
+            "path": Path("/lab/artifacts/reports/model/TestCamp_01")
+            / FILENAME_CAMPAIGN_SUMMARY,
             "exists": True,
             "db_status": "complete",
             "sha256": None,
@@ -157,10 +175,38 @@ def test_artifact_block_unknown_type_falls_back_to_raw():
 def test_artifact_block_human_labels_all_types():
     """Each known artifact_type renders its human-friendly label."""
     artifacts = [
-        {"artifact_type": "campaign_summary_md", "filename": "a.md", "path": Path("/lab/a.md"), "exists": True, "db_status": "complete", "sha256": None},
-        {"artifact_type": "run_reports_md",      "filename": "b.md", "path": Path("/lab/b.md"), "exists": True, "db_status": "complete", "sha256": None},
-        {"artifact_type": "metadata_json",       "filename": "c.json", "path": Path("/lab/c.json"), "exists": True, "db_status": "complete", "sha256": None},
-        {"artifact_type": "raw_telemetry_jsonl", "filename": "d.jsonl", "path": Path("/lab/d.jsonl"), "exists": True, "db_status": "complete", "sha256": None},
+        {
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
+            "path": Path("/lab") / FILENAME_CAMPAIGN_SUMMARY,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+        {
+            "artifact_type": ARTIFACT_RUN_REPORTS,
+            "filename": FILENAME_RUN_REPORTS,
+            "path": Path("/lab") / FILENAME_RUN_REPORTS,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+        {
+            "artifact_type": ARTIFACT_METADATA,
+            "filename": FILENAME_METADATA,
+            "path": Path("/lab") / FILENAME_METADATA,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
+        {
+            "artifact_type": ARTIFACT_RAW_TELEMETRY,
+            "filename": FILENAME_RAW_TELEMETRY,
+            "path": Path("/lab") / FILENAME_RAW_TELEMETRY,
+            "exists": True,
+            "db_status": "complete",
+            "sha256": None,
+        },
     ]
     out = _render(campaign_id="TestCamp_01", report_ok=True, artifacts=artifacts)
     assert "Campaign Summary" in out
@@ -173,9 +219,14 @@ def test_artifact_block_human_labels_all_types():
 # Renderer is side-effect-free
 # ---------------------------------------------------------------------------
 
+
 def test_renderer_is_idempotent():
     """Calling render_post_run_review twice with same args must produce same output."""
-    kwargs = {"campaign_id": "Idem_test", "report_ok": True, "diagnostics_path": "/lab/diag"}
+    kwargs = {
+        "campaign_id": "Idem_test",
+        "report_ok": True,
+        "diagnostics_path": "/lab/diag",
+    }
     out1 = _render(**kwargs)
     out2 = _render(**kwargs)
     assert out1 == out2
@@ -185,20 +236,26 @@ def test_renderer_is_idempotent():
 # Outcome Language
 # ---------------------------------------------------------------------------
 
+
 def test_outcome_success():
-    out = _render(campaign_id='X_test', report_ok=True)
+    out = _render(campaign_id="X_test", report_ok=True)
     assert "Status:  Success" in out
 
 
 def test_outcome_failure_unknown_cause():
-    out = _render(campaign_id='X_test', report_ok=False, diagnostics_path='/lab/diag')
+    out = _render(campaign_id="X_test", report_ok=False, diagnostics_path="/lab/diag")
     assert "Status:  Failed" in out
     assert "Cause: Unknown." in out
     assert "Internal diagnostics may help diagnose the issue" in out
 
 
 def test_outcome_failure_known_cause():
-    out = _render(campaign_id='X_test', report_ok=False, failure_cause='Disk full', diagnostics_path='/lab/diag')
+    out = _render(
+        campaign_id="X_test",
+        report_ok=False,
+        failure_cause="Disk full",
+        diagnostics_path="/lab/diag",
+    )
     assert "Status:  Failed" in out
     assert "Cause: Disk full." in out
     assert "Suggested fix:" not in out
@@ -206,7 +263,12 @@ def test_outcome_failure_known_cause():
 
 
 def test_outcome_failure_remediation():
-    out = _render(campaign_id='X_test', report_ok=False, failure_cause='Timeout', failure_remediation='Try increasing timeout')
+    out = _render(
+        campaign_id="X_test",
+        report_ok=False,
+        failure_cause="Timeout",
+        failure_remediation="Try increasing timeout",
+    )
     assert "Cause: Timeout." in out
     assert "Suggested fix: Try increasing timeout." in out
 
@@ -215,15 +277,16 @@ def test_outcome_failure_remediation():
 # Singular campaign wording
 # ---------------------------------------------------------------------------
 
+
 def test_success_uses_singular_campaign_wording():
     """Plural 'campaigns' replaced with singular status line."""
-    out = _render(campaign_id='X_test', report_ok=True)
+    out = _render(campaign_id="X_test", report_ok=True)
     assert "All requested campaigns ran successfully." not in out
     assert "Status:  Success" in out
 
 
 def test_failure_uses_singular_campaign_wording():
-    out = _render(campaign_id='X_test', report_ok=False)
+    out = _render(campaign_id="X_test", report_ok=False)
     assert "Error: QuantMap could not execute the requested campaigns." not in out
     assert "Status:  Failed" in out
 
@@ -231,6 +294,7 @@ def test_failure_uses_singular_campaign_wording():
 # ---------------------------------------------------------------------------
 # Config summary via PostRunReviewMetrics
 # ---------------------------------------------------------------------------
+
 
 def test_config_summary_full_success():
     out = _render(
@@ -315,11 +379,14 @@ def test_config_summary_fields_omitted_safely():
 # Run mode and elapsed time
 # ---------------------------------------------------------------------------
 
+
 def test_run_mode_display():
     out = _render(
         campaign_id="M",
         report_ok=True,
-        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, run_mode="quick"),
+        metrics=PostRunReviewMetrics(
+            configs_total=1, configs_valid=1, run_mode="quick"
+        ),
     )
     assert "Mode: Quick" in out
 
@@ -328,7 +395,9 @@ def test_run_mode_custom_label():
     out = _render(
         campaign_id="M",
         report_ok=True,
-        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, run_mode="custom"),
+        metrics=PostRunReviewMetrics(
+            configs_total=1, configs_valid=1, run_mode="custom"
+        ),
     )
     assert "Mode: Custom" in out
 
@@ -344,7 +413,9 @@ def test_elapsed_appears_when_provided():
     out = _render(
         campaign_id="T",
         report_ok=True,
-        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, elapsed_seconds=90),
+        metrics=PostRunReviewMetrics(
+            configs_total=1, configs_valid=1, elapsed_seconds=90
+        ),
     )
     assert "1m 30s" in out
 
@@ -353,7 +424,9 @@ def test_elapsed_not_shown_when_none():
     out = _render(
         campaign_id="T",
         report_ok=True,
-        metrics=PostRunReviewMetrics(configs_total=1, configs_valid=1, elapsed_seconds=None),
+        metrics=PostRunReviewMetrics(
+            configs_total=1, configs_valid=1, elapsed_seconds=None
+        ),
     )
     assert "Elapsed:" not in out
 
