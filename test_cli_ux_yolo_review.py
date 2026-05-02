@@ -9,6 +9,8 @@ from rich.console import Console
 
 import src.runner as runner
 import src.ui as ui
+from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
+from src.campaign_outcome import CampaignEvidenceSummary
 
 
 def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
@@ -16,8 +18,7 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
     import types
 
     fake_server = types.SimpleNamespace(
-        SERVER_BIN="fake-server",
-        MODEL_PATH="fake-model"
+        SERVER_BIN="fake-server", MODEL_PATH="fake-model"
     )
     monkeypatch.setitem(sys.modules, "src.server", fake_server)
 
@@ -26,69 +27,148 @@ def _run_mocked_campaign(tmp_path: Path, monkeypatch, yolo_mode: bool) -> str:
 
     monkeypatch.setattr(runner, "console", test_console)
 
-    # Route render_post_run_review through the test console so its output is captured.
-    # Capture the real function before monkeypatching to avoid recursive dispatch.
-    _real_render = ui.render_post_run_review
+    # Route render_post_run_review_from_read_model through the test console.
+    _real_render = ui.render_post_run_review_from_read_model
 
     def _fake_render_post_run_review(**kwargs):
         kwargs.pop("target_console", None)
         _real_render(**kwargs, target_console=test_console)
 
-    monkeypatch.setattr(runner.ui, "render_post_run_review", _fake_render_post_run_review)
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _fake_render_post_run_review,
+    )
 
     monkeypatch.setattr(runner, "_derive_lab_root", lambda _: tmp_path)
-    monkeypatch.setattr(runner, "infer_model_identity", lambda *args, **kwargs: "test_model")
+    monkeypatch.setattr(
+        runner, "infer_model_identity", lambda *args, **kwargs: "test_model"
+    )
 
     # Mock all the heavy lifting
     monkeypatch.setattr(runner, "_setup_logging", lambda *args, **kwargs: None)
     monkeypatch.setattr(runner, "_run_preflight_checks", lambda *args, **kwargs: None)
-    monkeypatch.setattr("src.telemetry_policy.enforce_current_run_readiness", lambda *args, **kwargs: None)
-    monkeypatch.setattr(runner, "artifact_dir", lambda *args, **kwargs: tmp_path / "artifacts" / "logs" / "test_model" / "test_camp")
+    monkeypatch.setattr(
+        "src.telemetry_policy.enforce_current_run_readiness",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "artifact_dir",
+        lambda *args, **kwargs: (
+            tmp_path / "artifacts" / "logs" / "test_model" / "test_camp"
+        ),
+    )
     # Return a fixed artifact list so the review screen's artifact block is exercised.
     _fake_artifacts = [
         {
-            "artifact_type": "campaign_summary_md",
-            "filename": "campaign-summary.md",
-            "path": tmp_path / "artifacts" / "reports" / "test_model" / "test_camp" / "campaign-summary.md",
+            "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
+            "filename": FILENAME_CAMPAIGN_SUMMARY,
+            "path": tmp_path
+            / "artifacts"
+            / "reports"
+            / "test_model"
+            / "test_camp"
+            / FILENAME_CAMPAIGN_SUMMARY,
             "exists": True,
             "db_status": "complete",
             "sha256": None,
         },
     ]
-    monkeypatch.setattr(runner, "get_campaign_artifact_paths", lambda *args, **kwargs: _fake_artifacts)
+    monkeypatch.setattr(
+        runner, "get_campaign_artifact_paths", lambda *args, **kwargs: _fake_artifacts
+    )
     monkeypatch.setattr(runner, "_run_config", lambda *args, **kwargs: True)
+
+    def _fake_evidence(*_a, **_k):
+        return CampaignEvidenceSummary(
+            configs_total=1,
+            configs_completed=1,
+            configs_oom=0,
+            configs_skipped_oom=0,
+            configs_degraded=0,
+            cycles_attempted=1,
+            cycles_complete=1,
+            cycles_invalid=0,
+            has_any_success_request=True,
+        )
+
+    monkeypatch.setattr(runner, "_fetch_campaign_evidence_summary", _fake_evidence)
     monkeypatch.setattr(runner, "_hash_file", lambda *args, **kwargs: "abc")
-    monkeypatch.setattr("src.score.score_campaign", lambda *args, **kwargs: {"winner": None, "effective_filters": {}, "stats": {}})
-    monkeypatch.setattr("src.report.generate_report", lambda *args, **kwargs: tmp_path / "campaign-summary.md")
-    monkeypatch.setattr("src.report_campaign.generate_campaign_report", lambda *args, **kwargs: tmp_path / "run-reports.md")
-    monkeypatch.setattr("src.export.generate_metadata_json", lambda *args, **kwargs: tmp_path / "metadata.json")
-    monkeypatch.setattr("src.trust_identity.summarize_report_artifact_status", lambda *args, **kwargs: "complete")
+
+    def _fake_score(*_a, **_k):
+        return {
+            "winner": "test_10",
+            "effective_filters": {},
+            "stats": {"test_10": {}},
+            "passing": {"test_10": {"warm_tg_median": 100.0}},
+            "eliminated": {},
+            "unrankable": {},
+        }
+
+    monkeypatch.setattr("src.score.score_campaign", _fake_score)
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *args, **kwargs: tmp_path / "campaign-summary.md",
+    )
+    monkeypatch.setattr(
+        "src.report_campaign.generate_campaign_report",
+        lambda *args, **kwargs: tmp_path / "run-reports.md",
+    )
+    monkeypatch.setattr(
+        "src.export.generate_metadata_json",
+        lambda *args, **kwargs: tmp_path / "metadata.json",
+    )
+    monkeypatch.setattr(
+        "src.trust_identity.summarize_report_artifact_status",
+        lambda *args, **kwargs: "complete",
+    )
     monkeypatch.setattr("src.db.write_jsonl_marker", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.telemetry.shutdown", lambda: None)
 
     # Needs a valid campaign and baseline
     campaign = {"id": "test_camp", "variable": "n_gpu_layers", "values": [10]}
-    baseline = {"requests": {"a": "a.json"}, "lab": {"cycles_per_config": 1, "requests_per_cycle": 1}}
+    baseline = {
+        "requests": {"a": "a.json"},
+        "lab": {"cycles_per_config": 1, "requests_per_cycle": 1},
+    }
 
     monkeypatch.setattr(runner, "load_campaign", lambda _: campaign)
     monkeypatch.setattr(runner, "load_baseline", lambda _: baseline)
-    monkeypatch.setattr(runner, "validate_campaign_purity", lambda *args: "n_gpu_layers")
-    monkeypatch.setattr(runner, "build_config_list", lambda *args: [{"config_id": "test_10", "variable_name": "n_gpu_layers", "variable_value": 10, "full_config": {}}])
+    monkeypatch.setattr(
+        runner, "validate_campaign_purity", lambda *args: "n_gpu_layers"
+    )
+    monkeypatch.setattr(
+        runner,
+        "build_config_list",
+        lambda *args: [
+            {
+                "config_id": "test_10",
+                "variable_name": "n_gpu_layers",
+                "variable_value": 10,
+                "full_config": {},
+            }
+        ],
+    )
 
     # We need a dummy request file
     (tmp_path / "a.json").touch()
     monkeypatch.setattr(runner, "_REPO_ROOT", tmp_path)
 
     import sqlite3
+
     db_path = tmp_path / "db" / "lab.sqlite"
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     from src.db import init_db
+
     init_db(db_path)
 
     # Create required DB tables so updates don't crash
     with sqlite3.connect(db_path) as conn:
-        conn.execute("INSERT INTO campaigns (id, name, created_at) VALUES ('test_camp', 'test_camp', '2026-04-25T12:00:00Z')")
+        conn.execute(
+            "INSERT INTO campaigns (id, name, created_at) VALUES ('test_camp', 'test_camp', '2026-04-25T12:00:00Z')"
+        )
 
     runner.run_campaign(
         campaign_id="test_camp",
@@ -107,7 +187,9 @@ def test_normal_run_does_not_contain_yolo_wording(tmp_path: Path, monkeypatch):
     assert "Validation requirements were relaxed" not in output
 
     assert "Internal diagnostic files were retained for debugging." in output
-    assert "By default, they are not included in the user-facing artifact list." in output
+    assert (
+        "By default, they are not included in the user-facing artifact list." in output
+    )
     assert "logs\\test_model\\test_camp" in output.replace("/", "\\")
 
 
@@ -115,10 +197,15 @@ def test_yolo_run_contains_yolo_wording(tmp_path: Path, monkeypatch):
     output = _run_mocked_campaign(tmp_path, monkeypatch, yolo_mode=True)
 
     assert "YOLO Mode Active" in output
-    assert "Validation requirements were relaxed because the user chose to continue after a trust warning." in output
+    assert (
+        "Validation requirements were relaxed because the user chose to continue after a trust warning."
+        in output
+    )
 
     assert "Internal diagnostic files were retained for debugging." in output
-    assert "By default, they are not included in the user-facing artifact list." in output
+    assert (
+        "By default, they are not included in the user-facing artifact list." in output
+    )
     assert "logs\\test_model\\test_camp" in output.replace("/", "\\")
 
 
