@@ -5,10 +5,13 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError
 
 import pytest
+from rich.console import Console
 
 from src.campaign_outcome.contracts import (
     AbortReason,
     CampaignEvidenceSummary,
+    CampaignLifecyclePhase,
+    CampaignOutcome,
     CampaignOutcomeInputs,
     CampaignOutcomeKind,
     FailureDomain,
@@ -162,6 +165,23 @@ def test_fatal_measurement_exception_is_failed_measurement_outcome() -> None:
     assert not out.allows_success_style_review
 
 
+def test_fatal_measurement_exception_uses_default_failure_detail() -> None:
+    """Missing exception text still yields an actionable failure cause."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            fatal_exception_during_measurement=True,
+            report_ok=True,
+            evidence=_base_evidence(has_any_success_request=True),
+        )
+    )
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.failure_domain == FailureDomain.UNKNOWN
+    assert out.failure_detail == "Fatal error during measurement."
+
+
 def test_backend_startup_distinct_from_measurement_body():
     """Startup vs body domain while DB reflects a finished lifecycle (complete)."""
     ev_startup = _base_evidence(
@@ -182,6 +202,7 @@ def test_backend_startup_distinct_from_measurement_body():
     assert out_b.measurement == MeasurementPhaseVerdict.FAILED
     assert out_b.failure_domain == FailureDomain.BACKEND_STARTUP
     assert out_b.outcome_kind == CampaignOutcomeKind.FAILED
+    assert out_b.failure_detail == "Last backend startup failure: startup_timeout."
 
     ev_body = _base_evidence(
         has_any_success_request=False,
@@ -268,6 +289,31 @@ def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_compl
     )
     out = outcome_evaluate.evaluate_campaign_outcome(inp)
     assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.failure_detail == "No measurement evidence to score."
+
+
+def test_registered_configs_without_lab_signal_are_no_evidence() -> None:
+    """Configs scheduled but no cycle/request evidence is distinct from never-started."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            campaign_db_status="complete",
+            scoring_completed=False,
+            evidence=CampaignEvidenceSummary(
+                configs_total=2,
+                configs_completed=0,
+                cycles_attempted=0,
+                cycles_complete=0,
+                cycles_invalid=0,
+                has_any_success_request=False,
+                campaign_db_status="complete",
+            ),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.NO_EVIDENCE
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
     assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
     assert out.failure_detail == "No measurement evidence to score."
 
@@ -674,6 +720,28 @@ def test_project_final_review_artifact_block_mode_reflects_outcome_truth() -> No
     assert project_final_review(aborted).artifact_block_mode == "diagnostics_only"
 
 
+def test_project_final_review_falls_back_to_abort_reason_when_detail_absent() -> None:
+    """Projection still surfaces an abort cause if evaluator detail is unavailable."""
+    out = CampaignOutcome(
+        outcome_kind=CampaignOutcomeKind.ABORTED,
+        lifecycle_phase_at_decision=CampaignLifecyclePhase.FINALIZATION,
+        measurement=MeasurementPhaseVerdict.NOT_STARTED,
+        post_run=PostRunVerdict.NOT_REACHED,
+        failure_domain=None,
+        failure_detail=None,
+        abort=AbortReason.USER_INTERRUPT,
+        allows_success_style_review=False,
+        allows_recommendation_authority=False,
+        report_ok=False,
+        run_reports_ok=None,
+        metadata_ok=None,
+        evidence_summary=CampaignEvidenceSummary(),
+    )
+    rm = project_final_review(out)
+    assert rm.failure_cause == "Aborted: user_interrupt."
+    assert rm.artifact_block_mode == "diagnostics_only"
+
+
 def test_render_post_run_review_from_read_model_skips_artifact_block_when_not_full(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -723,6 +791,34 @@ def test_render_post_run_review_from_read_model_skips_artifact_block_when_not_fu
         diagnostics_path=None,
     )
     assert artifact_calls == ["render_artifact_block"]
+
+
+def test_render_post_run_review_from_read_model_unknown_failure_cause() -> None:
+    """Read-model rendering keeps a failure visible even when projection lacks a cause."""
+    import src.ui as ui_module
+
+    con = Console(record=True, width=100, force_terminal=False)
+    rm = FinalReviewReadModel(
+        headline_status="Failed",
+        outcome_kind=CampaignOutcomeKind.FAILED,
+        show_next_actions=False,
+        success_style_diagnostics=False,
+        failure_cause=None,
+        failure_remediation=None,
+        report_generation_ok=False,
+        artifact_block_mode="diagnostics_only",
+    )
+    ui_module.render_post_run_review_from_read_model(
+        campaign_id="c",
+        read_model=rm,
+        artifacts=None,
+        diagnostics_path=None,
+        target_console=con,
+    )
+    rendered = con.export_text()
+    assert "Status:  Failed" in rendered
+    assert "Cause: Unknown." in rendered
+    assert "Next actions" not in rendered
 
 
 def test_projection_prefers_evaluator_failure_detail_over_runner_cause():
