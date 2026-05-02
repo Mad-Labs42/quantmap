@@ -274,6 +274,59 @@ def test_partial_evidence_partial_outcome():
     assert not out.allows_recommendation_authority
 
 
+def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_present():
+    """OOM/skipped-OOM aggregate counts explain invalid cycles during boundary sweeps."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(cycles_invalid=4, configs_skipped_oom=1),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+    assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert out.allows_recommendation_authority
+
+
+def test_invalid_cycles_remain_partial_when_no_boundary_oom_aggregate_evidence():
+    """Without OOM/skipped-OOM signals, invalid cycles stay unexplained → PARTIAL."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(cycles_invalid=2),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+
+
+def test_invalid_cycles_remain_partial_when_only_configs_degraded_no_oom_skipped():
+    """configs_degraded alone does not explain boundary invalid cycles (Slice 1 aggregates)."""
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(cycles_invalid=2, configs_degraded=1),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+
+
 def test_report_ok_true_with_report_status_failed_not_success_style():
     inp = CampaignOutcomeInputs(
         campaign_id="c",
@@ -510,7 +563,9 @@ def test_recommendation_authority_requires_more_than_report_ok_alone():
         winner_config_id=None,
         evidence=_base_evidence(),
     )
-    assert not outcome_evaluate.evaluate_campaign_outcome(no_winner).allows_recommendation_authority
+    assert not outcome_evaluate.evaluate_campaign_outcome(
+        no_winner
+    ).allows_recommendation_authority
 
     bad_report = CampaignOutcomeInputs(
         campaign_id="c",

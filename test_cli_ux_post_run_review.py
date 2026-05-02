@@ -108,9 +108,8 @@ def test_artifact_block_shown_when_provided():
         {
             "artifact_type": ARTIFACT_CAMPAIGN_SUMMARY,
             "filename": FILENAME_CAMPAIGN_SUMMARY,
-            "path": Path(
-                "/lab/artifacts/reports/model/TestCamp_01/campaign-summary.md"
-            ),
+            "path": Path("/lab/artifacts/reports/model/TestCamp_01")
+            / FILENAME_CAMPAIGN_SUMMARY,
             "exists": True,
             "db_status": "complete",
             "sha256": None,

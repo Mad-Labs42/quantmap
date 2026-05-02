@@ -1187,8 +1187,9 @@ def _finalize_interrupt_post_run_review(
     run_plan: RunPlan,
     run_start_time: float,
 ) -> None:
-    """Evaluate + project + render for KeyboardInterrupt; ends with ``sys.exit(130)``.
+    """Evaluate + project + render for KeyboardInterrupt (no process exit).
 
+    Caller must immediately terminate the process with interrupt exit code 130.
     Caller must not run analysis/report/export — this path skips those stages.
     """
     failure_cause = None
@@ -1299,7 +1300,6 @@ def _finalize_interrupt_post_run_review(
         diagnostics_path=_diagnostics_path,
         yolo_mode=yolo_mode,
     )
-    sys.exit(130)
 
 
 # ---------------------------------------------------------------------------
@@ -2923,18 +2923,27 @@ def run_campaign(
             _me_intr = _fetch_campaign_evidence_summary(
                 _intr_conn, effective_campaign_id
             )
-        _finalize_interrupt_post_run_review(
-            campaign_id=campaign_id,
-            effective_campaign_id=effective_campaign_id,
-            measurement_evidence=_me_intr,
-            measurement_hints=measurement_hints,
-            db_path=_eff_db_path,
-            lab_root=_effective_lab_root,
-            model_identity=model_identity,
-            yolo_mode=yolo_mode,
-            run_plan=run_plan,
-            run_start_time=_run_start_time,
-        )
+        try:
+            _finalize_interrupt_post_run_review(
+                campaign_id=campaign_id,
+                effective_campaign_id=effective_campaign_id,
+                measurement_evidence=_me_intr,
+                measurement_hints=measurement_hints,
+                db_path=_eff_db_path,
+                lab_root=_effective_lab_root,
+                model_identity=model_identity,
+                yolo_mode=yolo_mode,
+                run_plan=run_plan,
+                run_start_time=_run_start_time,
+            )
+        except Exception as exc:
+            logger.exception("Interrupted campaign final review failed")
+            console.print(
+                "[yellow]Interrupted — post-run review could not be rendered "
+                f"({type(exc).__name__}).[/yellow]"
+            )
+            raise SystemExit(130) from exc
+        raise SystemExit(130)
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)

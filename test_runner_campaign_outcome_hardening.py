@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -440,3 +441,68 @@ def test_keyboard_interrupt_exits_130_not_success(
     rm = captured_read_models[-1]
     assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
     assert not rm.show_next_actions
+
+
+def test_keyboard_interrupt_exits_130_when_finalize_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Finalize failures still exit 130 and never reach analyze/report (logged, not swallowed)."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_run_config",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    def _boom(**kw: object) -> None:
+        raise RuntimeError("finalize boom")
+
+    monkeypatch.setattr(runner, "_finalize_interrupt_post_run_review", _boom)
+
+    gen_calls: list[int] = []
+
+    def _track_gen(*a: object, **k: object) -> Path:
+        gen_calls.append(1)
+        return tmp_path / "x.md"
+
+    monkeypatch.setattr("src.report.generate_report", _track_gen)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(SystemExit) as exc:
+            runner.run_campaign(
+                campaign_id="test_camp",
+                dry_run=False,
+                yolo_mode=False,
+                baseline_path=tmp_path / "baseline.yaml",
+            )
+    assert exc.value.code == 130
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert not gen_calls
+    assert "Interrupted campaign final review failed" in caplog.text
+
+
+def test_keyboard_interrupt_always_system_exit_130_when_finalize_returns_normally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interrupted runs cannot reach mark-complete / scoring even if finalize does not exit."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "_run_config",
+        lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_finalize_interrupt_post_run_review",
+        lambda **kw: None,
+    )
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+    assert exc.value.code == 130

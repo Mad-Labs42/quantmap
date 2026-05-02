@@ -178,6 +178,25 @@ def _finalize(
     )
 
 
+def _invalid_cycles_explained_by_boundary_oom_counters(
+    ev: CampaignEvidenceSummary,
+) -> bool:
+    """Whether aggregate OOM-style config counts can explain invalid cycles.
+
+    Lab DB summaries do not tie each invalid cycle row to a config outcome.
+    ``configs_degraded`` is **not** used here: it reflects instrumentation/evidence
+    quality signals that may be unrelated to boundary/OOM exploration, so counting
+    it would over-credit “explained” invalids. Only ``configs_oom`` and
+    ``configs_skipped_oom`` indicate boundary/OOM elimination alongside invalid cycles.
+
+    When ``cycles_invalid > 0`` but neither OOM counter is non-zero, invalids stay
+    unexplained → ``PARTIAL``. Slice 1 cannot refine further without per-cycle linkage.
+    """
+    if ev.cycles_invalid <= 0:
+        return True
+    return bool(ev.configs_oom or ev.configs_skipped_oom)
+
+
 def _measurement_domain(
     inputs: CampaignOutcomeInputs,
 ) -> tuple[MeasurementPhaseVerdict, FailureDomain | None]:
@@ -195,6 +214,8 @@ def _measurement_domain(
 
     if ev.has_any_success_request:
         if ev.cycles_invalid > 0:
+            if _invalid_cycles_explained_by_boundary_oom_counters(ev):
+                return MeasurementPhaseVerdict.SUCCEEDED, None
             return MeasurementPhaseVerdict.PARTIAL, None
         return MeasurementPhaseVerdict.SUCCEEDED, None
 
