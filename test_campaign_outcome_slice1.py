@@ -272,6 +272,35 @@ def test_no_measurement_evidence_stays_insufficient_even_when_db_lifecycle_compl
     assert out.failure_detail == "No measurement evidence to score."
 
 
+def test_configs_without_cycles_are_no_evidence_not_success():
+    """Config rows alone are not measurement truth; cycles/requests must exist."""
+    ev = CampaignEvidenceSummary(
+        configs_total=2,
+        configs_completed=2,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+        campaign_db_status="complete",
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        campaign_db_status="complete",
+        report_ok=True,
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.NO_EVIDENCE
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
 def test_happy_path_success_style():
     inp = CampaignOutcomeInputs(
         campaign_id="c",
@@ -744,6 +773,37 @@ def test_projection_prefers_evaluator_failure_detail_over_runner_cause():
     )
     assert rm.failure_cause == out.failure_detail
     assert "Runner-only misleading cause." not in (rm.failure_cause or "")
+
+
+def test_projection_uses_abort_reason_when_detail_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort diagnostics still explain the cause when no detail string exists."""
+
+    def _fake_synth(*args: object, **kwargs: object) -> outcome_evaluate._OutcomeSynth:
+        return outcome_evaluate._OutcomeSynth(
+            CampaignOutcomeKind.ABORTED,
+            FailureDomain.UNKNOWN,
+            None,
+            AbortReason.UNKNOWN,
+        )
+
+    monkeypatch.setattr(outcome_evaluate, "_synthesize_outcome", _fake_synth)
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(),
+        )
+    )
+    rm = project_final_review(out)
+    assert rm.failure_cause == "Aborted: unknown."
+    assert not rm.show_next_actions
 
 
 def test_artifact_report_failure_is_not_measurement_failure():
