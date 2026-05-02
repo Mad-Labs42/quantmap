@@ -275,6 +275,33 @@ def test_partial_evidence_partial_outcome():
     assert not out.allows_recommendation_authority
 
 
+def test_oom_boundary_invalid_cycles_do_not_downgrade_valid_winner():
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=True,
+        report_status="complete",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="valid_cfg",
+        evidence=_base_evidence(
+            configs_total=3,
+            configs_completed=1,
+            configs_oom=2,
+            configs_skipped_oom=0,
+            cycles_attempted=3,
+            cycles_complete=1,
+            cycles_invalid=2,
+            has_any_success_request=True,
+        ),
+    )
+    out = evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
+    assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert out.allows_success_style_review
+    assert out.allows_recommendation_authority
+
+
 def test_report_ok_true_with_report_status_failed_not_success_style():
     inp = CampaignOutcomeInputs(
         campaign_id="c",

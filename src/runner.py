@@ -2935,6 +2935,7 @@ def run_campaign(
             run_plan=run_plan,
             run_start_time=_run_start_time,
         )
+        sys.exit(130)
 
     # -------------------------------------------------------------------------
     # Campaign complete (Phase 2 - Need new connection for final status as measurement conn is closed)

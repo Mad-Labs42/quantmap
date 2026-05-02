@@ -440,3 +440,41 @@ def test_keyboard_interrupt_exits_130_not_success(
     rm = captured_read_models[-1]
     assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
     assert not rm.show_next_actions
+
+
+def test_interrupted_campaign_cannot_fall_through_to_complete_marking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interrupt finalization is terminal even if the renderer is test-suppressed."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+
+    def _interrupt(*_a: object, **_k: object) -> bool:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(runner, "_run_config", _interrupt)
+
+    def _suppressed_interrupt_finalizer(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        runner,
+        "_finalize_interrupt_post_run_review",
+        _suppressed_interrupt_finalizer,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+
+    assert exc.value.code == 130
+
+    with sqlite3.connect(tmp_path / "db" / "lab.sqlite") as conn:
+        status = conn.execute(
+            "SELECT status FROM campaigns WHERE id='test_camp'"
+        ).fetchone()[0]
+
+    assert status != "complete"

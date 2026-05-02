@@ -194,7 +194,7 @@ def _measurement_domain(
         return MeasurementPhaseVerdict.NO_EVIDENCE, FailureDomain.MEASUREMENT_BODY
 
     if ev.has_any_success_request:
-        if ev.cycles_invalid > 0:
+        if ev.cycles_invalid > 0 and not _invalid_cycles_are_oom_boundary_only(ev):
             return MeasurementPhaseVerdict.PARTIAL, None
         return MeasurementPhaseVerdict.SUCCEEDED, None
 
@@ -205,6 +205,15 @@ def _measurement_domain(
         return MeasurementPhaseVerdict.FAILED, FailureDomain.BACKEND_STARTUP
 
     return MeasurementPhaseVerdict.FAILED, FailureDomain.MEASUREMENT_BODY
+
+
+def _invalid_cycles_are_oom_boundary_only(ev: CampaignEvidenceSummary) -> bool:
+    """True when invalid cycles are explained by OOM boundary discovery."""
+    return (
+        ev.configs_oom > 0
+        and ev.configs_degraded == 0
+        and ev.cycles_invalid <= ev.configs_oom
+    )
 
 
 def _measurement_supports_authority(m: MeasurementPhaseVerdict) -> bool:
