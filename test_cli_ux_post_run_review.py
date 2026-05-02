@@ -21,6 +21,10 @@ from src.artifact_paths import (
     FILENAME_RAW_TELEMETRY,
     FILENAME_RUN_REPORTS,
 )
+from src.campaign_outcome.contracts import (
+    CampaignOutcomeKind,
+    FinalReviewReadModel,
+)
 from src.ui import PostRunReviewMetrics
 
 
@@ -29,6 +33,18 @@ def _render(**kwargs) -> str:
     buf = io.StringIO()
     con = Console(file=buf, force_terminal=False, no_color=True, width=200)
     ui.render_post_run_review(**kwargs, target_console=con)
+    return buf.getvalue()
+
+
+def _render_read_model(read_model: FinalReviewReadModel, **kwargs) -> str:
+    """Run read-model renderer with a captured test console and return output."""
+    buf = io.StringIO()
+    con = Console(file=buf, force_terminal=False, no_color=True, width=200)
+    ui.render_post_run_review_from_read_model(
+        read_model=read_model,
+        target_console=con,
+        **kwargs,
+    )
     return buf.getvalue()
 
 
@@ -272,6 +288,58 @@ def test_outcome_failure_remediation():
     )
     assert "Cause: Timeout." in out
     assert "Suggested fix: Try increasing timeout." in out
+
+
+def test_read_model_failure_with_report_ok_true_stays_failure_style():
+    read_model = FinalReviewReadModel(
+        headline_status="Only partial evidence - not a full success",
+        outcome_kind=CampaignOutcomeKind.PARTIAL,
+        show_next_actions=False,
+        success_style_diagnostics=False,
+        failure_cause="Primary report generation failed; measurement data remains valid.",
+        failure_remediation="Review logs and rerun reporting.",
+        report_generation_ok=True,
+        artifact_block_mode="full",
+    )
+
+    out = _render_read_model(
+        read_model,
+        campaign_id="PartialRun",
+        diagnostics_path="/lab/diag",
+    )
+
+    assert "Status:  Only partial evidence - not a full success" in out
+    assert "Report generation: OK" in out
+    assert "Next actions" not in out
+    assert "Cause: Primary report generation failed; measurement data remains valid." in out
+    assert "Suggested fix: Review logs and rerun reporting." in out
+    assert "Internal diagnostics may provide more information: /lab/diag" in out
+
+
+def test_read_model_success_with_report_ok_false_stays_success_style():
+    read_model = FinalReviewReadModel(
+        headline_status="Success",
+        outcome_kind=CampaignOutcomeKind.SUCCESS,
+        show_next_actions=True,
+        success_style_diagnostics=True,
+        failure_cause=None,
+        failure_remediation=None,
+        report_generation_ok=False,
+        artifact_block_mode="full",
+    )
+
+    out = _render_read_model(
+        read_model,
+        campaign_id="WinnerRun",
+        diagnostics_path="/lab/diag",
+    )
+
+    assert "Status:  Success" in out
+    assert "Report generation: FAILED" not in out
+    assert "Cause:" not in out
+    assert "Next actions" in out
+    assert "quantmap explain WinnerRun --evidence" in out
+    assert "Internal diagnostic files were retained for debugging." in out
 
 
 # ---------------------------------------------------------------------------
