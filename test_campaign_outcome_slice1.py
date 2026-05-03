@@ -653,6 +653,78 @@ def test_distinct_failure_detail_analysis_branches():
     )
 
 
+def test_report_ok_none_with_no_report_status_is_skipped_not_failed():
+    """``report_ok=None`` (not attempted) must not collapse into REPORT_FAILED.
+
+    Regression for the tri-state fix in ``_post_run_verdict``: when scoring
+    completed but no structured ``report_status`` is given, an unset/None
+    ``report_ok`` means the primary report was not attempted (e.g., a
+    pre-report seam left no truth behind). Treating None as REPORT_FAILED
+    would surface "Report generation: FAILED" in the UI for paths that never
+    even tried, which is a trust violation. Explicit ``False`` still routes to
+    REPORT_FAILED.
+    """
+    skipped_unset = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=None,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert skipped_unset.post_run == PostRunVerdict.REPORT_SKIPPED
+    assert skipped_unset.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not skipped_unset.allows_success_style_review
+    assert not skipped_unset.allows_recommendation_authority
+    # CampaignOutcome.report_ok normalizes to None for SKIPPED → UI suppresses
+    # the "Report generation: …" subline rather than declaring FAILED.
+    assert skipped_unset.report_ok is None
+    assert (
+        skipped_unset.failure_detail
+        == "Primary report generation was skipped; measurement data remains valid."
+    )
+
+    failed_explicit = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=False,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    assert failed_explicit.post_run == PostRunVerdict.REPORT_FAILED
+    assert failed_explicit.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert failed_explicit.report_ok is False
+
+
+def test_report_ok_none_default_does_not_show_failed_in_projection():
+    """End-to-end through projection: None must yield ``report_generation_ok=None``.
+
+    Pre-report finalization paths (e.g., the runner interrupt flow) carry
+    ``report_ok=None``. Projection must propagate that to the read model so the
+    UI omits the "Report generation: FAILED" subline.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=None,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(),
+        )
+    )
+    rm = project_final_review(out)
+    assert rm.report_generation_ok is None
+
+
 def test_distinct_failure_detail_report_branches():
     base_ev = _base_evidence()
     common = {

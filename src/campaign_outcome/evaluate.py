@@ -294,7 +294,10 @@ def _effective_report_generation_ok(
       - REPORT_SUCCEEDED / REPORT_PARTIAL -> True (primary report succeeded)
       - REPORT_FAILED -> False
       - REPORT_SKIPPED -> None (report not attempted)
-    For non-report verdicts, keep legacy ``report_ok`` fallback.
+    Analysis-side verdicts (NOT_REACHED, ANALYSIS_FAILED, ANALYSIS_SKIPPED) fall
+    back to ``inputs.report_ok`` directly — its tri-state is preserved as-is so
+    "not attempted" (``None``) cannot be mistaken for "failed" (``False``) by
+    downstream projection or the UI subline.
     """
     if post_run in (PostRunVerdict.REPORT_SUCCEEDED, PostRunVerdict.REPORT_PARTIAL):
         return True
@@ -306,6 +309,17 @@ def _effective_report_generation_ok(
 
 
 def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
+    """Resolve the post-run verdict from analysis/report lanes.
+
+    Precedence (highest first):
+      1. ``scoring_completed=False`` → analysis-side verdict (FAILED / SKIPPED / NOT_REACHED).
+      2. Structured ``report_status`` (when present) is authoritative.
+      3. Tri-state ``report_ok`` fallback when no ``report_status`` is given:
+         - ``True``  → ``REPORT_SUCCEEDED``  (primary report succeeded)
+         - ``False`` → ``REPORT_FAILED``     (primary report failed)
+         - ``None``  → ``REPORT_SKIPPED``    (report not attempted / unknown;
+           does not imply failure — distinct from explicit ``False``)
+    """
     analysis_s = (inputs.analysis_status or "").strip().lower()
     report_s = (inputs.report_status or "").strip().lower()
 
@@ -326,10 +340,14 @@ def _post_run_verdict(inputs: CampaignOutcomeInputs) -> PostRunVerdict:
     if report_s == "complete":
         return PostRunVerdict.REPORT_SUCCEEDED
 
-    if inputs.report_ok:
+    # Tri-state report_ok: distinguish "not attempted" (None) from "failed" (False).
+    # Collapsing None into REPORT_FAILED would let pre-report/abort paths show
+    # "Report generation: FAILED" in the UI, which is a trust violation.
+    if inputs.report_ok is True:
         return PostRunVerdict.REPORT_SUCCEEDED
-
-    return PostRunVerdict.REPORT_FAILED
+    if inputs.report_ok is False:
+        return PostRunVerdict.REPORT_FAILED
+    return PostRunVerdict.REPORT_SKIPPED
 
 
 def _outcome_gate_no_measurement_evidence(
