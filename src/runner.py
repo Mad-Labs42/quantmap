@@ -1180,6 +1180,90 @@ def _fetch_campaign_evidence_summary(
     )
 
 
+def _build_campaign_outcome_inputs(
+    *,
+    campaign_id: str,
+    effective_campaign_id: str,
+    db_path: Path,
+    measurement_evidence: CampaignEvidenceSummary,
+    measurement_hints: dict[str, Any],
+    user_interrupted: bool = False,
+    telemetry_aborted_before_db: bool = False,
+    backend_policy_blocked: bool = False,
+    fatal_exception_during_measurement: bool = False,
+    fatal_exception_message: str | None = None,
+    scoring_completed: bool = False,
+    passing_count: int = 0,
+    eliminated_count: int = 0,
+    unrankable_count: int = 0,
+    winner_config_id: str | None = None,
+    unrankable_reason: str | None = None,
+    report_ok: bool | None = None,
+    run_reports_ok: bool | None = None,
+    metadata_ok: bool | None = None,
+) -> CampaignOutcomeInputs:
+    """Assemble runner-side inputs for ``evaluate_campaign_outcome``.
+
+    Reads the four campaign status columns once and coerces
+    ``measurement_hints["last_backend_failure_reason"]`` to ``str | None``.
+    Does not evaluate, project, render, exit, write to the DB, or mark a
+    campaign complete — caller-supplied path-specific flags (interrupt, abort,
+    scoring, report) own those concerns. Truth still flows through
+    ``evaluate_campaign_outcome``; this helper only normalizes inputs.
+    """
+    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
+    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
+    with get_connection(db_path) as _camp_conn:
+        _camp_row = _camp_conn.execute(
+            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
+            (effective_campaign_id,),
+        ).fetchone()
+    _camp_status = (
+        str(_camp_row["status"])
+        if _camp_row and _camp_row["status"] is not None
+        else None
+    )
+    _camp_analysis = (
+        str(_camp_row["analysis_status"])
+        if _camp_row and _camp_row["analysis_status"] is not None
+        else None
+    )
+    _camp_report = (
+        str(_camp_row["report_status"])
+        if _camp_row and _camp_row["report_status"] is not None
+        else None
+    )
+    _camp_failure_reason = (
+        str(_camp_row["failure_reason"])
+        if _camp_row and _camp_row["failure_reason"] is not None
+        else None
+    )
+    return CampaignOutcomeInputs(
+        campaign_id=campaign_id,
+        effective_campaign_id=effective_campaign_id,
+        campaign_db_status=_camp_status,
+        analysis_status=_camp_analysis,
+        report_status=_camp_report,
+        failure_reason=_camp_failure_reason,
+        user_interrupted=user_interrupted,
+        telemetry_aborted_before_db=telemetry_aborted_before_db,
+        backend_policy_blocked=backend_policy_blocked,
+        fatal_exception_during_measurement=fatal_exception_during_measurement,
+        fatal_exception_message=fatal_exception_message,
+        evidence=measurement_evidence,
+        scoring_completed=scoring_completed,
+        passing_count=passing_count,
+        eliminated_count=eliminated_count,
+        unrankable_count=unrankable_count,
+        winner_config_id=winner_config_id,
+        unrankable_reason=unrankable_reason,
+        report_ok=report_ok,
+        run_reports_ok=run_reports_ok,
+        metadata_ok=metadata_ok,
+        last_backend_failure_reason=_last_br_val,
+    )
+
+
 def _render_campaign_post_run_review_screen(
     *,
     effective_campaign_id: str,
@@ -1253,52 +1337,13 @@ def _finalize_interrupt_post_run_review(
     """
     failure_cause = None
     failure_remediation = _INTERRUPT_FINAL_REVIEW_REMEDIATION
-    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
-    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
-    with get_connection(db_path) as _camp_conn:
-        _camp_row = _camp_conn.execute(
-            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
-            (effective_campaign_id,),
-        ).fetchone()
-    _camp_status = (
-        str(_camp_row["status"])
-        if _camp_row and _camp_row["status"] is not None
-        else None
-    )
-    _camp_analysis = (
-        str(_camp_row["analysis_status"])
-        if _camp_row and _camp_row["analysis_status"] is not None
-        else None
-    )
-    _camp_report = (
-        str(_camp_row["report_status"])
-        if _camp_row and _camp_row["report_status"] is not None
-        else None
-    )
-    _camp_failure_reason = (
-        str(_camp_row["failure_reason"])
-        if _camp_row and _camp_row["failure_reason"] is not None
-        else None
-    )
-    _outcome_inputs = CampaignOutcomeInputs(
+    _outcome_inputs = _build_campaign_outcome_inputs(
         campaign_id=campaign_id,
         effective_campaign_id=effective_campaign_id,
-        campaign_db_status=_camp_status,
-        analysis_status=_camp_analysis,
-        report_status=_camp_report,
-        failure_reason=_camp_failure_reason,
+        db_path=db_path,
+        measurement_evidence=measurement_evidence,
+        measurement_hints=measurement_hints,
         user_interrupted=True,
-        evidence=measurement_evidence,
-        scoring_completed=False,
-        passing_count=0,
-        eliminated_count=0,
-        unrankable_count=0,
-        winner_config_id=None,
-        unrankable_reason=None,
-        report_ok=None,
-        run_reports_ok=None,
-        metadata_ok=None,
-        last_backend_failure_reason=_last_br_val,
     )
     _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
     _review_read_model = project_final_review(
@@ -3283,33 +3328,6 @@ def run_campaign(
                 )
             _status_conn.commit()
 
-    _last_br_raw = measurement_hints.get("last_backend_failure_reason")
-    _last_br_val = _last_br_raw if isinstance(_last_br_raw, str) else None
-    with get_connection(_eff_db_path) as _camp_conn:
-        _camp_row = _camp_conn.execute(
-            "SELECT status, analysis_status, report_status, failure_reason FROM campaigns WHERE id=?",
-            (effective_campaign_id,),
-        ).fetchone()
-    _camp_status = (
-        str(_camp_row["status"])
-        if _camp_row and _camp_row["status"] is not None
-        else None
-    )
-    _camp_analysis = (
-        str(_camp_row["analysis_status"])
-        if _camp_row and _camp_row["analysis_status"] is not None
-        else None
-    )
-    _camp_report = (
-        str(_camp_row["report_status"])
-        if _camp_row and _camp_row["report_status"] is not None
-        else None
-    )
-    _camp_failure_reason = (
-        str(_camp_row["failure_reason"])
-        if _camp_row and _camp_row["failure_reason"] is not None
-        else None
-    )
     _unrankable_count = (
         len(scores["unrankable"])
         if scores and isinstance(scores.get("unrankable"), dict)
@@ -3322,24 +3340,20 @@ def run_campaign(
         rankable_config_count=(_configs_valid if analysis_ok else None),
         winner_present=_winner_config_id is not None,
     )
-    _outcome_inputs = CampaignOutcomeInputs(
+    _outcome_inputs = _build_campaign_outcome_inputs(
         campaign_id=campaign_id,
         effective_campaign_id=effective_campaign_id,
-        campaign_db_status=_camp_status,
-        analysis_status=_camp_analysis,
-        report_status=_camp_report,
-        failure_reason=_camp_failure_reason,
-        evidence=_evidence_for_outcome,
+        db_path=_eff_db_path,
+        measurement_evidence=_evidence_for_outcome,
+        measurement_hints=measurement_hints,
         scoring_completed=analysis_ok,
         passing_count=_configs_valid or 0,
         eliminated_count=_configs_eliminated or 0,
         unrankable_count=_unrankable_count,
         winner_config_id=_winner_config_id,
-        unrankable_reason=None,
         report_ok=report_ok,
         run_reports_ok=v2_ok,
         metadata_ok=meta_ok,
-        last_backend_failure_reason=_last_br_val,
     )
     _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
     _review_read_model = project_final_review(

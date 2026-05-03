@@ -7,6 +7,7 @@ import io
 import logging
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 import pytest
 from rich.console import Console
@@ -15,9 +16,11 @@ import src.runner as runner
 import src.ui as ui
 from src.campaign_outcome import CampaignEvidenceSummary
 from src.campaign_outcome.contracts import (
+    CampaignOutcome,
     CampaignOutcomeInputs,
     CampaignOutcomeKind,
     FailureDomain,
+    FinalReviewReadModel,
     MeasurementPhaseVerdict,
 )
 from src.artifact_paths import ARTIFACT_CAMPAIGN_SUMMARY, FILENAME_CAMPAIGN_SUMMARY
@@ -26,6 +29,87 @@ from src.campaign_outcome.evaluate import evaluate_campaign_outcome
 
 def _raise_keyboard_interrupt(*_args: object, **_kwargs: object) -> bool:
     raise KeyboardInterrupt()
+
+
+def _setup_valid_winner_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub evidence + scoring to a single valid-with-winner config.
+
+    Encodes one domain event: ``run_campaign`` sees one completed config with
+    one successful warm request and one passing winner. Tests still call
+    ``runner.run_campaign(...)`` and assert the outcome at the call site.
+    """
+    monkeypatch.setattr(
+        runner,
+        "_fetch_campaign_evidence_summary",
+        lambda *_a, **_k: CampaignEvidenceSummary(
+            configs_total=1,
+            configs_completed=1,
+            configs_oom=0,
+            configs_skipped_oom=0,
+            configs_degraded=0,
+            cycles_attempted=1,
+            cycles_complete=1,
+            cycles_invalid=0,
+            has_any_success_request=True,
+        ),
+    )
+    monkeypatch.setattr(
+        "src.score.score_campaign",
+        lambda *_a, **_k: {
+            "winner": "test_10",
+            "effective_filters": {},
+            "stats": {"test_10": {}},
+            "passing": {"test_10": {"warm_tg_median": 100.0}},
+            "eliminated": {},
+            "unrankable": {},
+        },
+    )
+
+
+def _setup_secondary_report_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Layer secondary-report failure on top of valid-with-winner evidence.
+
+    Primary report (``src.report.generate_report``) succeeds; secondary
+    run-reports (``src.report_campaign.generate_campaign_report``) raises.
+    """
+    _setup_valid_winner_evidence(monkeypatch)
+    monkeypatch.setattr(
+        "src.report.generate_report",
+        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
+    )
+
+    def _v2_fail(*_a: object, **_k: object) -> Path:
+        raise RuntimeError("secondary report failed")
+
+    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _v2_fail)
+
+
+def _capture_read_models(
+    monkeypatch: pytest.MonkeyPatch, console: Console
+) -> list[FinalReviewReadModel]:
+    """Install a render-capture wrapper; return the list to assert on at the call site.
+
+    The real renderer still runs (against the test console), so console-output
+    assertions like "Report generation: OK" continue to work alongside
+    read-model assertions.
+    """
+    captured: list[FinalReviewReadModel] = []
+    _real_render = ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs: Any) -> Any:
+        kwargs.pop("target_console", None)
+        rm: FinalReviewReadModel = kwargs["read_model"]
+        captured.append(rm)
+        return _real_render(**kwargs, target_console=console)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _capture_render,
+    )
+    return captured
 
 
 def _minimal_run_campaign_env(
@@ -333,51 +417,8 @@ def test_runner_secondary_report_failure_keeps_partial_warning_but_exits_zero(
 ) -> None:
     """Secondary run-reports failure remains PARTIAL warning but keeps core success exit."""
     con = _minimal_run_campaign_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner,
-        "_fetch_campaign_evidence_summary",
-        lambda *_a, **_k: CampaignEvidenceSummary(
-            configs_total=1,
-            configs_completed=1,
-            configs_oom=0,
-            configs_skipped_oom=0,
-            configs_degraded=0,
-            cycles_attempted=1,
-            cycles_complete=1,
-            cycles_invalid=0,
-            has_any_success_request=True,
-        ),
-    )
-    monkeypatch.setattr(
-        "src.score.score_campaign",
-        lambda *_a, **_k: {
-            "winner": "test_10",
-            "effective_filters": {},
-            "stats": {"test_10": {}},
-            "passing": {"test_10": {"warm_tg_median": 100.0}},
-            "eliminated": {},
-            "unrankable": {},
-        },
-    )
-    monkeypatch.setattr(
-        "src.report.generate_report",
-        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
-    )
-
-    def _v2_fail(*_a: object, **_k: object) -> Path:
-        raise RuntimeError("secondary report failed")
-
-    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _v2_fail)
-
-    captured_models: list[object] = []
-    _real_render = ui.render_post_run_review_from_read_model
-
-    def _capture_render(**kwargs):
-        kwargs.pop("target_console", None)
-        captured_models.append(kwargs["read_model"])
-        return _real_render(**kwargs, target_console=con)
-
-    monkeypatch.setattr(runner.ui, "render_post_run_review_from_read_model", _capture_render)
+    _setup_secondary_report_failure(monkeypatch, tmp_path)
+    captured_models = _capture_read_models(monkeypatch, con)
 
     runner.run_campaign(
         campaign_id="test_camp",
@@ -403,48 +444,15 @@ def test_runner_secondary_report_failure_normalizes_stale_report_ok_false(
 ) -> None:
     """Structured report_status=partial wins if legacy report_ok was stale false."""
     con = _minimal_run_campaign_env(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        runner,
-        "_fetch_campaign_evidence_summary",
-        lambda *_a, **_k: CampaignEvidenceSummary(
-            configs_total=1,
-            configs_completed=1,
-            configs_oom=0,
-            configs_skipped_oom=0,
-            configs_degraded=0,
-            cycles_attempted=1,
-            cycles_complete=1,
-            cycles_invalid=0,
-            has_any_success_request=True,
-        ),
-    )
-    monkeypatch.setattr(
-        "src.score.score_campaign",
-        lambda *_a, **_k: {
-            "winner": "test_10",
-            "effective_filters": {},
-            "stats": {"test_10": {}},
-            "passing": {"test_10": {"warm_tg_median": 100.0}},
-            "eliminated": {},
-            "unrankable": {},
-        },
-    )
-    monkeypatch.setattr(
-        "src.report.generate_report",
-        lambda *_a, **_k: tmp_path / FILENAME_CAMPAIGN_SUMMARY,
-    )
-
-    def _v2_fail(*_a: object, **_k: object) -> Path:
-        raise RuntimeError("secondary report failed")
-
-    monkeypatch.setattr("src.report_campaign.generate_campaign_report", _v2_fail)
+    _setup_secondary_report_failure(monkeypatch, tmp_path)
     monkeypatch.setattr(
         "src.trust_identity.summarize_report_artifact_status",
         lambda *_a, **_k: "partial",
     )
 
-    def _force_stale_report_ok(inp: CampaignOutcomeInputs):
-        return evaluate_campaign_outcome(dataclasses.replace(inp, report_ok=False))
+    def _force_stale_report_ok(inp: CampaignOutcomeInputs) -> CampaignOutcome:
+        new_inp: CampaignOutcomeInputs = dataclasses.replace(inp, report_ok=False)
+        return evaluate_campaign_outcome(new_inp)
 
     monkeypatch.setattr(
         runner,
@@ -452,15 +460,7 @@ def test_runner_secondary_report_failure_normalizes_stale_report_ok_false(
         _force_stale_report_ok,
     )
 
-    captured_models: list[object] = []
-    _real_render = ui.render_post_run_review_from_read_model
-
-    def _capture_render(**kwargs):
-        kwargs.pop("target_console", None)
-        captured_models.append(kwargs["read_model"])
-        return _real_render(**kwargs, target_console=con)
-
-    monkeypatch.setattr(runner.ui, "render_post_run_review_from_read_model", _capture_render)
+    captured_models = _capture_read_models(monkeypatch, con)
 
     runner.run_campaign(
         campaign_id="test_camp",
@@ -485,62 +485,24 @@ def test_runner_primary_report_failure_preserves_measurement_verdict(
 ) -> None:
     """Primary report failure is post-run truth; measurement verdict stays succeeded when evidence supports it."""
     con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    _setup_valid_winner_evidence(monkeypatch)
 
-    monkeypatch.setattr(
-        runner,
-        "_fetch_campaign_evidence_summary",
-        lambda *_a, **_k: CampaignEvidenceSummary(
-            configs_total=1,
-            configs_completed=1,
-            configs_oom=0,
-            configs_skipped_oom=0,
-            configs_degraded=0,
-            cycles_attempted=1,
-            cycles_complete=1,
-            cycles_invalid=0,
-            has_any_success_request=True,
-        ),
-    )
-    monkeypatch.setattr(
-        "src.score.score_campaign",
-        lambda *_a, **_k: {
-            "winner": "test_10",
-            "effective_filters": {},
-            "stats": {"test_10": {}},
-            "passing": {"test_10": {"warm_tg_median": 100.0}},
-            "eliminated": {},
-            "unrankable": {},
-        },
-    )
-
-    def _boom(*_a, **_k):
+    def _boom(*_a: object, **_k: object) -> Path:
         raise RuntimeError("primary report generation failed")
 
     monkeypatch.setattr("src.report.generate_report", _boom)
 
-    outcomes: list = []
+    outcomes: list[CampaignOutcome] = []
     _real_eval = runner.evaluate_campaign_outcome
 
-    def _wrap_eval(inp):
+    def _wrap_eval(inp: CampaignOutcomeInputs) -> CampaignOutcome:
         o = _real_eval(inp)
         outcomes.append(o)
         return o
 
     monkeypatch.setattr(runner, "evaluate_campaign_outcome", _wrap_eval)
 
-    captured_models: list = []
-    _real_render = ui.render_post_run_review_from_read_model
-
-    def _capture_render(**kwargs):
-        kwargs.pop("target_console", None)
-        captured_models.append(kwargs["read_model"])
-        _real_render(**kwargs, target_console=con)
-
-    monkeypatch.setattr(
-        runner.ui,
-        "render_post_run_review_from_read_model",
-        _capture_render,
-    )
+    captured_models = _capture_read_models(monkeypatch, con)
 
     with pytest.raises(SystemExit) as exc:
         runner.run_campaign(
@@ -576,7 +538,7 @@ def test_keyboard_interrupt_exits_130_not_success(
 
     outcome_calls: list[CampaignOutcomeInputs] = []
 
-    def _wrap_eval(inp: CampaignOutcomeInputs):
+    def _wrap_eval(inp: CampaignOutcomeInputs) -> CampaignOutcome:
         outcome_calls.append(inp)
         return evaluate_campaign_outcome(inp)
 

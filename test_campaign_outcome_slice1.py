@@ -331,7 +331,12 @@ def test_partial_evidence_partial_outcome():
 
 
 def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_present():
-    """OOM + skipped-OOM capacity must meet invalid-cycle count (aggregate Slice 1 rule)."""
+    """OOM-attempting configs (not skipped) must meet invalid-cycle count.
+
+    Skipped-OOM configs never produced cycle rows, so they cannot account for
+    ``cycles_invalid``. Only ``configs_oom`` (configs that actually executed and
+    hit OOM) explains invalid cycles.
+    """
     out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",
@@ -343,7 +348,7 @@ def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_p
             report_status="complete",
             evidence=_base_evidence(
                 cycles_invalid=2,
-                configs_oom=1,
+                configs_oom=2,
                 configs_skipped_oom=1,
             ),
         )
@@ -353,8 +358,38 @@ def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_p
     assert out.allows_recommendation_authority
 
 
+def test_skipped_oom_alone_cannot_explain_invalid_cycles():
+    """Regression: skipped-OOM configs never ran, so they must not vouch for invalid cycles.
+
+    Prior to the fix, ``configs_skipped_oom`` inflated ``explained_capacity`` and
+    silently upgraded measurement to ``SUCCEEDED`` even when no actual OOM-attempting
+    config could account for the invalid cycles. Trust-tightening direction: the
+    correct verdict is ``PARTIAL`` so unrelated invalid cycles (thermal, timeout,
+    etc.) are not laundered through the boundary-OOM narrative.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(
+                cycles_invalid=2,
+                configs_oom=0,
+                configs_skipped_oom=5,
+            ),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not out.allows_recommendation_authority
+
+
 def test_invalid_cycles_remain_partial_when_oom_capacity_below_invalid_count():
-    """Insufficient OOM/skipped-OOM capacity cannot explain all invalid cycles → PARTIAL."""
+    """``configs_oom`` below ``cycles_invalid`` cannot explain all invalid cycles → PARTIAL."""
     out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
             campaign_id="c",

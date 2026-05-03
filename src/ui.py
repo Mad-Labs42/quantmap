@@ -487,6 +487,14 @@ def _render_post_run_failure_section(
 ) -> None:
     if not failure_emit:
         return
+    # Suppress the leading blank line when neither the blocker detail nor the
+    # unknown-cause line will render. Without this guard, PARTIAL outcomes that
+    # still allow next-actions (carve-out path) and carry an empty failure_cause
+    # produce an orphan blank section. The renderer must defend the contract
+    # surface ``failure_cause: str | None`` rather than rely on evaluator
+    # invariants that may shift in future slices.
+    if not failure_cause_stripped and not emit_unknown_cause_line:
+        return
     con.print("")
     if failure_cause_stripped:
         _render_post_run_blocker_detail(

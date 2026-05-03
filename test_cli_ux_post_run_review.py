@@ -436,3 +436,98 @@ def test_meta_line_omitted_when_no_data():
     out = _render(campaign_id="T", report_ok=True, metrics=None)
     assert "Mode:" not in out
     assert "Elapsed:" not in out
+
+
+# ---------------------------------------------------------------------------
+# Failure section orphan-blank-line guard (regression for PARTIAL carve-out)
+# ---------------------------------------------------------------------------
+
+
+def _render_read_model(read_model: object) -> str:
+    """Render a FinalReviewReadModel through the read-model entrypoint."""
+    buf = io.StringIO()
+    con = Console(file=buf, force_terminal=False, no_color=True, width=200)
+    ui.render_post_run_review_from_read_model(
+        campaign_id="T",
+        read_model=read_model,  # type: ignore[arg-type]
+        artifacts=None,
+        diagnostics_path=None,
+        target_console=con,
+    )
+    return buf.getvalue()
+
+
+def test_failure_section_omits_orphan_blank_line_for_partial_carveout_with_empty_cause():
+    """Regression: PARTIAL + show_next_actions + empty failure_cause must not emit a dead blank section.
+
+    The renderer is the wrong layer to assume "PARTIAL with show_next_actions
+    always carries a non-empty failure_cause." Defending the contract surface
+    (``failure_cause: str | None``) keeps the screen clean if a future evaluator
+    path produces an empty cause for the carve-out.
+    """
+    from src.campaign_outcome.contracts import (
+        CampaignOutcomeKind,
+        FinalReviewReadModel,
+    )
+
+    rm = FinalReviewReadModel(
+        headline_status="Only partial evidence — not a full success",
+        outcome_kind=CampaignOutcomeKind.PARTIAL,
+        show_next_actions=True,
+        success_style_diagnostics=True,
+        failure_cause=None,
+        failure_remediation=None,
+        report_generation_ok=True,
+        artifact_block_mode="full",
+    )
+    out = _render_read_model(rm)
+    # Negative checks: no failure-section copy should appear.
+    assert "The following blocker was identified:" not in out
+    assert "Cause: Unknown." not in out
+    assert "- Cause:" not in out
+    # Positive check: the headline still renders.
+    assert "Only partial evidence" in out
+
+
+def test_failure_section_still_renders_blocker_for_failed_outcome_with_cause():
+    """Sanity: the orphan-blank-line guard does not regress the normal failure path."""
+    from src.campaign_outcome.contracts import (
+        CampaignOutcomeKind,
+        FinalReviewReadModel,
+    )
+
+    rm = FinalReviewReadModel(
+        headline_status="Failed — campaign did not complete successfully",
+        outcome_kind=CampaignOutcomeKind.FAILED,
+        show_next_actions=False,
+        success_style_diagnostics=False,
+        failure_cause="Primary report generation failed; measurement data remains valid.",
+        failure_remediation="Review logs and rerun.",
+        report_generation_ok=False,
+        artifact_block_mode="diagnostics_only",
+    )
+    out = _render_read_model(rm)
+    assert "The following blocker was identified:" in out
+    assert "Primary report generation failed" in out
+    assert "Suggested fix:" in out
+
+
+def test_failure_section_still_renders_unknown_cause_when_appropriate():
+    """Sanity: non-success outcomes without next-actions and without a cause still emit 'Cause: Unknown.'."""
+    from src.campaign_outcome.contracts import (
+        CampaignOutcomeKind,
+        FinalReviewReadModel,
+    )
+
+    rm = FinalReviewReadModel(
+        headline_status="Failed — campaign did not complete successfully",
+        outcome_kind=CampaignOutcomeKind.FAILED,
+        show_next_actions=False,
+        success_style_diagnostics=False,
+        failure_cause=None,
+        failure_remediation=None,
+        report_generation_ok=False,
+        artifact_block_mode="diagnostics_only",
+    )
+    out = _render_read_model(rm)
+    assert "Cause: Unknown." in out

@@ -41,7 +41,6 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
     when scoring completed), failure domain/detail, abort reasons, and review
     authority gates are all resolved here in a fixed precedence order.
     """
-    phase = CampaignLifecyclePhase.FINALIZATION
     ev = inputs.evidence
 
     if inputs.user_interrupted:
@@ -133,7 +132,7 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
 
     return CampaignOutcome(
         outcome_kind=synth.kind,
-        lifecycle_phase_at_decision=phase,
+        lifecycle_phase_at_decision=CampaignLifecyclePhase.FINALIZATION,
         measurement=measurement,
         post_run=post_run,
         failure_domain=synth.failure_domain,
@@ -193,18 +192,22 @@ def _invalid_cycles_explained_by_boundary_oom_counters(
     """Aggregate capacity guard (Slice 1 approximation, not per-cycle proof).
 
     Persisted lab summaries do not link each invalid cycle row to OOM vs other causes.
-    We treat ``configs_oom + configs_skipped_oom`` as an upper bound on how many
-    invalid cycles *might* be attributable to boundary/OOM exploration. Invalid cycles
-    may avoid downgrading measurement to ``PARTIAL`` only when this capacity meets or
-    exceeds ``cycles_invalid``. A single OOM-style signal cannot honestly explain
-    multiple unexplained invalid cycles.
+    Only configs that actually executed and hit OOM (``configs_oom``) can plausibly
+    account for invalid cycles — skipped configs never started and therefore never
+    produced a cycle row, so they cannot explain ``cycles_invalid`` even though they
+    share the same boundary trigger. Invalid cycles avoid downgrading measurement to
+    ``PARTIAL`` only when ``configs_oom`` alone meets or exceeds ``cycles_invalid``.
+    A single OOM-style signal cannot honestly explain multiple unexplained invalid
+    cycles.
 
-    ``configs_degraded`` is **not** counted: it is not reliably OOM/boundary-specific.
-    True per-cycle invalid attribution requires richer evidence (deferred schema work).
+    ``configs_skipped_oom`` and ``configs_degraded`` are **not** counted:
+    ``configs_skipped_oom`` reflects configs that never ran (no cycle rows produced);
+    ``configs_degraded`` is not reliably OOM/boundary-specific. True per-cycle
+    invalid attribution requires richer evidence (deferred schema work).
     """
     if ev.cycles_invalid <= 0:
         return True
-    explained_capacity = ev.configs_oom + ev.configs_skipped_oom
+    explained_capacity = ev.configs_oom
     return explained_capacity >= ev.cycles_invalid
 
 
