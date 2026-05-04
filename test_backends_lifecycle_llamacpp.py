@@ -4,13 +4,15 @@ import ast
 from contextlib import contextmanager
 import inspect
 from pathlib import Path
+import sqlite3
+import threading
 from types import TracebackType
 
 import pytest
 
 import src.backends.lifecycle as lifecycle_module
 
-from src.backends.contracts import BackendFailureReason, BackendKind, BackendLaunchRequest
+from src.backends.contracts import BackendFailureReason, BackendKind, BackendLaunchRequest, BackendSession
 from src.backend_execution_policy import (
     BackendExecutionAssessment,
     BackendExecutionPolicyError,
@@ -459,6 +461,100 @@ def test_run_cycle_static_guard_specific_handlers_precede_generic_crash_path() -
     assert "SettingsEnvError" in isinstance_checks
     assert "BackendStartupError" in isinstance_checks
     assert isinstance_checks.index("SettingsEnvError") < isinstance_checks.index("BackendStartupError")
+
+
+def test_run_cycle_uses_real_session_log_for_mid_cycle_oom(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    server_bin = tmp_path / "llama-server"
+    model_path = tmp_path / "model.gguf"
+    server_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    model_path.write_text("model", encoding="utf-8")
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "lab"))
+    monkeypatch.setenv("QUANTMAP_SERVER_BIN", str(server_bin))
+    monkeypatch.setenv("QUANTMAP_MODEL_PATH", str(model_path))
+
+    from src import runner
+    from src.server import ServerOOMError
+
+    server_log = tmp_path / "actual-server.log"
+    server_log.write_text("CUDA error: out of memory\n", encoding="utf-8")
+    request_file = tmp_path / "requests" / "speed_short.json"
+    request_file.parent.mkdir()
+    request_file.write_text('{"prompt": "hello"}', encoding="utf-8")
+
+    @contextmanager
+    def _fake_backend_session(_request: BackendLaunchRequest):
+        yield BackendSession(
+            backend_kind=BackendKind.LLAMACPP,
+            host="127.0.0.1",
+            port=8011,
+            base_url="http://127.0.0.1:8011",
+            pid=9999,
+            log_file=server_log,
+            resolved_cmd_argv=("llama-server", "--port", "8011"),
+            resolved_cmd_str="llama-server --port 8011",
+            no_warmup=False,
+            attempt_count=1,
+            startup_duration_s=1.0,
+            launch_time_utc="2026-01-01T00:00:00+00:00",
+            ready_time_utc="2026-01-01T00:00:01+00:00",
+        )
+
+    class _Collector:
+        _lock = threading.Lock()
+        _samples: list[object] = []
+
+        def start(self, *_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+        def stop(self) -> tuple[list[object], list[object]]:
+            return [], []
+
+    class _Console:
+        def print(self, *_args, **_kwargs) -> None:  # type: ignore[no-untyped-def]
+            return None
+
+    def _boom_measure_request_sync(**_kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("request failed after server OOM")
+
+    monkeypatch.setattr("src.backends.start_backend_session", _fake_backend_session)
+    monkeypatch.setattr(runner, "measure_request_sync", _boom_measure_request_sync)
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """CREATE TABLE cycles (
+            id INTEGER PRIMARY KEY,
+            status TEXT,
+            invalid_reason TEXT,
+            server_pid INTEGER,
+            server_log_path TEXT,
+            started_at TEXT,
+            no_warmup INTEGER,
+            attempt_count INTEGER,
+            startup_duration_s REAL
+        )"""
+    )
+    conn.execute("CREATE TABLE requests (cycle_id INTEGER, cycle_status TEXT)")
+    conn.execute("INSERT INTO cycles (id, status) VALUES (1, 'pending')")
+
+    with pytest.raises(ServerOOMError) as exc_info:
+        runner._run_cycle(
+            conn=conn,
+            config={"config_id": "cfg_01", "server_args": []},
+            cycle_number=1,
+            cycle_id=1,
+            campaign_id="camp",
+            lab_config={"requests_per_cycle": 1, "cycles_per_config": 2, "inter_request_delay_s": 0},
+            request_files={"speed_short": request_file},
+            collector=_Collector(),  # type: ignore[arg-type]
+            console=_Console(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.log_path == server_log
+    row = conn.execute("SELECT status, invalid_reason FROM cycles WHERE id=1").fetchone()
+    assert row == ("invalid", "crash: OOM")
 
 
 def test_lifecycle_test_module_imports_lifecycle_consistently() -> None:

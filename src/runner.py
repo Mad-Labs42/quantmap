@@ -1205,24 +1205,17 @@ def _run_cycle(
         # Determine if this was an OOM
         is_oom = isinstance(exc, ServerOOMError)
         log_snippet = str(exc)
-        
+        oom_log_path = getattr(exc, "log_path", Path())
+
         # Check if the server crashed mid-cycle due to memory (i.e. KV cache exhaustion)
         if not is_oom:
             try:
-                speed_short_path = request_files.get("speed_short")
-                if speed_short_path is not None:
-                    server_log = speed_short_path.parent.parent.parent / "logs" # approximation or we can just use the config's last srv log 
-                # actually srv["log_file"] was defined inside the `with` block, we might not have it.
-                # let's just accept the local `server_log` is possibly unbound if `start_server` failed.
-            except Exception:
-                pass
-            
-            # Use `server_log` if it is in locals and exists
-            try:
-                if 'server_log' in locals() and server_log and server_log.is_file():
-                    tail = server_log.read_text(encoding="utf-8", errors="replace")[-3000:].lower()
+                server_log_path = server_log if "server_log" in locals() else None
+                if server_log_path is not None and server_log_path.is_file():
+                    tail = server_log_path.read_text(encoding="utf-8", errors="replace")[-3000:].lower()
                     if "out of memory" in tail:
                         is_oom = True
+                        oom_log_path = server_log_path
                         log_snippet = tail[-500:]
             except Exception:
                 pass
@@ -1232,7 +1225,7 @@ def _run_cycle(
             _mark_cycle_invalid(conn, cycle_id, "crash: OOM")
             raise ServerOOMError(
                 log_snippet=log_snippet,
-                log_path=server_log if 'server_log' in locals() else Path(),
+                log_path=oom_log_path,
                 exit_code=getattr(exc, "exit_code", -1),
             )
 
