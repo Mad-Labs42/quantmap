@@ -467,6 +467,14 @@ def test_run_cycle_uses_real_session_log_for_mid_cycle_oom(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    server_bin = tmp_path / "llama-server"
+    model_path = tmp_path / "model.gguf"
+    server_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+    model_path.write_text("model", encoding="utf-8")
+    monkeypatch.setenv("QUANTMAP_LAB_ROOT", str(tmp_path / "lab"))
+    monkeypatch.setenv("QUANTMAP_SERVER_BIN", str(server_bin))
+    monkeypatch.setenv("QUANTMAP_MODEL_PATH", str(model_path))
+
     from src import runner
     from src.server import ServerOOMError
 
@@ -538,7 +546,7 @@ def test_run_cycle_uses_real_session_log_for_mid_cycle_oom(
             cycle_number=1,
             cycle_id=1,
             campaign_id="camp",
-            lab_config={"requests_per_cycle": 1, "cycles_per_config": 1, "inter_request_delay_s": 0},
+            lab_config={"requests_per_cycle": 1, "cycles_per_config": 2, "inter_request_delay_s": 0},
             request_files={"speed_short": request_file},
             collector=_Collector(),  # type: ignore[arg-type]
             console=_Console(),  # type: ignore[arg-type]
