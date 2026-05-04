@@ -454,6 +454,21 @@ def test_build_cpu_affinity_unknown_key() -> None:
         mod.build_config_list(baseline, campaign)
 
 
+@pytest.mark.parametrize("bad_value", ["", "   ", 0, False])
+def test_build_cpu_affinity_rejects_malformed_selector(bad_value: object) -> None:
+    mod = _campaign_definition_module()
+    baseline = _baseline()
+    campaign = {
+        "campaign_id": "C17_affinity",
+        "variable": "cpu_affinity",
+        "values": [bad_value],
+        "cpu_affinity_details": {"p_cores_only": "0x00FF"},
+    }
+
+    with pytest.raises(mod.CampaignPurityViolationError, match="cpu_affinity value"):
+        mod.build_config_list(baseline, campaign)
+
+
 def test_build_kv_cache_mirror() -> None:
     mod = _campaign_definition_module()
     baseline = _baseline()

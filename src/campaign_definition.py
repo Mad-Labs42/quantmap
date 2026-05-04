@@ -422,7 +422,16 @@ def _apply_bool_flags(config: dict[str, Any], args: list[str]) -> None:
 def _get_affinity_mask(config: dict[str, Any], campaign: dict[str, Any]) -> str | None:
     """Return CPU affinity mask string or None for OS default."""
     affinity = config.get("_cpu_affinity")
-    if not affinity or affinity == "all_cores":
+    if affinity is None:
+        return None
+    if not isinstance(affinity, str) or not affinity.strip():
+        raise CampaignPurityViolationError(
+            f"Campaign {_cid(campaign.get('campaign_id', ''))} "
+            f"cpu_affinity value must be a non-empty string or None, "
+            f"got {type(affinity).__name__!r}: {affinity!r}"
+        )
+    affinity = affinity.strip()
+    if affinity == "all_cores":
         return None
 
     details = campaign.get("cpu_affinity_details")
