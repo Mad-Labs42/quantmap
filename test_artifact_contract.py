@@ -457,6 +457,42 @@ def test_artifact_registry_rejects_invalid_or_inconsistent_precomputed_sha(tmp_p
         )
 
 
+def test_artifact_registry_complete_missing_file_degrades_to_failed(tmp_path):
+    """A disappeared file must not be recorded as a complete artifact."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+
+    returned = register_artifact(
+        db_path,
+        campaign_id="vanished_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.complete",
+        status="complete",
+    )
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT sha256, status, error_message, verification_source
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("vanished_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert returned["status"] == "failed"
+    assert row["status"] == "failed"
+    assert row["sha256"] is None
+    assert row["error_message"] == "raw-telemetry.jsonl missing or unreadable after generation"
+    assert row["verification_source"] == "producer_missing"
+
+
 def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_path):
     """Canonical inventory should prefer DB paths and preserve missing states."""
     from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
