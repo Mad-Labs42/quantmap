@@ -3354,7 +3354,6 @@ def run_campaign(
 
         # Generate the evidence-first campaign report (new philosophy).
         # Failure here is non-fatal — the primary report above is the critical path.
-        v2_ok = True
         try:
             from src.report_campaign import generate_campaign_report  # noqa: PLC0415
 
@@ -3367,6 +3366,7 @@ def run_campaign(
                 campaign=campaign,
                 lab_root=_effective_lab_root,
             )
+            v2_ok = True
         except Exception as _v2_exc:
             v2_ok = False
             logger.warning("run-reports.md generation failed (non-fatal): %s", _v2_exc)
