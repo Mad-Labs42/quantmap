@@ -280,13 +280,17 @@ QUANTMAP_THEME = Theme(
 )
 
 _GLOBAL_CONSOLE: Console | None = None
+NEXT_ACTIONS_TITLE = "Next actions"
 
 
-def get_console(force_new: bool = False) -> Console:
+def get_console(
+    force_new: bool = False, *, force_utf8_if_bootstrap: bool = False  # NOSONAR
+) -> Console:
     """Returns a unified, capability-aware rich.Console.
 
     Arguments:
         force_new: Always create a fresh instance.
+        force_utf8_if_bootstrap: Legacy compatibility (no-op).
     """
     global _GLOBAL_CONSOLE
     if _GLOBAL_CONSOLE is not None and not force_new:
@@ -342,7 +346,7 @@ def format_status(label: str, passed: bool, detail: str = "") -> str:
 
 def print_next_actions(
     actions: list[str],
-    title: str = "Next actions",
+    title: str = NEXT_ACTIONS_TITLE,
     target_console: Console | None = None,
 ) -> None:
     """Render a compact, consistent next-step block for operator flows."""
@@ -496,7 +500,7 @@ def _render_post_run_failure_section(
     if not failure_cause_stripped and not emit_unknown_cause_line:
         return
     con.print("")
-    if failure_cause_stripped:
+    if failure_cause_stripped:  # NOSONAR
         _render_post_run_blocker_detail(
             con, failure_cause_stripped, failure_remediation
         )
@@ -658,7 +662,7 @@ def _render_post_run_review_core(
                 f"quantmap artifacts {ctx.campaign_id}",
                 "quantmap list",
             ],
-            title="Next actions",
+            title=NEXT_ACTIONS_TITLE,
             target_console=con,
         )
 

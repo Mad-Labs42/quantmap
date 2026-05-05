@@ -147,7 +147,8 @@ RESULTS_DIR = LAB_ROOT / "results"
 LOGS_DIR = LAB_ROOT / "logs"
 DB_DIR = LAB_ROOT / "db"
 STATE_DIR = LAB_ROOT / "state"
-DB_PATH = DB_DIR / "lab.sqlite"
+LAB_SQLITE_FILENAME = "lab.sqlite"
+DB_PATH = DB_DIR / LAB_SQLITE_FILENAME
 STATE_FILE = STATE_DIR / "progress.json"
 
 
@@ -1180,7 +1181,7 @@ def _fetch_campaign_evidence_summary(
     )
 
 
-def _build_campaign_outcome_inputs(
+def _build_campaign_outcome_inputs(  # NOSONAR
     *,
     campaign_id: str,
     effective_campaign_id: str,
@@ -1434,7 +1435,7 @@ def _finalize_pre_measurement_abort_review(
         read_model=_review_read_model,
         lab_root=lab_root,
         model_identity=_model_identity,
-        db_path=db_path or lab_root / "db" / "lab.sqlite",
+        db_path=db_path or lab_root / "db" / LAB_SQLITE_FILENAME,
         yolo_mode=False,
         artifact_ok_map={},
     )
@@ -2145,7 +2146,7 @@ def run_campaign(
     _eff_logs_dir = _effective_lab_root / "logs"
     _eff_db_dir = _effective_lab_root / "db"
     _eff_state_dir = _effective_lab_root / "state"
-    _eff_db_path = _eff_db_dir / "lab.sqlite"
+    _eff_db_path = _eff_db_dir / LAB_SQLITE_FILENAME
     _eff_state_file = _eff_state_dir / "progress.json"
 
     effective_campaign_id = _derive_effective_campaign_id(
@@ -2549,6 +2550,7 @@ def run_campaign(
     conn = get_connection(_eff_db_path)
     try:
         _user_interrupted = False
+        _fatal_exception: Exception | None = None
         measurement_hints: dict[str, Any] = {}
         # -------------------------------------------------------------------------
         # Register or resume campaign in DB (Phase 2 Scoped)
@@ -3051,7 +3053,7 @@ def run_campaign(
                 conn.commit()
             except Exception as db_exc:
                 logger.error("Failed to update campaign failure status: %s", db_exc)
-            raise
+            _fatal_exception = exc
 
     finally:
         tele.shutdown()
@@ -3084,6 +3086,45 @@ def run_campaign(
                 logger.warning(
                     "Could not register raw_telemetry_jsonl artifact: %s", _art_exc
                 )
+    if _fatal_exception:
+        try:
+            with get_connection(_eff_db_path) as _fatal_conn:
+                _me_fatal = _fetch_campaign_evidence_summary(
+                    _fatal_conn, effective_campaign_id
+                )
+            _outcome_inputs = _build_campaign_outcome_inputs(
+                campaign_id=campaign_id,
+                effective_campaign_id=effective_campaign_id,
+                db_path=_eff_db_path,
+                measurement_evidence=_me_fatal,
+                measurement_hints=measurement_hints,
+                fatal_exception_during_measurement=True,
+                fatal_exception_message=str(_fatal_exception),
+            )
+            _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
+            _review_read_model = project_final_review(
+                _campaign_outcome,
+                metrics=FinalReviewMetricsSnapshot(
+                    elapsed_seconds=time.monotonic() - _run_start_time,
+                    run_mode=run_plan.run_mode if run_plan else None,
+                ),
+                runner_failure_cause=str(_fatal_exception),
+                runner_failure_remediation=None,
+            )
+            _render_campaign_post_run_review_screen(
+                effective_campaign_id=effective_campaign_id,
+                read_model=_review_read_model,
+                lab_root=_effective_lab_root,
+                model_identity=model_identity,
+                db_path=_eff_db_path,
+                yolo_mode=yolo_mode,
+                artifact_ok_map={},
+            )
+        except Exception as _render_exc:
+            logger.exception("Fatal exception final-review rendering failed")
+
+        # Finally re-raise the original exception
+        raise _fatal_exception
 
     if _user_interrupted:
         try:

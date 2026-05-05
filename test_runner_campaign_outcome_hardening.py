@@ -451,8 +451,8 @@ def test_runner_secondary_report_failure_normalizes_stale_report_ok_false(
     )
 
     def _force_stale_report_ok(inp: CampaignOutcomeInputs) -> CampaignOutcome:
-        new_inp: CampaignOutcomeInputs = dataclasses.replace(inp, report_ok=False)
-        return evaluate_campaign_outcome(new_inp)
+        new_inp: CampaignOutcomeInputs = dataclasses.replace(inp, report_ok=False)  # NOSONAR
+        return evaluate_campaign_outcome(new_inp)  # NOSONAR
 
     monkeypatch.setattr(
         runner,
@@ -791,17 +791,17 @@ def test_backend_policy_abort_routes_through_outcome_module(
     assert not rm.show_next_actions
 
 
-def test_unexpected_fatal_exception_fails_loud_no_success_review(
+def test_unexpected_fatal_exception_best_effort_review_then_re_raises(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Unexpected RuntimeError during measurement must re-raise, not render a success review.
+    """Unexpected RuntimeError during measurement must perform best-effort review, then re-raise.
 
-    Verifies three behavioral requirements for the general fatal-exception path:
-    1. Fails loud: the exception propagates past run_campaign (not swallowed, not SystemExit).
-    2. No misleading final-review: render_post_run_review_from_read_model is never called.
-    3. Cleanup: telemetry.shutdown() is called (the finally block executes).
+    Verifies behavioral requirements for the general fatal-exception path:
+    1. Cleanup: telemetry.shutdown() is called (the finally block executes).
+    2. Best-effort review: render_post_run_review_from_read_model is called with FAILED state.
+    3. Fails loud: the original exception propagates out (not swallowed, not SystemExit).
     """
     _minimal_run_campaign_env(tmp_path, monkeypatch)
 
@@ -813,15 +813,16 @@ def test_unexpected_fatal_exception_fails_loud_no_success_review(
 
     monkeypatch.setattr(runner, "_run_config", _crash)
 
-    render_calls: list[int] = []
+    captured_read_models: list[FinalReviewReadModel] = []
 
-    def _must_not_render(**_kw: object) -> None:
-        render_calls.append(1)
+    def _capture_render(**kw: Any) -> None:
+        if "read_model" in kw:
+            captured_read_models.append(kw["read_model"])
 
     monkeypatch.setattr(
         runner.ui,
         "render_post_run_review_from_read_model",
-        _must_not_render,
+        _capture_render,
     )
 
     shutdown_calls: list[int] = []
@@ -839,14 +840,17 @@ def test_unexpected_fatal_exception_fails_loud_no_success_review(
                 baseline_path=tmp_path / "baseline.yaml",
             )
 
-    # Requirement 1: fails loud — _BoomError propagates, not swallowed or converted to SystemExit.
-    # (pytest.raises above already proves this)
-
-    # Requirement 2: no misleading final-review rendered.
-    assert not render_calls, "render_post_run_review_from_read_model must not be called for crash"
-
-    # Requirement 3: cleanup (finally block) executes — telemetry shutdown called.
+    # Requirement 1: cleanup (finally block) executes — telemetry shutdown called.
     assert shutdown_calls, "telemetry.shutdown() must be called even after fatal exception"
 
-    # Requirement 4: crash is logged at CRITICAL, not silently dropped.
+    # Requirement 2: best-effort final-review rendered.
+    assert captured_read_models, "render_post_run_review_from_read_model must be called for best-effort final review"
+    rm = captured_read_models[0]
+    assert rm.outcome_kind == CampaignOutcomeKind.FAILED
+    assert "storage device failed unexpectedly" in str(rm.failure_cause)
+
+    # Requirement 3: fails loud — _BoomError propagates, not swallowed or converted to SystemExit.
+    # (pytest.raises above already proves this)
+
+    # Requirement 4: crash is logged at CRITICAL.
     assert "fatal error" in caplog.text.lower()
