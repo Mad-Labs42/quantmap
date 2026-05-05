@@ -330,12 +330,42 @@ def test_partial_evidence_partial_outcome():
     assert not out.allows_recommendation_authority
 
 
-def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_present():
-    """OOM-attempting configs (not skipped) must meet invalid-cycle count.
+def test_invalid_cycles_without_success_requests_is_not_partial():
+    """Invalid cycles + zero success requests → FAILED, never PARTIAL.
 
-    Skipped-OOM configs never produced cycle rows, so they cannot account for
-    ``cycles_invalid``. Only ``configs_oom`` (configs that actually executed and
-    hit OOM) explains invalid cycles.
+    Edge-case guard: the MVP policy only classifies as PARTIAL when usable
+    successful evidence exists alongside invalid cycles. Without any
+    ``has_any_success_request``, the campaign lacks the necessary evidence
+    to justify even a partial-success verdict, regardless of cycle validity.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=0,
+            evidence=_base_evidence(
+                cycles_invalid=3,
+                cycles_attempted=3,
+                configs_completed=0,
+                has_any_success_request=False,
+            ),
+        )
+    )
+    assert out.measurement != MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind != CampaignOutcomeKind.PARTIAL
+    assert not out.allows_success_style_review
+
+
+def test_invalid_cycles_with_oom_signals_remain_partial_mvp_policy():
+    """MVP trust policy: OOM capacity does not upgrade invalid cycles to SUCCESS.
+
+    Even when ``configs_oom >= cycles_invalid`` and ``configs_skipped_oom`` is
+    zero, the measurement verdict stays ``PARTIAL``. Aggregate OOM counters are
+    context — not exact per-cycle proof. Full success and recommendation
+    authority require per-cycle attribution (deferred DB/runner work).
+    Observed results, artifacts, and the winning config remain available.
     """
     out = outcome_evaluate.evaluate_campaign_outcome(
         CampaignOutcomeInputs(
@@ -353,8 +383,37 @@ def test_boundary_invalid_cycles_do_not_downgrade_measurement_when_oom_signals_p
             ),
         )
     )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+def test_clean_evidence_without_invalid_cycles_still_produces_success():
+    """Zero invalid cycles + clean measurement → full SUCCESS + authority.
+
+    Regression: the MVP policy must not regress the normal clean-evidence
+    path. When ``cycles_invalid == 0`` and all other gates pass, the
+    campaign should still reach SUCCESS with recommendation authority.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="complete",
+            evidence=_base_evidence(
+                configs_oom=2,
+                configs_skipped_oom=1,
+            ),
+        )
+    )
     assert out.measurement == MeasurementPhaseVerdict.SUCCEEDED
     assert out.outcome_kind == CampaignOutcomeKind.SUCCESS
+    assert out.allows_success_style_review
     assert out.allows_recommendation_authority
 
 

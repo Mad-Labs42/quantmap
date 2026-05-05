@@ -183,31 +183,6 @@ def _finalize(
     )
 
 
-def _invalid_cycles_explained_by_boundary_oom_counters(
-    ev: CampaignEvidenceSummary,
-) -> bool:
-    """Aggregate capacity guard (Slice 1 approximation, not per-cycle proof).
-
-    Persisted lab summaries do not link each invalid cycle row to OOM vs other causes.
-    Only configs that actually executed and hit OOM (``configs_oom``) can plausibly
-    account for invalid cycles — skipped configs never started and therefore never
-    produced a cycle row, so they cannot explain ``cycles_invalid`` even though they
-    share the same boundary trigger. Invalid cycles avoid downgrading measurement to
-    ``PARTIAL`` only when ``configs_oom`` alone meets or exceeds ``cycles_invalid``.
-    A single OOM-style signal cannot honestly explain multiple unexplained invalid
-    cycles.
-
-    ``configs_skipped_oom`` and ``configs_degraded`` are **not** counted:
-    ``configs_skipped_oom`` reflects configs that never ran (no cycle rows produced);
-    ``configs_degraded`` is not reliably OOM/boundary-specific. True per-cycle
-    invalid attribution requires richer evidence (deferred schema work).
-    """
-    if ev.cycles_invalid <= 0:
-        return True
-    explained_capacity = ev.configs_oom
-    return explained_capacity >= ev.cycles_invalid
-
-
 def _measurement_domain(
     inputs: CampaignOutcomeInputs,
 ) -> tuple[MeasurementPhaseVerdict, FailureDomain | None]:
@@ -230,8 +205,13 @@ def _measurement_domain(
 
     if ev.has_any_success_request:
         if ev.cycles_invalid > 0:
-            if _invalid_cycles_explained_by_boundary_oom_counters(ev):
-                return MeasurementPhaseVerdict.SUCCEEDED, None
+            # MVP trust policy: aggregate OOM counters (configs_oom,
+            # configs_skipped_oom) are context — not exact per-cycle proof.
+            # Until DB/runner/backend evidence can attribute each invalid
+            # cycle row to its specific cause, invalid cycles always produce
+            # PARTIAL measurement. Observed results, artifacts, and winning
+            # config are preserved. Full success and recommendation
+            # authority require per-cycle attribution (deferred work).
             return MeasurementPhaseVerdict.PARTIAL, None
         return MeasurementPhaseVerdict.SUCCEEDED, None
 
