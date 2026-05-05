@@ -35,6 +35,7 @@ from src.db import get_connection
 from src.settings_env import optional_env_path
 from src.artifact_paths import (
     ARTIFACT_RUN_REPORTS,
+    campaign_artifact_dirs,
     find_artifact_dir,
     infer_model_identity,
     report_paths,
@@ -57,6 +58,37 @@ _TBL_METRIC_VALUE    = "| Metric | Value |"
 _KNOWN_ASSESSMENT_CONFIDENCE = {"high", "medium", "low"}
 
 LAB_ROOT = optional_env_path("QUANTMAP_LAB_ROOT", Path(__file__).resolve().parent.parent)
+
+
+def _resolve_report_input_dirs(
+    lab_root: Path,
+    model_identity: str,
+    campaign_id: str,
+    legacy_results_dir: Path,
+) -> tuple[Path, Path]:
+    """Resolve measurement/environment inputs for a model-scoped campaign report."""
+    campaign_dirs = campaign_artifact_dirs(
+        lab_root,
+        model_identity,
+        campaign_id,
+        create=False,
+    )
+    measurements_candidate = campaign_dirs["measurements_dir"]
+    environment_candidate = campaign_dirs["environment_dir"]
+
+    measurements_dir = (
+        measurements_candidate
+        if measurements_candidate.exists()
+        else find_artifact_dir(lab_root, "measurements", campaign_id) or legacy_results_dir
+    )
+    environment_dir = (
+        environment_candidate
+        if environment_candidate.exists()
+        else find_artifact_dir(lab_root, "environment", campaign_id) or legacy_results_dir
+    )
+    return measurements_dir, environment_dir
+
+
 # ---------------------------------------------------------------------------
 # Semantic labels (Section 5 of Design Memo)
 # ---------------------------------------------------------------------------
@@ -2486,16 +2518,12 @@ def generate_campaign_report(
         create=True,
     )
     reports_dir = report_artifacts["dir"]
-    measurements_dir = find_artifact_dir(
+    measurements_dir, environment_dir = _resolve_report_input_dirs(
         effective_lab_root,
-        "measurements",
+        model_identity,
         campaign_id,
-    ) or legacy_results_dir
-    environment_dir = find_artifact_dir(
-        effective_lab_root,
-        "environment",
-        campaign_id,
-    ) or legacy_results_dir
+        legacy_results_dir,
+    )
     report_path = report_artifacts[ARTIFACT_RUN_REPORTS]
 
     # Compute analysis if not provided
