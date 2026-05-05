@@ -118,9 +118,6 @@ def evaluate_campaign_outcome(inputs: CampaignOutcomeInputs) -> CampaignOutcome:
         and _measurement_supports_authority(measurement)
         and ev.has_any_success_request
         and _scoring_supports_authority(inputs, post_run, allow_secondary_partial=True)
-        and not inputs.user_interrupted
-        and not inputs.telemetry_aborted_before_db
-        and not inputs.backend_policy_blocked
     )
 
     evidence_out = dataclasses.replace(

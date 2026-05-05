@@ -1413,7 +1413,11 @@ def _finalize_pre_measurement_abort_review(
         )
     else:
         # DB exists with a campaign row written before the policy check.
-        assert db_path is not None, "db_path required for backend_policy_blocked abort"
+        if db_path is None:
+            raise RuntimeError(
+                "_finalize_pre_measurement_abort_review: db_path is required "
+                "when backend_policy_blocked=True (DB must exist before policy check)"
+            )
         _outcome_inputs = _build_campaign_outcome_inputs(
             campaign_id=campaign_id,
             effective_campaign_id=effective_campaign_id,
@@ -2547,11 +2551,11 @@ def run_campaign(
     # Phase 2: Scoped Runner Connection
     # Maintains a single, long-lived connection for the duration of the campaign orchestrator's
     # active measurement phase. Sub-functions (_run_config, _run_cycle) reuse this connection.
+    _user_interrupted = False
+    _fatal_exception: Exception | None = None
+    measurement_hints: dict[str, Any] = {}
     conn = get_connection(_eff_db_path)
     try:
-        _user_interrupted = False
-        _fatal_exception: Exception | None = None
-        measurement_hints: dict[str, Any] = {}
         # -------------------------------------------------------------------------
         # Register or resume campaign in DB (Phase 2 Scoped)
         # -------------------------------------------------------------------------
