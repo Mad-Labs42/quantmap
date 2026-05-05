@@ -662,6 +662,38 @@ def test_metadata_generation_uses_canonical_model_scoped_dirs(tmp_path, monkeypa
     )
 
 
+def test_campaign_report_prefers_model_scoped_input_dirs(tmp_path):
+    """run-reports.md generation must not rediscover another model's evidence."""
+    from src import report_campaign
+
+    campaign_id = "Report_Canonical_01"
+    legacy_results_dir = tmp_path / "results" / campaign_id
+    legacy_results_dir.mkdir(parents=True)
+
+    # Lexicographically later decoys reproduce the old campaign-only lookup bug.
+    decoy_meas = tmp_path / "artifacts" / "measurements" / "zz-legacy-model" / campaign_id
+    decoy_env = tmp_path / "artifacts" / "environment" / "zz-legacy-model" / campaign_id
+    decoy_meas.mkdir(parents=True)
+    decoy_env.mkdir(parents=True)
+
+    current = campaign_artifact_dirs(
+        tmp_path,
+        "Model-New",
+        campaign_id,
+        create=True,
+    )
+
+    measurements_dir, environment_dir = report_campaign._resolve_report_input_dirs(
+        tmp_path,
+        "Model-New",
+        campaign_id,
+        legacy_results_dir,
+    )
+
+    assert measurements_dir == current["measurements_dir"]
+    assert environment_dir == current["environment_dir"]
+
+
 def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
     """Explicitly missing artifacts must not trigger a file hash attempt."""
     from src import artifact_registry
