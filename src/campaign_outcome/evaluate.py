@@ -431,8 +431,15 @@ def _outcome_gate_post_run_report(
 
 def _outcome_gate_partial_measurement(
     measurement: MeasurementPhaseVerdict,
+    post_run: PostRunVerdict,
 ) -> _OutcomeSynth | None:
     if measurement != MeasurementPhaseVerdict.PARTIAL:
+        return None
+    # Primary report failure has higher diagnostic severity than partial
+    # measurement — the operator must see the report failure cause first.
+    # This condition preserves the fix for PARTIAL measurement beating
+    # secondary-artifact REPORT_PARTIAL while not masking REPORT_FAILED.
+    if post_run == PostRunVerdict.REPORT_FAILED:
         return None
     return _OutcomeSynth(
         CampaignOutcomeKind.PARTIAL,
@@ -465,10 +472,10 @@ def _synthesize_outcome(
     r = _outcome_gate_no_rankable_winner(inputs, ev)
     if r is not None:
         return r
-    r = _outcome_gate_post_run_report(post_run)
+    r = _outcome_gate_partial_measurement(measurement, post_run)
     if r is not None:
         return r
-    r = _outcome_gate_partial_measurement(measurement)
+    r = _outcome_gate_post_run_report(post_run)
     if r is not None:
         return r
 

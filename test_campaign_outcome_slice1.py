@@ -330,6 +330,65 @@ def test_partial_evidence_partial_outcome():
     assert not out.allows_recommendation_authority
 
 
+def test_partial_measurement_detail_not_masked_by_report_partial():
+    """When measurement is PARTIAL and report is also partial, measurement
+    detail wins — invalid-cycle quality reason is more informative than
+    secondary-artifact report detail.
+
+    Regression: prior to fix, ``_outcome_gate_post_run_report`` fired before
+    ``_outcome_gate_partial_measurement``, so a secondary-artifact REPORT_PARTIAL
+    would mask the primary measurement-quality reason in ``failure_detail``.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=True,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            report_status="partial",
+            evidence=_base_evidence(cycles_invalid=2),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.post_run == PostRunVerdict.REPORT_PARTIAL
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert out.failure_detail is not None
+    assert "invalid cycles" in out.failure_detail.lower()
+    assert "secondary artifacts" not in (out.failure_detail or "").lower()
+
+
+def test_report_failure_not_masked_by_partial_measurement():
+    """Primary report failure must remain visible even when measurement is
+    PARTIAL due to invalid cycles.
+
+    Regression: the gate-order swap made ``_outcome_gate_partial_measurement``
+    fire before ``_outcome_gate_post_run_report``. Without the extra guard
+    in ``_outcome_gate_partial_measurement``, a ``REPORT_FAILED`` with partial
+    measurement would show ``failure_detail="Partial measurement evidence..."``
+    instead of the more actionable report-failure message.
+    """
+    out = outcome_evaluate.evaluate_campaign_outcome(
+        CampaignOutcomeInputs(
+            campaign_id="c",
+            effective_campaign_id="c",
+            report_ok=False,
+            scoring_completed=True,
+            passing_count=1,
+            winner_config_id="w",
+            evidence=_base_evidence(cycles_invalid=2),
+        )
+    )
+    assert out.measurement == MeasurementPhaseVerdict.PARTIAL
+    assert out.post_run == PostRunVerdict.REPORT_FAILED
+    assert out.outcome_kind == CampaignOutcomeKind.PARTIAL
+    assert out.failure_detail is not None
+    assert "report" in out.failure_detail.lower()
+    assert "failed" in out.failure_detail.lower()
+    assert "invalid cycles" not in (out.failure_detail or "").lower()
+
+
 def test_invalid_cycles_without_success_requests_is_not_partial():
     """Invalid cycles + zero success requests → FAILED, never PARTIAL.
 
@@ -1055,8 +1114,10 @@ def test_campaign_outcome_package_root_api_surface() -> None:
 
     expected = (
         "CampaignEvidenceSummary",
+        "CampaignOutcome",
         "CampaignOutcomeInputs",
         "FinalReviewMetricsSnapshot",
+        "FinalReviewReadModel",
         "evaluate_campaign_outcome",
         "project_final_review",
     )
