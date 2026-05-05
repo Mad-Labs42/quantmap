@@ -221,6 +221,11 @@ def _measurement_domain(
     ):
         if ev.configs_total == 0:
             return MeasurementPhaseVerdict.NOT_STARTED, None
+        if lbr:
+            # Backend failure prevented any cycles from starting.  Route through
+            # the startup-failure domain so the failure reason is surfaced rather
+            # than suppressed behind generic NO_EVIDENCE/MEASUREMENT_BODY copy.
+            return MeasurementPhaseVerdict.FAILED, FailureDomain.BACKEND_STARTUP
         return MeasurementPhaseVerdict.NO_EVIDENCE, FailureDomain.MEASUREMENT_BODY
 
     if ev.has_any_success_request:

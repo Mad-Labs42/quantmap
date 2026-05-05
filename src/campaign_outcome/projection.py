@@ -64,7 +64,9 @@ def project_final_review(
     show_next = outcome.allows_success_style_review
     success_diag = outcome.allows_success_style_review
 
-    failure_cause = (outcome.failure_detail or None) or runner_failure_cause
+    _detail = outcome.failure_detail.strip() if outcome.failure_detail else None
+    _runner = runner_failure_cause.strip() if runner_failure_cause else None
+    failure_cause = _detail or _runner
     failure_remediation = runner_failure_remediation
     if outcome.abort is not None and failure_cause is None:
         failure_cause = f"Aborted: {outcome.abort.value}."

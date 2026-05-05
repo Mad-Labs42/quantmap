@@ -1004,3 +1004,210 @@ def test_campaign_outcome_package_root_api_surface() -> None:
     assert tuple(co.__all__) == expected
     for name in co.__all__:
         assert hasattr(co, name), f"missing export: {name}"
+
+
+# ---------------------------------------------------------------------------
+# Finding 1: zero-evidence path + last_backend_failure_reason
+# ---------------------------------------------------------------------------
+
+
+def test_zero_evidence_with_backend_failure_reason_is_failed_backend_startup():
+    """No cycles/completed-configs + last_backend_failure_reason → FAILED/BACKEND_STARTUP.
+
+    Prior to the fix, the early-return branch returned NO_EVIDENCE/MEASUREMENT_BODY
+    regardless of whether a startup failure reason was present, suppressing that
+    diagnostic detail behind generic insufficient-evidence copy.
+    """
+    ev = CampaignEvidenceSummary(
+        configs_total=3,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        last_backend_failure_reason="cuda_init_failed",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.FAILED
+    assert out.failure_domain == FailureDomain.BACKEND_STARTUP
+    assert out.outcome_kind == CampaignOutcomeKind.FAILED
+    assert not out.allows_success_style_review
+    assert not out.allows_recommendation_authority
+
+
+def test_zero_evidence_with_backend_failure_reason_surfaces_detail_in_projection():
+    """Backend startup failure detail must reach projection failure_cause."""
+    ev = CampaignEvidenceSummary(
+        configs_total=2,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        last_backend_failure_reason="startup_timeout",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    rm = project_final_review(out, runner_failure_cause="runner fallback")
+    # Evaluator failure_detail carries the backend reason via _outcome_gate_measurement_failed;
+    # projection must prefer it (out.failure_detail) over runner_failure_cause.
+    assert out.failure_detail is not None and "startup_timeout" in out.failure_detail
+    assert rm.failure_cause == out.failure_detail
+    assert rm.outcome_kind == CampaignOutcomeKind.FAILED
+
+
+def test_zero_evidence_without_backend_failure_reason_stays_no_evidence():
+    """Without last_backend_failure_reason, zero-evidence stays NO_EVIDENCE (control)."""
+    ev = CampaignEvidenceSummary(
+        configs_total=3,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        last_backend_failure_reason=None,
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.NO_EVIDENCE
+    assert out.failure_domain == FailureDomain.MEASUREMENT_BODY
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+
+
+def test_configs_total_zero_with_backend_failure_reason_stays_not_started():
+    """configs_total==0 + lbr → NOT_STARTED (pre-campaign abort, not backend failure).
+
+    The configs_total==0 guard fires before the lbr check so true pre-registration
+    aborts are not misclassified as backend startup failures.
+    """
+    ev = CampaignEvidenceSummary(
+        configs_total=0,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        last_backend_failure_reason="some_startup_error",
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    assert out.measurement == MeasurementPhaseVerdict.NOT_STARTED
+    assert out.outcome_kind == CampaignOutcomeKind.INSUFFICIENT_EVIDENCE
+
+
+# ---------------------------------------------------------------------------
+# Finding 2: projection whitespace normalization for failure_cause
+# ---------------------------------------------------------------------------
+
+
+def test_projection_whitespace_only_failure_detail_falls_back_to_runner_cause():
+    """Whitespace-only failure_detail must not suppress a meaningful runner cause.
+
+    Prior to the fix, ``"   "`` is truthy so ``(outcome.failure_detail or None)``
+    returned it, suppressing runner_failure_cause. The UI then strips it to empty
+    and renders ``Cause: Unknown`` even though the runner had real context.
+    """
+    from dataclasses import replace as dc_replace
+
+    ev = CampaignEvidenceSummary(
+        configs_total=2,
+        configs_completed=0,
+        cycles_attempted=0,
+        cycles_complete=0,
+        cycles_invalid=0,
+        has_any_success_request=False,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        last_backend_failure_reason=None,
+        scoring_completed=False,
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    # Simulate evaluator producing a whitespace-only detail (e.g. from a future
+    # code path) by patching the outcome directly.
+    out_ws = dc_replace(out, failure_detail="   ")
+    rm = project_final_review(out_ws, runner_failure_cause="Runner knows the real cause.")
+    assert rm.failure_cause == "Runner knows the real cause."
+
+
+def test_projection_whitespace_only_failure_detail_no_runner_falls_back_to_abort():
+    """Whitespace-only detail + no runner cause → abort string when abort is set."""
+    from src.campaign_outcome.contracts import (
+        AbortReason,
+        CampaignLifecyclePhase,
+        CampaignOutcome,
+        CampaignOutcomeKind,
+        MeasurementPhaseVerdict,
+        PostRunVerdict,
+    )
+
+    ev = CampaignEvidenceSummary()
+    outcome = CampaignOutcome(
+        outcome_kind=CampaignOutcomeKind.ABORTED,
+        lifecycle_phase_at_decision=CampaignLifecyclePhase.FINALIZATION,
+        measurement=MeasurementPhaseVerdict.NOT_STARTED,
+        post_run=PostRunVerdict.NOT_REACHED,
+        failure_domain=None,
+        failure_detail="   ",  # whitespace-only — must not suppress abort fallback
+        abort=AbortReason.TELEMETRY_STARTUP,
+        allows_success_style_review=False,
+        allows_recommendation_authority=False,
+        report_ok=None,
+        run_reports_ok=None,
+        metadata_ok=None,
+        evidence_summary=ev,
+    )
+    rm = project_final_review(outcome, runner_failure_cause=None)
+    # Whitespace-only detail + no runner cause → abort fallback fires
+    assert rm.failure_cause == f"Aborted: {AbortReason.TELEMETRY_STARTUP.value}."
+
+
+def test_projection_whitespace_only_runner_cause_does_not_pollute_failure_cause():
+    """Whitespace-only runner_failure_cause is also treated as absent."""
+    ev = CampaignEvidenceSummary(
+        configs_total=2,
+        configs_completed=2,
+        cycles_attempted=4,
+        cycles_complete=4,
+        cycles_invalid=0,
+        has_any_success_request=True,
+    )
+    inp = CampaignOutcomeInputs(
+        campaign_id="c",
+        effective_campaign_id="c",
+        report_ok=False,
+        report_status="failed",
+        scoring_completed=True,
+        passing_count=1,
+        winner_config_id="w",
+        evidence=ev,
+    )
+    out = outcome_evaluate.evaluate_campaign_outcome(inp)
+    # outcome has a real failure_detail; runner_failure_cause is whitespace-only
+    rm = project_final_review(out, runner_failure_cause="   ")
+    # Should use the evaluator detail, not the whitespace-only runner string
+    assert rm.failure_cause == out.failure_detail
+    assert rm.failure_cause is not None and rm.failure_cause.strip() != ""
