@@ -665,64 +665,6 @@ def _render_post_run_review_core(
     _render_post_run_diagnostics_block(con, ctx)
 
 
-def render_post_run_review(
-    campaign_id: str,
-    report_ok: bool,
-    artifacts: list[dict] | None = None,
-    diagnostics_path: str | None = None,
-    yolo_mode: bool = False,
-    failure_cause: str | None = None,
-    failure_remediation: str | None = None,
-    metrics: PostRunReviewMetrics | None = None,
-    target_console: Console | None = None,
-) -> None:
-    """Render the post-run campaign review screen.
-
-    Presentation-only: no sys.exit, no DB I/O, no filesystem writes.
-    All state is passed in by the caller (runner.py).
-
-    Args:
-        campaign_id:         Effective campaign ID used for the run.
-        report_ok:           True if the primary report was generated successfully.
-        artifacts:           Optional list of artifact dicts from
-                             artifact_paths.get_campaign_artifact_paths().
-                             If provided, render_artifact_block is called.
-        diagnostics_path:    Optional path string for the internal diagnostics
-                             folder.  None -> diagnostics block is omitted.
-        yolo_mode:           If True, show the YOLO active reminder.
-        failure_cause:       Optional short failure cause.
-        failure_remediation: Optional user-facing remediation guidance.
-        metrics:             Optional PostRunReviewMetrics with winner/config/run
-                             metadata.  When None the entire config summary,
-                             mode, and elapsed sections are silently omitted.
-        target_console:      Console to render to (defaults to global console).
-    """
-    con = target_console or get_console()
-    fc = failure_cause.strip() if failure_cause else ""
-    ctx = _PostRunReviewRenderContext(
-        campaign_id=campaign_id,
-        yolo_mode=yolo_mode,
-        use_legacy_binary_status=True,
-        legacy_report_ok=report_ok,
-        read_headline_status="",
-        read_headline_color="green",
-        show_report_generation_subline=False,
-        report_generation_ok=None,
-        metrics=metrics,
-        failure_emit=not report_ok,
-        failure_cause=failure_cause,
-        failure_remediation=failure_remediation,
-        emit_unknown_cause_line=(not report_ok) and not fc,
-        emit_artifact_block=artifacts is not None,
-        artifacts=artifacts,
-        show_next_actions=report_ok,
-        diagnostics_path=diagnostics_path,
-        diagnostics_success_style=report_ok,
-        diagnostics_dim_prefer_cause_line=bool(fc),
-    )
-    _render_post_run_review_core(con, ctx)
-
-
 def render_post_run_review_from_read_model(
     campaign_id: str,
     read_model: FinalReviewReadModel,

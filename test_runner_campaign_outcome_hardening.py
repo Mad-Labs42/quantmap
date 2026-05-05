@@ -689,3 +689,164 @@ def test_keyboard_interrupt_always_system_exit_130_when_finalize_returns_normall
             baseline_path=tmp_path / "baseline.yaml",
         )
     assert exc.value.code == 130
+
+
+def test_telemetry_abort_routes_through_outcome_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TelemetryStartupError routes through campaign-outcome evaluator before sys.exit(1)."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+
+    import src.telemetry as tele
+
+    def _tele_fail() -> None:
+        raise tele.TelemetryStartupError("Sensor unavailable")
+
+    monkeypatch.setattr(
+        "src.telemetry_policy.enforce_current_run_readiness",
+        _tele_fail,
+    )
+
+    captured_read_models: list = []
+    _real_render = runner.ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs: Any) -> None:
+        kwargs.pop("target_console", None)
+        captured_read_models.append(kwargs["read_model"])
+        _real_render(**kwargs)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _capture_render,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+    assert exc.value.code == 1
+    assert captured_read_models, "Expected a read-model to be rendered for telemetry abort"
+    rm = captured_read_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert not rm.show_next_actions
+
+
+def test_backend_policy_abort_routes_through_outcome_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BackendExecutionPolicyError routes through campaign-outcome evaluator before sys.exit(1)."""
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+
+    class _FakeAssessment:
+        reason_code = "wsl_cross_boundary"
+        backend_path = "/mnt/d/fake"
+        backend_target_kind = "llama_cpp"
+        execution_support_tier = "unsupported"
+        diagnostic = "WSL cannot execute Windows binaries directly"
+
+    class _FakePolicy(Exception):
+        assessment = _FakeAssessment()
+
+    def _policy_fail(*_a: object, **_k: object) -> None:
+        raise _FakePolicy("backend policy blocked")
+
+    monkeypatch.setattr(
+        "src.backend_execution_policy.assert_backend_execution_allowed",
+        _policy_fail,
+    )
+    monkeypatch.setattr(
+        "src.backend_execution_policy.BackendExecutionPolicyError",
+        _FakePolicy,
+    )
+
+    captured_read_models: list = []
+    _real_render = runner.ui.render_post_run_review_from_read_model
+
+    def _capture_render(**kwargs: Any) -> None:
+        kwargs.pop("target_console", None)
+        captured_read_models.append(kwargs["read_model"])
+        _real_render(**kwargs)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _capture_render,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+    assert exc.value.code == 1
+    assert captured_read_models, "Expected a read-model to be rendered for backend policy abort"
+    rm = captured_read_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.ABORTED
+    assert not rm.show_next_actions
+
+
+def test_unexpected_fatal_exception_fails_loud_no_success_review(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Unexpected RuntimeError during measurement must re-raise, not render a success review.
+
+    Verifies three behavioral requirements for the general fatal-exception path:
+    1. Fails loud: the exception propagates past run_campaign (not swallowed, not SystemExit).
+    2. No misleading final-review: render_post_run_review_from_read_model is never called.
+    3. Cleanup: telemetry.shutdown() is called (the finally block executes).
+    """
+    _minimal_run_campaign_env(tmp_path, monkeypatch)
+
+    class _BoomError(RuntimeError):
+        pass
+
+    def _crash(*_a: object, **_k: object) -> bool:
+        raise _BoomError("storage device failed unexpectedly")
+
+    monkeypatch.setattr(runner, "_run_config", _crash)
+
+    render_calls: list[int] = []
+
+    def _must_not_render(**_kw: object) -> None:
+        render_calls.append(1)
+
+    monkeypatch.setattr(
+        runner.ui,
+        "render_post_run_review_from_read_model",
+        _must_not_render,
+    )
+
+    shutdown_calls: list[int] = []
+    monkeypatch.setattr(
+        "src.telemetry.shutdown",
+        lambda: shutdown_calls.append(1),
+    )
+
+    with caplog.at_level(logging.CRITICAL):
+        with pytest.raises(_BoomError, match="storage device failed"):
+            runner.run_campaign(
+                campaign_id="test_camp",
+                dry_run=False,
+                yolo_mode=False,
+                baseline_path=tmp_path / "baseline.yaml",
+            )
+
+    # Requirement 1: fails loud — _BoomError propagates, not swallowed or converted to SystemExit.
+    # (pytest.raises above already proves this)
+
+    # Requirement 2: no misleading final-review rendered.
+    assert not render_calls, "render_post_run_review_from_read_model must not be called for crash"
+
+    # Requirement 3: cleanup (finally block) executes — telemetry shutdown called.
+    assert shutdown_calls, "telemetry.shutdown() must be called even after fatal exception"
+
+    # Requirement 4: crash is logged at CRITICAL, not silently dropped.
+    assert "fatal error" in caplog.text.lower()

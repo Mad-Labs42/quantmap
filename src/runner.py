@@ -1370,6 +1370,76 @@ def _finalize_interrupt_post_run_review(
     )
 
 
+def _finalize_pre_measurement_abort_review(
+    *,
+    campaign_id: str,
+    effective_campaign_id: str,
+    lab_root: Path,
+    run_start_time: float,
+    run_plan: "RunPlan | None" = None,
+    telemetry_aborted_before_db: bool = False,
+    backend_policy_blocked: bool = False,
+    db_path: Path | None = None,
+    failure_detail: str | None = None,
+) -> None:
+    """Evaluate + project + render for pre-measurement aborts (no-op if both flags false).
+
+    Handles two early-exit paths that previously called sys.exit(1) directly:
+      - TelemetryStartupError: fired before DB is initialized; uses empty evidence.
+      - BackendExecutionPolicyError: fired after DB init but before any cycles;
+        reads the campaign row via db_path for structured status fields.
+
+    Caller must immediately call sys.exit(1) after this function returns.
+    This function must not call sys.exit itself — exit-code policy belongs to the caller.
+    """
+    if not telemetry_aborted_before_db and not backend_policy_blocked:
+        return
+
+    _model_identity = infer_model_identity()
+    _empty_evidence = CampaignEvidenceSummary()
+    _metrics = FinalReviewMetricsSnapshot(
+        elapsed_seconds=time.monotonic() - run_start_time,
+        run_mode=run_plan.run_mode if run_plan else None,
+    )
+
+    if telemetry_aborted_before_db:
+        # DB does not exist yet — construct inputs directly without a DB read.
+        _outcome_inputs = CampaignOutcomeInputs(
+            campaign_id=campaign_id,
+            effective_campaign_id=effective_campaign_id,
+            telemetry_aborted_before_db=True,
+            evidence=_empty_evidence,
+        )
+    else:
+        # DB exists with a campaign row written before the policy check.
+        assert db_path is not None, "db_path required for backend_policy_blocked abort"
+        _outcome_inputs = _build_campaign_outcome_inputs(
+            campaign_id=campaign_id,
+            effective_campaign_id=effective_campaign_id,
+            db_path=db_path,
+            measurement_evidence=_empty_evidence,
+            measurement_hints={},
+            backend_policy_blocked=True,
+        )
+
+    _campaign_outcome = evaluate_campaign_outcome(_outcome_inputs)
+    _review_read_model = project_final_review(
+        _campaign_outcome,
+        metrics=_metrics,
+        runner_failure_cause=failure_detail,
+        runner_failure_remediation=None,
+    )
+    _render_campaign_post_run_review_screen(
+        effective_campaign_id=effective_campaign_id,
+        read_model=_review_read_model,
+        lab_root=lab_root,
+        model_identity=_model_identity,
+        db_path=db_path or lab_root / "db" / "lab.sqlite",
+        yolo_mode=False,
+        artifact_ok_map={},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single cycle execution
 # ---------------------------------------------------------------------------
@@ -2411,6 +2481,20 @@ def run_campaign(
             f"[bold red]CAMPAIGN ABORTED — Telemetry startup check failed:[/bold red]\n{exc}"
         )
         logger.critical("Campaign aborted: %s", exc)
+        try:
+            _finalize_pre_measurement_abort_review(
+                campaign_id=campaign_id,
+                effective_campaign_id=effective_campaign_id,
+                lab_root=_effective_lab_root,
+                run_start_time=_run_start_time,
+                run_plan=run_plan,
+                telemetry_aborted_before_db=True,
+                failure_detail=str(exc),
+            )
+        except Exception as _rev_exc:
+            logger.warning(
+                "Pre-measurement abort review render failed (non-fatal): %s", _rev_exc
+            )
         sys.exit(1)
 
     # -------------------------------------------------------------------------
@@ -2698,6 +2782,21 @@ def run_campaign(
                 "[bold red]CAMPAIGN ABORTED — Backend execution policy blocked measurement startup:[/bold red]\n"
                 f"{exc}"
             )
+            try:
+                _finalize_pre_measurement_abort_review(
+                    campaign_id=campaign_id,
+                    effective_campaign_id=effective_campaign_id,
+                    lab_root=_effective_lab_root,
+                    run_start_time=_run_start_time,
+                    run_plan=run_plan,
+                    backend_policy_blocked=True,
+                    db_path=_eff_db_path,
+                    failure_detail=f"{reason}: {exc.assessment.diagnostic}",
+                )
+            except Exception as _rev_exc:
+                logger.warning(
+                    "Pre-measurement abort review render failed (non-fatal): %s", _rev_exc
+                )
             sys.exit(1)
 
         # Log campaign structure so the log file alone is sufficient to reconstruct
