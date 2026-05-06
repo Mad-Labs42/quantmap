@@ -3435,7 +3435,18 @@ def run_campaign(
             _status_conn.commit()
 
     except Exception as exc:
-        if analysis_ok:
+        if report_ok is True:
+            # Primary report was generated successfully; the exception came
+            # from post-report finalization (DB status update, artifact
+            # registration, etc.). Do not claim the report failed.
+            logger.error(
+                "Post-report finalization failed (primary report OK): %s",
+                exc,
+                exc_info=True,
+            )
+            failure_cause = "Post-report finalization failed; primary report was generated successfully."
+            failure_remediation = "Review logs and lab artifacts; measurement data and the primary report remain valid."
+        elif analysis_ok:
             logger.error("Report/export generation failed: %s", exc, exc_info=True)
             failure_cause = "Report/export generation failed."
             failure_remediation = "Review logs and lab artifacts; measurement data may remain valid in the database."
@@ -3443,34 +3454,60 @@ def run_campaign(
             logger.error("Post-campaign analysis failed: %s", exc, exc_info=True)
             failure_cause = "Post-campaign analysis failed."
             failure_remediation = "Run 'quantmap rescore' to retry analysis."
-        with get_connection(_eff_db_path) as _status_conn:
-            now_status = datetime.now(timezone.utc).isoformat()
-            if analysis_ok:
-                _status_conn.execute(
-                    """
-                    UPDATE campaigns
-                    SET report_status='failed',
-                        report_failed_at=?,
-                        report_failure_reason=?,
-                        status_model_version=1
-                    WHERE id=?
-                    """,
-                    (now_status, str(exc), effective_campaign_id),
-                )
-            else:
-                _status_conn.execute(
-                    """
-                    UPDATE campaigns
-                    SET analysis_status='failed',
-                        analysis_failed_at=?,
-                        analysis_failure_reason=?,
-                        report_status='skipped',
-                        status_model_version=1
-                    WHERE id=?
-                    """,
-                    (now_status, str(exc), effective_campaign_id),
-                )
-            _status_conn.commit()
+        try:
+            with get_connection(_eff_db_path) as _status_conn:
+                now_status = datetime.now(timezone.utc).isoformat()
+                if report_ok is True:
+                    # Primary report succeeded; post-report finalization failed.
+                    # Write partial so the evaluator sees honest status, not
+                    # a false primary-report-failed signal.
+                    _status_conn.execute(
+                        """
+                        UPDATE campaigns
+                        SET report_status='partial',
+                            report_failed_at=?,
+                            report_failure_reason=?,
+                            status_model_version=1
+                        WHERE id=?
+                        """,
+                        (now_status, str(exc), effective_campaign_id),
+                    )
+                elif analysis_ok:
+                    _status_conn.execute(
+                        """
+                        UPDATE campaigns
+                        SET report_status='failed',
+                            report_failed_at=?,
+                            report_failure_reason=?,
+                            status_model_version=1
+                        WHERE id=?
+                        """,
+                        (now_status, str(exc), effective_campaign_id),
+                    )
+                else:
+                    _status_conn.execute(
+                        """
+                        UPDATE campaigns
+                        SET analysis_status='failed',
+                            analysis_failed_at=?,
+                            analysis_failure_reason=?,
+                            report_status='skipped',
+                            status_model_version=1
+                        WHERE id=?
+                        """,
+                        (now_status, str(exc), effective_campaign_id),
+                    )
+                _status_conn.commit()
+        except Exception as _recovery_exc:
+            # Recovery DB write is best-effort. If it also fails (disk full,
+            # persistent DB lock, etc.), log and continue so the outcome/
+            # review/rendering code runs with the correct failure_cause.
+            logger.error(
+                "Could not persist failure status after inner-try exception "
+                "(non-fatal recovery write failed): %s",
+                _recovery_exc,
+                exc_info=True,
+            )
 
     _unrankable_count = (
         len(scores["unrankable"])
