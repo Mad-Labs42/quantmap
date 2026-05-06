@@ -290,6 +290,22 @@ def test_start_backend_session_passthrough_settings_env_error(monkeypatch: pytes
     assert type(exc_info.value) is SettingsEnvError
 
 
+def test_start_backend_session_passthrough_lazy_server_settings_env_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.backends import llamacpp
+
+    def _settings_env_fail():
+        raise SettingsEnvError("QUANTMAP_LAB_ROOT is not set")
+
+    monkeypatch.setattr(llamacpp, "_start_server_callable", _settings_env_fail)
+
+    ctx = lifecycle_module.start_backend_session(_request())
+    with pytest.raises(SettingsEnvError) as exc_info:
+        ctx.__enter__()
+    assert type(exc_info.value) is SettingsEnvError
+
+
 def test_start_backend_session_unknown_entry_error_becomes_unknown_startup_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
