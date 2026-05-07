@@ -520,6 +520,84 @@ def test_build_defrag_threshold_negative() -> None:
     assert configs[0]["server_args"][idx + 1] == "-1"
 
 
+def test_config_to_server_args_emits_reproducible_baseline_command() -> None:
+    mod = _campaign_definition_module()
+
+    args = mod._config_to_server_args(_baseline()["config"])
+
+    assert args == [
+        "-c",
+        "4096",
+        "-ngl",
+        "999",
+        "-fa",
+        "1",
+        "--jinja",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--threads-http",
+        "1",
+        "-ub",
+        "512",
+        "-b",
+        "2048",
+    ]
+
+
+def test_config_to_server_args_preserves_non_default_runtime_flags() -> None:
+    mod = _campaign_definition_module()
+    config = {
+        **_baseline()["config"],
+        "override_tensor": "blk.0=CPU",
+        "flash_attn": False,
+        "jinja": False,
+        "n_parallel": 4,
+        "kv_cache_type_k": "q8_0",
+        "kv_cache_type_v": "q4_0",
+        "mmap": False,
+        "mlock": True,
+        "cont_batching": False,
+        "defrag_thold": -1.0,
+    }
+
+    args = mod._config_to_server_args(config)
+
+    assert args == [
+        "-c",
+        "4096",
+        "-ngl",
+        "999",
+        "-ot",
+        "blk.0=CPU",
+        "-fa",
+        "0",
+        "--threads",
+        "16",
+        "--threads-batch",
+        "16",
+        "--threads-http",
+        "1",
+        "-ub",
+        "512",
+        "-b",
+        "2048",
+        "--parallel",
+        "4",
+        "--cache-type-k",
+        "q8_0",
+        "--cache-type-v",
+        "q4_0",
+        "--no-mmap",
+        "--mlock",
+        "--no-cont-batching",
+        "--defrag-thold",
+        "-1",
+    ]
+    assert "--jinja" not in args
+
+
 def test_build_interaction_scalar_value_raises() -> None:
     mod = _campaign_definition_module()
     baseline = _baseline()
