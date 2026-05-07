@@ -480,6 +480,55 @@ def test_runner_secondary_report_failure_normalizes_stale_report_ok_false(
         assert "Report generation: FAILED" not in out
 
 
+def test_runner_scoring_failure_preserves_report_not_attempted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Analysis failure happens before reporting; the final review must not blame reports."""
+    con = _minimal_run_campaign_env(tmp_path, monkeypatch)
+    _setup_valid_winner_evidence(monkeypatch)
+
+    def _score_boom(*_a: object, **_k: object) -> dict[str, Any]:
+        raise RuntimeError("scoring pipeline failed")
+
+    monkeypatch.setattr("src.score.score_campaign", _score_boom)
+
+    def _report_must_not_run(*_a: object, **_k: object) -> Path:
+        raise AssertionError("generate_report must not run after scoring failure")
+
+    monkeypatch.setattr("src.report.generate_report", _report_must_not_run)
+
+    outcome_inputs: list[CampaignOutcomeInputs] = []
+    _real_eval = runner.evaluate_campaign_outcome
+
+    def _wrap_eval(inp: CampaignOutcomeInputs) -> CampaignOutcome:
+        outcome_inputs.append(inp)
+        return _real_eval(inp)
+
+    monkeypatch.setattr(runner, "evaluate_campaign_outcome", _wrap_eval)
+    captured_models = _capture_read_models(monkeypatch, con)
+
+    with pytest.raises(SystemExit) as exc:
+        runner.run_campaign(
+            campaign_id="test_camp",
+            dry_run=False,
+            yolo_mode=False,
+            baseline_path=tmp_path / "baseline.yaml",
+        )
+
+    assert exc.value.code == 1
+    assert outcome_inputs
+    assert outcome_inputs[-1].report_ok is None
+    assert captured_models
+    rm = captured_models[-1]
+    assert rm.outcome_kind == CampaignOutcomeKind.FAILED
+    assert rm.report_generation_ok is None
+    assert rm.failure_cause and "Post-campaign analysis failed" in rm.failure_cause
+    buf = con.file
+    if hasattr(buf, "getvalue"):
+        out = buf.getvalue()
+        assert "Report generation: FAILED" not in out
+
+
 def test_runner_primary_report_failure_preserves_measurement_verdict(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -3184,7 +3184,7 @@ def run_campaign(
     # (not raw report_ok alone); report_ok remains evidence for the evaluator only.
     failure_cause = None
     failure_remediation = None
-    report_ok = False
+    report_ok: bool | None = None
     v2_ok = False
     meta_ok = False
     analysis_ok = False
