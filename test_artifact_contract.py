@@ -699,6 +699,46 @@ def test_artifact_registry_missing_status_skips_hashing(tmp_path, monkeypatch):
     assert row["verification_source"] == "producer_missing"
 
 
+def test_artifact_registry_complete_unreadable_file_records_failed_status(tmp_path):
+    """A claimed complete artifact must fail closed when the file cannot be hashed."""
+    from src import artifact_registry
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "missing-raw-telemetry.jsonl"
+
+    row = artifact_registry.register_artifact(
+        db_path,
+        campaign_id="unreadable_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.unreadable",
+        status="complete",
+    )
+
+    assert row["sha256"] is None
+    assert row["status"] == "failed"
+    assert row["error_message"] == (
+        "missing-raw-telemetry.jsonl missing or unreadable after generation"
+    )
+    assert row["verification_source"] == "producer_missing"
+
+    with get_connection(db_path) as conn:
+        db_row = conn.execute(
+            "SELECT sha256, status, error_message, verification_source FROM artifacts WHERE campaign_id=? AND artifact_type=?",
+            ("unreadable_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert db_row is not None
+    assert dict(db_row) == {
+        "sha256": None,
+        "status": "failed",
+        "error_message": "missing-raw-telemetry.jsonl missing or unreadable after generation",
+        "verification_source": "producer_missing",
+    }
+
+
 def test_artifact_registry_missing_table_is_benign_empty(tmp_path):
     """Artifact reads should treat an absent artifacts table as an empty inventory."""
     from src import artifact_registry
@@ -735,6 +775,29 @@ def test_artifact_registry_non_benign_read_failure_is_not_silently_normalized(
 
     with pytest.raises(artifact_registry.ArtifactRegistryReadError, match="database is locked"):
         artifact_registry.load_artifact_rows_by_type("locked_C01", tmp_path / "lab.sqlite")
+
+
+def test_artifact_registry_connection_failure_is_not_silently_normalized(
+    tmp_path,
+    monkeypatch,
+):
+    """Connection-level failures must not look like an empty artifact registry."""
+    from src import artifact_registry
+
+    def _raise_connection_failure(db_path):
+        raise sqlite3.DatabaseError("unable to open database file")
+
+    monkeypatch.setattr(
+        artifact_registry,
+        "get_connection",
+        _raise_connection_failure,
+    )
+
+    with pytest.raises(
+        artifact_registry.ArtifactRegistryReadError,
+        match="unable to open database file",
+    ):
+        artifact_registry.load_artifact_rows("unreadable_db_C01", tmp_path / "lab.sqlite")
 
 
 def test_report_campaign_artifact_index_uses_canonical_paths_and_flags_stale_rows(tmp_path):
