@@ -457,6 +457,46 @@ def test_artifact_registry_rejects_invalid_or_inconsistent_precomputed_sha(tmp_p
         )
 
 
+def test_artifact_registry_complete_missing_file_downgrades_to_failed(tmp_path):
+    """Complete producer claims must not hide a missing or unreadable artifact."""
+    from src.artifact_registry import register_artifact
+    from src.db import init_db, get_connection
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "reports" / "raw-telemetry.jsonl"
+
+    result = register_artifact(
+        db_path,
+        campaign_id="missing_complete_C01",
+        artifact_type=ARTIFACT_RAW_TELEMETRY,
+        path=artifact_path,
+        producer="test.complete",
+        status="complete",
+    )
+
+    assert result["status"] == "failed"
+    assert result["sha256"] is None
+    assert result["verification_source"] == "producer_missing"
+    assert "raw-telemetry.jsonl missing or unreadable" in result["error_message"]
+
+    with get_connection(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT status, sha256, verification_source, error_message
+            FROM artifacts
+            WHERE campaign_id=? AND artifact_type=?
+            """,
+            ("missing_complete_C01", ARTIFACT_RAW_TELEMETRY),
+        ).fetchone()
+
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["sha256"] is None
+    assert row["verification_source"] == "producer_missing"
+    assert "raw-telemetry.jsonl missing or unreadable" in row["error_message"]
+
+
 def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_path):
     """Canonical inventory should prefer DB paths and preserve missing states."""
     from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
@@ -517,6 +557,48 @@ def test_artifact_registry_builds_canonical_inventory_with_db_precedence(tmp_pat
     assert telemetry["exists"] is False
     assert telemetry["db_status"] is None
     assert telemetry["status"] == "not generated"
+
+
+def test_artifact_registry_inventory_reports_present_candidate_without_db_row(tmp_path):
+    """Inventory must surface generated files even before DB registration exists."""
+    from src.artifact_registry import ArtifactInventorySpec, build_artifact_inventory
+    from src.db import init_db
+
+    db_path = tmp_path / "lab.sqlite"
+    init_db(db_path)
+    artifact_path = tmp_path / "artifacts" / "reports" / "model" / "fallback_C01" / "run-reports.md"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text("# Run reports\n", encoding="utf-8")
+
+    inventory = build_artifact_inventory(
+        "fallback_C01",
+        db_path,
+        [
+            ArtifactInventorySpec(
+                artifact_type=ARTIFACT_RUN_REPORTS,
+                filename="run-reports.md",
+                role="run-level report bundle",
+                candidate_path=artifact_path,
+            )
+        ],
+    )
+
+    assert inventory == [
+        {
+            "artifact_type": ARTIFACT_RUN_REPORTS,
+            "filename": "run-reports.md",
+            "role": "run-level report bundle",
+            "path": str(artifact_path),
+            "exists": True,
+            "status": "file_present",
+            "db_status": None,
+            "sha256": None,
+            "verification_source": None,
+            "created_at": None,
+            "error_message": None,
+            "producer": None,
+        }
+    ]
 
 
 def test_campaign_artifact_dirs_use_canonical_model_scoped_paths(tmp_path):
