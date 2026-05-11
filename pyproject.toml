@@ -40,7 +40,7 @@ dev = [
 quantmap = "quantmap:main"
 
 [tool.setuptools]
-packages = ["src", "configs", "requests"]
+packages = ["src", "src.backends", "src.campaign_outcome", "configs", "requests"]
 py-modules = ["quantmap", "rescore"]
 include-package-data = true
 
